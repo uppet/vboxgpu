@@ -60,3 +60,18 @@ target_compile_definitions(vbox_host_cmd PRIVATE
     VK_USE_PLATFORM_WIN32_KHR
     SHADER_DIR="${SHADER_OUTPUT_DIR}"
 )
+
+# --- TCP server mode executable ---
+set(SERVER_SOURCES
+    src/main_server.cpp
+    src/vk_bootstrap.cpp
+    src/vn_decoder.cpp
+)
+
+add_executable(vbox_host_server ${SERVER_SOURCES})
+target_include_directories(vbox_host_server PRIVATE src)
+target_link_libraries(vbox_host_server PRIVATE Vulkan::Vulkan ws2_32)
+add_dependencies(vbox_host_server shaders)
+target_compile_definitions(vbox_host_server PRIVATE
+    VK_USE_PLATFORM_WIN32_KHR
+)
