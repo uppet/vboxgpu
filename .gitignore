@@ -3,3 +3,4 @@ build/
 .mcp.json
 .mcp.json~
 CLAUDE.local.md
+third_party/
