@@ -1,0 +1,5 @@
+build/
+*.spv
+.mcp.json
+.mcp.json~
+CLAUDE.local.md
