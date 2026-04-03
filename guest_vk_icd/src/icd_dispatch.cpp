@@ -121,8 +121,37 @@ static void VKAPI_CALL icd_vkGetPhysicalDeviceFeatures(VkPhysicalDevice, VkPhysi
 
 static void VKAPI_CALL icd_vkGetPhysicalDeviceFeatures2(VkPhysicalDevice pd, VkPhysicalDeviceFeatures2* p) {
     icd_vkGetPhysicalDeviceFeatures(pd, &p->features);
+    // Walk pNext and enable all boolean features in known structs
     VkBaseOutStructure* next = reinterpret_cast<VkBaseOutStructure*>(p->pNext);
-    while (next) { next = next->pNext; }
+    while (next) {
+        // Set all VkBool32 fields to VK_TRUE for feature structs.
+        // Feature structs have sType + pNext + VkBool32 fields.
+        // We memset the fields after the header to VK_TRUE.
+        switch (next->sType) {
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES:
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES:
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES:
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT:
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT:
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT: {
+            // Fill all VkBool32 fields after sType+pNext with VK_TRUE
+            VkBool32* bools = reinterpret_cast<VkBool32*>(
+                reinterpret_cast<uint8_t*>(next) + sizeof(VkBaseOutStructure));
+            // Conservatively fill up to 64 VkBool32 fields
+            // (largest feature struct has ~50 fields)
+            size_t structSize = 256; // safe upper bound
+            size_t headerSize = sizeof(VkBaseOutStructure);
+            size_t numBools = (structSize - headerSize) / sizeof(VkBool32);
+            if (numBools > 64) numBools = 64;
+            for (size_t i = 0; i < numBools; i++)
+                bools[i] = VK_TRUE;
+            break;
+        }
+        default:
+            break;
+        }
+        next = next->pNext;
+    }
 }
 
 static void VKAPI_CALL icd_vkGetPhysicalDeviceMemoryProperties(VkPhysicalDevice, VkPhysicalDeviceMemoryProperties* p) {
@@ -337,7 +366,7 @@ static VkResult VKAPI_CALL icd_vkEnumerateInstanceLayerProperties(uint32_t* pCou
 }
 
 static VkResult VKAPI_CALL icd_vkEnumerateInstanceVersion(uint32_t* pVersion) {
-    *pVersion = VK_API_VERSION_1_2;
+    *pVersion = VK_API_VERSION_1_3;
     return VK_SUCCESS;
 }
 
@@ -799,7 +828,7 @@ static VkResult VKAPI_CALL icd_vkGetPhysicalDeviceSurfacePresentModes2EXT(VkPhys
     return icd_vkGetPhysicalDeviceSurfacePresentModesKHR(pd, VK_NULL_HANDLE, pCount, p);
 }
 
-static VkResult VKAPI_CALL icd_vkReleaseSwapchainImagesEXT(VkDevice, const VkReleaseSwapchainImagesInfoEXT*) { return VK_SUCCESS; }
+static VkResult VKAPI_CALL icd_vkReleaseSwapchainImagesEXT(VkDevice, const void*) { return VK_SUCCESS; }
 
 // --- GetDeviceProcAddr ---
 

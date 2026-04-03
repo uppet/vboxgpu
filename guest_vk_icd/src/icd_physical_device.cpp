@@ -9,7 +9,7 @@
 void IcdState::initDefaults() {
     // --- Physical device properties ---
     memset(&physDeviceProps, 0, sizeof(physDeviceProps));
-    physDeviceProps.apiVersion = VK_API_VERSION_1_2;
+    physDeviceProps.apiVersion = VK_API_VERSION_1_3;
     physDeviceProps.driverVersion = 1;
     physDeviceProps.vendorID = 0x10DE; // NVIDIA
     physDeviceProps.deviceID = 0x2191; // GTX 1660 Ti
@@ -78,39 +78,8 @@ void IcdState::initDefaults() {
     limits.minStorageBufferOffsetAlignment = 16;
     limits.nonCoherentAtomSize = 64;
 
-    // --- Features ---
-    memset(&physDeviceFeatures, 0, sizeof(physDeviceFeatures));
-    physDeviceFeatures.robustBufferAccess = VK_TRUE;
-    physDeviceFeatures.fullDrawIndexUint32 = VK_TRUE;
-    physDeviceFeatures.imageCubeArray = VK_TRUE;
-    physDeviceFeatures.independentBlend = VK_TRUE;
-    physDeviceFeatures.geometryShader = VK_TRUE;
-    physDeviceFeatures.tessellationShader = VK_TRUE;
-    physDeviceFeatures.sampleRateShading = VK_TRUE;
-    physDeviceFeatures.dualSrcBlend = VK_TRUE;
-    physDeviceFeatures.logicOp = VK_TRUE;
-    physDeviceFeatures.multiDrawIndirect = VK_TRUE;
-    physDeviceFeatures.drawIndirectFirstInstance = VK_TRUE;
-    physDeviceFeatures.depthClamp = VK_TRUE;
-    physDeviceFeatures.depthBiasClamp = VK_TRUE;
-    physDeviceFeatures.fillModeNonSolid = VK_TRUE;
-    physDeviceFeatures.depthBounds = VK_TRUE;
-    physDeviceFeatures.wideLines = VK_TRUE;
-    physDeviceFeatures.largePoints = VK_TRUE;
-    physDeviceFeatures.multiViewport = VK_TRUE;
-    physDeviceFeatures.samplerAnisotropy = VK_TRUE;
-    physDeviceFeatures.textureCompressionBC = VK_TRUE;
-    physDeviceFeatures.occlusionQueryPrecise = VK_TRUE;
-    physDeviceFeatures.pipelineStatisticsQuery = VK_TRUE;
-    physDeviceFeatures.vertexPipelineStoresAndAtomics = VK_TRUE;
-    physDeviceFeatures.fragmentStoresAndAtomics = VK_TRUE;
-    physDeviceFeatures.shaderImageGatherExtended = VK_TRUE;
-    physDeviceFeatures.shaderStorageImageExtendedFormats = VK_TRUE;
-    physDeviceFeatures.shaderClipDistance = VK_TRUE;
-    physDeviceFeatures.shaderCullDistance = VK_TRUE;
-    physDeviceFeatures.shaderFloat64 = VK_TRUE;
-    physDeviceFeatures.shaderInt64 = VK_TRUE;
-    physDeviceFeatures.shaderInt16 = VK_TRUE;
+    // --- Features: enable everything (we're a proxy, Host GPU does the real work) ---
+    memset(&physDeviceFeatures, VK_TRUE, sizeof(physDeviceFeatures));
 
     // --- Memory properties ---
     memset(&memProps, 0, sizeof(memProps));

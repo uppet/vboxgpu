@@ -13,7 +13,14 @@ target_include_directories(vbox_vk_icd PRIVATE
     ${Vulkan_INCLUDE_DIRS}
 )
 
-# Output as vulkan-1.dll for direct DXVK loading
+# Output as vbox_vulkan.dll — loaded via VK_ICD_FILENAMES pointing to vbox_icd.json
 set_target_properties(vbox_vk_icd PROPERTIES
-    OUTPUT_NAME "vulkan-1"
+    OUTPUT_NAME "vbox_vulkan"
+)
+
+# Copy ICD JSON to build directory, to be used with VK_ICD_FILENAMES
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/vbox_icd.json"
+    "${CMAKE_CURRENT_BINARY_DIR}/vbox_icd.json"
+    COPYONLY
 )
