@@ -4,3 +4,4 @@ build/
 .mcp.json~
 CLAUDE.local.md
 third_party/
+test_env/

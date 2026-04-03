@@ -1,0 +1,3 @@
+add_executable(dx11_triangle src/main.cpp)
+target_link_libraries(dx11_triangle PRIVATE d3d11 d3dcompiler dxgi)
+target_compile_definitions(dx11_triangle PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
