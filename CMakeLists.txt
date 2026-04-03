@@ -8,3 +8,4 @@ find_package(Vulkan REQUIRED)
 
 add_subdirectory(host)
 add_subdirectory(guest_sim)
+add_subdirectory(guest_vk_icd)
