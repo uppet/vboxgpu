@@ -80,8 +80,8 @@ void VnDecoder::dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdS
     case VN_CMD_BRIDGE_AcquireNextImage:  handleBridgeAcquireNextImage(reader); break;
     case VN_CMD_BRIDGE_QueuePresent:      handleBridgeQueuePresent(reader); break;
     default:
-        OutputDebugStringA("[VnDecoder] Unknown command type\n");
-        error_ = true;
+        fprintf(stderr, "[Decoder] Unknown command type %u, skipping\n", cmdType);
+        // Don't set error — just skip (cmdSize-based framing will advance past it)
         break;
     }
 }
@@ -185,14 +185,30 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
     uint32_t vpWidth = r.readU32();
     uint32_t vpHeight = r.readU32();
 
+    VkShaderModule vertMod = lookup(shaderModules_, vertModuleId);
+    VkShaderModule fragMod = lookup(shaderModules_, fragModuleId);
+
+    fprintf(stderr, "[Decoder] CreatePipeline: id=%llu rp=%llu vert=%llu→%p frag=%llu→%p %ux%u\n",
+            (unsigned long long)pipelineId,
+            (unsigned long long)renderPassId,
+            (unsigned long long)vertModuleId, (void*)vertMod,
+            (unsigned long long)fragModuleId, (void*)fragMod,
+            vpWidth, vpHeight);
+
+    if (!vertMod || !fragMod || !lookup(renderPasses_, renderPassId)) {
+        fprintf(stderr, "[Decoder] CreatePipeline: missing shader or renderpass, skipping\n");
+        store(pipelines_, pipelineId, (VkPipeline)VK_NULL_HANDLE);
+        return;
+    }
+
     VkPipelineShaderStageCreateInfo stages[2]{};
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-    stages[0].module = lookup(shaderModules_, vertModuleId);
+    stages[0].module = vertMod;
     stages[0].pName = "main";
     stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    stages[1].module = lookup(shaderModules_, fragModuleId);
+    stages[1].module = fragMod;
     stages[1].pName = "main";
 
     VkPipelineVertexInputStateCreateInfo vertexInput{};

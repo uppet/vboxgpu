@@ -112,17 +112,17 @@ void IcdState::initDefaults() {
         ext.specVersion = 1;
         deviceExtensions.push_back(ext);
     };
-    // Report all extensions DXVK may request. We're a proxy — Host GPU handles them.
+    // Report all extensions DXVK may request, EXCEPT ones that cause
+    // DXVK to skip vkCreateShaderModule (shader_module_identifier).
     const char* extNames[] = {
-        // KHR extensions
+        // KHR core
         "VK_KHR_swapchain", "VK_KHR_maintenance1", "VK_KHR_maintenance2",
         "VK_KHR_maintenance3", "VK_KHR_maintenance4", "VK_KHR_maintenance5",
         "VK_KHR_maintenance6", "VK_KHR_maintenance7",
         "VK_KHR_create_renderpass2", "VK_KHR_image_format_list",
         "VK_KHR_sampler_mirror_clamp_to_edge", "VK_KHR_driver_properties",
         "VK_KHR_external_memory_win32", "VK_KHR_external_semaphore_win32",
-        "VK_KHR_load_store_op_none", "VK_KHR_pipeline_library",
-        "VK_KHR_present_id", "VK_KHR_present_wait",
+        "VK_KHR_load_store_op_none", "VK_KHR_present_id", "VK_KHR_present_wait",
         "VK_KHR_swapchain_mutable_format", "VK_KHR_win32_keyed_mutex",
         "VK_KHR_buffer_device_address", "VK_KHR_dynamic_rendering",
         "VK_KHR_depth_stencil_resolve", "VK_KHR_timeline_semaphore",
@@ -132,12 +132,12 @@ void IcdState::initDefaults() {
         "VK_KHR_copy_commands2", "VK_KHR_format_feature_flags2",
         "VK_KHR_shader_integer_dot_product", "VK_KHR_shader_non_semantic_info",
         "VK_KHR_zero_initialize_workgroup_memory",
-        // EXT extensions
+        // EXT
         "VK_EXT_transform_feedback", "VK_EXT_vertex_attribute_divisor",
         "VK_EXT_robustness2", "VK_EXT_attachment_feedback_loop_layout",
         "VK_EXT_conservative_rasterization", "VK_EXT_custom_border_color",
         "VK_EXT_depth_clip_enable", "VK_EXT_depth_bias_control",
-        "VK_EXT_extended_dynamic_state3", "VK_EXT_shader_module_identifier",
+        "VK_EXT_extended_dynamic_state3",
         "VK_EXT_shader_stencil_export", "VK_EXT_swapchain_colorspace",
         "VK_EXT_swapchain_maintenance1", "VK_EXT_descriptor_indexing",
         "VK_EXT_host_query_reset", "VK_EXT_sampler_filter_minmax",
@@ -149,7 +149,25 @@ void IcdState::initDefaults() {
         "VK_EXT_4444_formats", "VK_EXT_texel_buffer_alignment",
         "VK_EXT_ycbcr_2plane_444_formats", "VK_EXT_extended_dynamic_state",
         "VK_EXT_extended_dynamic_state2", "VK_EXT_shader_atomic_float",
-        // NV extensions
+        // Additional DXVK-referenced extensions
+        "VK_EXT_fragment_shader_interlock",
+        "VK_EXT_border_color_swizzle",
+        "VK_EXT_sample_locations",
+        "VK_EXT_multi_draw",
+        "VK_EXT_non_seamless_cube_map",
+        "VK_EXT_line_rasterization",
+        "VK_EXT_pageable_device_local_memory",
+        "VK_EXT_memory_budget", "VK_EXT_memory_priority",
+        "VK_EXT_mesh_shader",
+        "VK_EXT_hdr_metadata",
+        "VK_EXT_full_screen_exclusive",
+        "VK_EXT_descriptor_buffer",
+        "VK_AMD_shader_fragment_mask",
+        "VK_KHR_shader_float_controls2",
+        "VK_KHR_shader_subgroup_uniform_control_flow",
+        "VK_EXT_graphics_pipeline_library", "VK_KHR_pipeline_library",
+        "VK_EXT_shader_module_identifier",
+        // NV
         "VK_NV_descriptor_pool_overallocation", "VK_NV_low_latency2",
         "VK_NV_raw_access_chains", "VK_NVX_binary_import", "VK_NVX_image_view_handle",
     };

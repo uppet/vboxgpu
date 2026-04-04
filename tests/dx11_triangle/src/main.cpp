@@ -109,7 +109,7 @@ int main(int argc, char* argv[]) {
 
     HRESULT hr = D3D11CreateDeviceAndSwapChain(
         nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-        D3D11_CREATE_DEVICE_DEBUG,
+        0, // no debug flag — DXVK doesn't support D3D debug layer
         nullptr, 0, D3D11_SDK_VERSION,
         &scd, &swapchain, &device, &featureLevel, &ctx);
 

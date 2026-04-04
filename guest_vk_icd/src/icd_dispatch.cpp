@@ -134,27 +134,22 @@ static void VKAPI_CALL icd_vkGetPhysicalDeviceFeatures2(VkPhysicalDevice pd, VkP
         // Set all VkBool32 fields to VK_TRUE for feature structs.
         // Feature structs have sType + pNext + VkBool32 fields.
         // We memset the fields after the header to VK_TRUE.
+        // Enable all boolean features for known feature structs
+        VkBool32* bools = reinterpret_cast<VkBool32*>(
+            reinterpret_cast<uint8_t*>(next) + sizeof(VkBaseOutStructure));
+        size_t numBools = 64; // safe upper bound
+
         switch (next->sType) {
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES:
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES:
-        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES:
-        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT:
-        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT:
-        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT: {
-            // Fill all VkBool32 fields after sType+pNext with VK_TRUE
-            VkBool32* bools = reinterpret_cast<VkBool32*>(
-                reinterpret_cast<uint8_t*>(next) + sizeof(VkBaseOutStructure));
-            // Conservatively fill up to 64 VkBool32 fields
-            // (largest feature struct has ~50 fields)
-            size_t structSize = 256; // safe upper bound
-            size_t headerSize = sizeof(VkBaseOutStructure);
-            size_t numBools = (structSize - headerSize) / sizeof(VkBool32);
-            if (numBools > 64) numBools = 64;
-            for (size_t i = 0; i < numBools; i++)
-                bools[i] = VK_TRUE;
+            for (size_t i = 0; i < numBools; i++) bools[i] = VK_TRUE;
             break;
-        }
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES:
+            for (size_t i = 0; i < numBools; i++) bools[i] = VK_TRUE;
+            break;
         default:
+            // For extension feature structs, enable all by default
+            for (size_t i = 0; i < numBools; i++) bools[i] = VK_TRUE;
             break;
         }
         next = next->pNext;
@@ -522,6 +517,17 @@ static VkResult VKAPI_CALL icd_vkCreatePipelineLayout(
 
 static void VKAPI_CALL icd_vkDestroyPipelineLayout(VkDevice, VkPipelineLayout, const VkAllocationCallbacks*) {}
 
+// Helper: find VkShaderModuleCreateInfo in pNext chain (used when shader_module_identifier is active)
+static const VkShaderModuleCreateInfo* findShaderModuleCreateInfo(const void* pNext) {
+    auto* base = reinterpret_cast<const VkBaseInStructure*>(pNext);
+    while (base) {
+        if (base->sType == VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO)
+            return reinterpret_cast<const VkShaderModuleCreateInfo*>(base);
+        base = base->pNext;
+    }
+    return nullptr;
+}
+
 static VkResult VKAPI_CALL icd_vkCreateGraphicsPipelines(
     VkDevice, VkPipelineCache, uint32_t count, const VkGraphicsPipelineCreateInfo* pInfos,
     const VkAllocationCallbacks*, VkPipeline* pPipelines)
@@ -531,11 +537,24 @@ static VkResult VKAPI_CALL icd_vkCreateGraphicsPipelines(
         pPipelines[i] = (VkPipeline)id;
 
         uint64_t vertMod = 0, fragMod = 0;
-        for (uint32_t s = 0; s < pInfos[i].stageCount; s++) {
-            if (pInfos[i].pStages[s].stage == VK_SHADER_STAGE_VERTEX_BIT)
-                vertMod = (uint64_t)pInfos[i].pStages[s].module;
-            if (pInfos[i].pStages[s].stage == VK_SHADER_STAGE_FRAGMENT_BIT)
-                fragMod = (uint64_t)pInfos[i].pStages[s].module;
+        if (pInfos[i].pStages) {
+            for (uint32_t s = 0; s < pInfos[i].stageCount; s++) {
+                uint64_t mod = (uint64_t)pInfos[i].pStages[s].module;
+
+                // If module is null, DXVK may pass SPIR-V via pNext (shader_module_identifier path)
+                if (!mod) {
+                    auto* smci = findShaderModuleCreateInfo(pInfos[i].pStages[s].pNext);
+                    if (smci && smci->codeSize > 0) {
+                        mod = g_icd.handles.alloc();
+                        g_icd.encoder.cmdCreateShaderModule(1, mod, smci->pCode, smci->codeSize);
+                    }
+                }
+
+                if (pInfos[i].pStages[s].stage == VK_SHADER_STAGE_VERTEX_BIT)
+                    vertMod = mod;
+                if (pInfos[i].pStages[s].stage == VK_SHADER_STAGE_FRAGMENT_BIT)
+                    fragMod = mod;
+            }
         }
 
         uint32_t w = 800, h = 600;
