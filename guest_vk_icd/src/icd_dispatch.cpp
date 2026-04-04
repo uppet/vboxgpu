@@ -16,16 +16,8 @@ struct DispatchableHandle {
     uint64_t id;
 };
 
-static std::unordered_map<void*, uint64_t> g_handleIdMap;
-static std::mutex g_handleMutex;
-
 static uint64_t toId(void* handle) {
     if (!handle) return 0;
-    // First try our internal map (for handles returned by us that loader wraps)
-    std::lock_guard<std::mutex> lock(g_handleMutex);
-    auto it = g_handleIdMap.find(handle);
-    if (it != g_handleIdMap.end()) return it->second;
-    // Fallback: try reading from our struct (works if loader didn't wrap)
     return reinterpret_cast<DispatchableHandle*>(handle)->id;
 }
 
@@ -33,16 +25,7 @@ static void* makeDispatchable(uint64_t id) {
     auto* h = new DispatchableHandle();
     h->loaderDisp = nullptr;
     h->id = id;
-    // Register in map
-    std::lock_guard<std::mutex> lock(g_handleMutex);
-    g_handleIdMap[h] = id;
     return h;
-}
-
-// Register an external handle (from loader) with our ID
-static void registerHandle(void* handle, uint64_t id) {
-    std::lock_guard<std::mutex> lock(g_handleMutex);
-    g_handleIdMap[handle] = id;
 }
 
 // Non-dispatchable handles: cast uint64_t directly
@@ -99,6 +82,9 @@ static void VKAPI_CALL icd_vkDestroyInstance(VkInstance instance, const VkAlloca
 static VkResult VKAPI_CALL icd_vkEnumeratePhysicalDevices(
     VkInstance, uint32_t* pCount, VkPhysicalDevice* pDevices)
 {
+    fprintf(stderr, "[ICD] vkEnumeratePhysicalDevices: pDevices=%p count=%u\n",
+            (void*)pDevices, pCount ? *pCount : 0);
+    fflush(stderr);
     if (!pDevices) { *pCount = 1; return VK_SUCCESS; }
     if (*pCount < 1) { *pCount = 1; return VK_INCOMPLETE; }
     static DispatchableHandle physDev = { nullptr, 1 };
@@ -109,17 +95,97 @@ static VkResult VKAPI_CALL icd_vkEnumeratePhysicalDevices(
 
 // --- Physical device queries ---
 static void VKAPI_CALL icd_vkGetPhysicalDeviceProperties(VkPhysicalDevice, VkPhysicalDeviceProperties* p) {
+    fprintf(stderr, "[ICD] vkGetPhysicalDeviceProperties\n"); fflush(stderr);
     *p = g_icd.physDeviceProps;
 }
 
 static void VKAPI_CALL icd_vkGetPhysicalDeviceProperties2(VkPhysicalDevice pd, VkPhysicalDeviceProperties2* p) {
+    fprintf(stderr, "[ICD] vkGetPhysicalDeviceProperties2\n"); fflush(stderr);
     icd_vkGetPhysicalDeviceProperties(pd, &p->properties);
-    // Walk pNext chain and zero-fill extension structs
+    // Walk pNext chain and fill known property structs
     VkBaseOutStructure* next = reinterpret_cast<VkBaseOutStructure*>(p->pNext);
     while (next) {
-        // For now, leave extension structs at their zero-initialized defaults
+        fprintf(stderr, "[ICD]   properties2 pNext sType=%u\n", next->sType); fflush(stderr);
+        switch (next->sType) {
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES: {
+            auto* dp = reinterpret_cast<VkPhysicalDeviceDriverProperties*>(next);
+            dp->driverID = VK_DRIVER_ID_NVIDIA_PROPRIETARY;
+            strncpy(dp->driverName, "VBox GPU Bridge", VK_MAX_DRIVER_NAME_SIZE);
+            strncpy(dp->driverInfo, "0.1.0", VK_MAX_DRIVER_INFO_SIZE);
+            dp->conformanceVersion = {1, 3, 0, 0};
+            break;
+        }
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES: {
+            auto* p11 = reinterpret_cast<VkPhysicalDeviceVulkan11Properties*>(next);
+            // Device UUID / LUID (needed for DXGI adapter matching)
+            memset(p11->deviceUUID, 0x42, VK_UUID_SIZE);
+            memset(p11->driverUUID, 0x43, VK_UUID_SIZE);
+            memset(p11->deviceLUID, 0, VK_LUID_SIZE);
+            // Set a fake LUID that DXVK can use
+            p11->deviceLUID[0] = 0x0B;
+            p11->deviceLUID[1] = 0xBD;
+            p11->deviceLUID[2] = 0x25;
+            p11->deviceLUID[3] = 0x45;
+            p11->deviceLUIDValid = VK_TRUE;
+            p11->deviceNodeMask = 1;
+            p11->subgroupSize = 32;
+            p11->subgroupSupportedStages = VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_COMPUTE_BIT;
+            p11->subgroupSupportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT |
+                VK_SUBGROUP_FEATURE_VOTE_BIT | VK_SUBGROUP_FEATURE_ARITHMETIC_BIT |
+                VK_SUBGROUP_FEATURE_BALLOT_BIT | VK_SUBGROUP_FEATURE_SHUFFLE_BIT;
+            p11->subgroupQuadOperationsInAllStages = VK_TRUE;
+            p11->maxMultiviewViewCount = 6;
+            p11->maxMultiviewInstanceIndex = 134217727;
+            p11->pointClippingBehavior = VK_POINT_CLIPPING_BEHAVIOR_ALL_CLIP_PLANES;
+            p11->protectedNoFault = VK_FALSE;
+            break;
+        }
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES: {
+            auto* p12 = reinterpret_cast<VkPhysicalDeviceVulkan12Properties*>(next);
+            p12->driverID = VK_DRIVER_ID_NVIDIA_PROPRIETARY;
+            strncpy(p12->driverName, "VBox GPU Bridge", VK_MAX_DRIVER_NAME_SIZE);
+            strncpy(p12->driverInfo, "0.1.0", VK_MAX_DRIVER_INFO_SIZE);
+            p12->denormBehaviorIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL;
+            p12->roundingModeIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL;
+            p12->maxUpdateAfterBindDescriptorsInAllPools = 1048576;
+            p12->maxPerStageDescriptorUpdateAfterBindSamplers = 1048576;
+            p12->maxPerStageDescriptorUpdateAfterBindUniformBuffers = 15;
+            p12->maxPerStageDescriptorUpdateAfterBindStorageBuffers = 1048576;
+            p12->maxPerStageDescriptorUpdateAfterBindSampledImages = 1048576;
+            p12->maxPerStageDescriptorUpdateAfterBindStorageImages = 1048576;
+            p12->maxPerStageDescriptorUpdateAfterBindInputAttachments = 1048576;
+            p12->maxPerStageUpdateAfterBindResources = 1048576;
+            p12->maxDescriptorSetUpdateAfterBindSamplers = 1048576;
+            p12->maxDescriptorSetUpdateAfterBindUniformBuffers = 90;
+            p12->maxDescriptorSetUpdateAfterBindStorageBuffers = 1048576;
+            p12->maxDescriptorSetUpdateAfterBindSampledImages = 1048576;
+            p12->maxDescriptorSetUpdateAfterBindStorageImages = 1048576;
+            p12->maxDescriptorSetUpdateAfterBindInputAttachments = 256;
+            p12->maxTimelineSemaphoreValueDifference = UINT64_MAX;
+            break;
+        }
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES: {
+            auto* p13 = reinterpret_cast<VkPhysicalDeviceVulkan13Properties*>(next);
+            p13->minSubgroupSize = 32;
+            p13->maxSubgroupSize = 32;
+            p13->maxComputeWorkgroupSubgroups = 32;
+            p13->requiredSubgroupSizeStages = VK_SHADER_STAGE_COMPUTE_BIT;
+            p13->maxInlineUniformBlockSize = 256;
+            p13->maxPerStageDescriptorInlineUniformBlocks = 4;
+            p13->maxDescriptorSetInlineUniformBlocks = 4;
+            p13->maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks = 4;
+            p13->maxDescriptorSetUpdateAfterBindInlineUniformBlocks = 4;
+            p13->maxInlineUniformTotalSize = 4096;
+            p13->maxBufferSize = 2ull * 1024 * 1024 * 1024;
+            break;
+        }
+        default:
+            // Don't touch unknown structs — filling them may corrupt pointer fields
+            break;
+        }
         next = next->pNext;
     }
+    fprintf(stderr, "[ICD] vkGetPhysicalDeviceProperties2 DONE\n"); fflush(stderr);
 }
 
 static void VKAPI_CALL icd_vkGetPhysicalDeviceFeatures(VkPhysicalDevice, VkPhysicalDeviceFeatures* p) {
@@ -127,6 +193,7 @@ static void VKAPI_CALL icd_vkGetPhysicalDeviceFeatures(VkPhysicalDevice, VkPhysi
 }
 
 static void VKAPI_CALL icd_vkGetPhysicalDeviceFeatures2(VkPhysicalDevice pd, VkPhysicalDeviceFeatures2* p) {
+    fprintf(stderr, "[ICD] vkGetPhysicalDeviceFeatures2\n"); fflush(stderr);
     icd_vkGetPhysicalDeviceFeatures(pd, &p->features);
     // Walk pNext and enable all boolean features in known structs
     VkBaseOutStructure* next = reinterpret_cast<VkBaseOutStructure*>(p->pNext);
@@ -134,34 +201,51 @@ static void VKAPI_CALL icd_vkGetPhysicalDeviceFeatures2(VkPhysicalDevice pd, VkP
         // Set all VkBool32 fields to VK_TRUE for feature structs.
         // Feature structs have sType + pNext + VkBool32 fields.
         // We memset the fields after the header to VK_TRUE.
-        // Enable all boolean features for known feature structs
+        // Enable all boolean features for known feature structs.
+        // CAREFUL: only fill fields we know exist — don't overwrite past struct end.
         VkBool32* bools = reinterpret_cast<VkBool32*>(
             reinterpret_cast<uint8_t*>(next) + sizeof(VkBaseOutStructure));
-        size_t numBools = 64; // safe upper bound
 
+        // Map sType → number of VkBool32 fields after the header
+        size_t numBools = 0;
         switch (next->sType) {
-        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES:
-        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES:
-            for (size_t i = 0; i < numBools; i++) bools[i] = VK_TRUE;
-            break;
-        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES:
-            for (size_t i = 0; i < numBools; i++) bools[i] = VK_TRUE;
-            break;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES: numBools = 12; break;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES: numBools = 47; break;
+        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES: numBools = 15; break;
         default:
-            // For extension feature structs, enable all by default
-            for (size_t i = 0; i < numBools; i++) bools[i] = VK_TRUE;
+            // For extension feature structs, conservatively fill 8 bools
+            // (most have 1-4 features; 8 covers all common ones)
+            numBools = 8;
             break;
         }
+        for (size_t i = 0; i < numBools; i++) bools[i] = VK_TRUE;
         next = next->pNext;
     }
+    fprintf(stderr, "[ICD] vkGetPhysicalDeviceFeatures2 DONE\n"); fflush(stderr);
 }
 
 static void VKAPI_CALL icd_vkGetPhysicalDeviceMemoryProperties(VkPhysicalDevice, VkPhysicalDeviceMemoryProperties* p) {
+    fprintf(stderr, "[ICD] vkGetPhysicalDeviceMemoryProperties\n"); fflush(stderr);
     *p = g_icd.memProps;
 }
 
 static void VKAPI_CALL icd_vkGetPhysicalDeviceMemoryProperties2(VkPhysicalDevice pd, VkPhysicalDeviceMemoryProperties2* p) {
+    fprintf(stderr, "[ICD] vkGetPhysicalDeviceMemoryProperties2\n"); fflush(stderr);
     icd_vkGetPhysicalDeviceMemoryProperties(pd, &p->memoryProperties);
+    // Handle pNext: VkPhysicalDeviceMemoryBudgetPropertiesEXT
+    VkBaseOutStructure* next = reinterpret_cast<VkBaseOutStructure*>(p->pNext);
+    while (next) {
+        fprintf(stderr, "[ICD]   memprops2 pNext sType=%u\n", next->sType); fflush(stderr);
+        if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT) {
+            auto* budget = reinterpret_cast<VkPhysicalDeviceMemoryBudgetPropertiesEXT*>(next);
+            budget->heapBudget[0] = 4ull * 1024 * 1024 * 1024;
+            budget->heapUsage[0] = 0;
+            budget->heapBudget[1] = 8ull * 1024 * 1024 * 1024;
+            budget->heapUsage[1] = 0;
+        }
+        next = next->pNext;
+    }
+    fprintf(stderr, "[ICD] vkGetPhysicalDeviceMemoryProperties2 DONE\n"); fflush(stderr);
 }
 
 static void VKAPI_CALL icd_vkGetPhysicalDeviceQueueFamilyProperties(
@@ -305,8 +389,9 @@ static VkResult VKAPI_CALL icd_vkCreateDevice(
 
     uint64_t id = g_icd.handles.alloc();
     *pDevice = reinterpret_cast<VkDevice>(makeDispatchable(id));
-    fprintf(stderr, "[ICD] vkCreateDevice: id=%llu, extensions=%u\n",
-            (unsigned long long)id, pInfo ? pInfo->enabledExtensionCount : 0);
+    fprintf(stderr, "[ICD] vkCreateDevice: id=%llu handle=%p extensions=%u\n",
+            (unsigned long long)id, (void*)*pDevice, pInfo ? pInfo->enabledExtensionCount : 0);
+    fflush(stderr);
     return VK_SUCCESS;
 }
 
@@ -314,14 +399,19 @@ static void VKAPI_CALL icd_vkDestroyDevice(VkDevice device, const VkAllocationCa
     if (device) delete reinterpret_cast<DispatchableHandle*>(device);
 }
 
-static void VKAPI_CALL icd_vkGetDeviceQueue(VkDevice, uint32_t, uint32_t, VkQueue* pQueue) {
-    static DispatchableHandle queueHandle = { nullptr, 2 }; // H_QUEUE = 2
+static void VKAPI_CALL icd_vkGetDeviceQueue(VkDevice, uint32_t family, uint32_t idx, VkQueue* pQueue) {
+    static DispatchableHandle queueHandle = { nullptr, 2 };
     *pQueue = reinterpret_cast<VkQueue>(&queueHandle);
+    fprintf(stderr, "[ICD] vkGetDeviceQueue: family=%u idx=%u → %p\n", family, idx, (void*)*pQueue);
+    fflush(stderr);
 }
 
-static void VKAPI_CALL icd_vkGetDeviceQueue2(VkDevice, const VkDeviceQueueInfo2*, VkQueue* pQueue) {
+static void VKAPI_CALL icd_vkGetDeviceQueue2(VkDevice, const VkDeviceQueueInfo2* pInfo, VkQueue* pQueue) {
     static DispatchableHandle queueHandle2 = { nullptr, 2 };
     *pQueue = reinterpret_cast<VkQueue>(&queueHandle2);
+    fprintf(stderr, "[ICD] vkGetDeviceQueue2: family=%u idx=%u → %p\n",
+            pInfo ? pInfo->queueFamilyIndex : 0, pInfo ? pInfo->queueIndex : 0, (void*)*pQueue);
+    fflush(stderr);
 }
 
 // Vulkan 1.2+ device functions DXVK needs
@@ -1174,9 +1264,11 @@ static const FuncEntry g_funcTable[] = {
 
 #undef ENTRY
 
-// Generic stub that returns VK_SUCCESS (0) for any unimplemented function.
-// This prevents segfaults when DXVK calls optional functions.
-static VkResult VKAPI_CALL icd_generic_stub() { return VK_SUCCESS; }
+// Generic stub — log when called so we know which unimplemented function DXVK invokes
+static VkResult VKAPI_CALL icd_generic_stub() {
+    fprintf(stderr, "[ICD] !!! generic_stub called !!!\n");
+    return VK_SUCCESS;
+}
 
 static PFN_vkVoidFunction lookupFunc(const char* pName) {
     for (const auto& e : g_funcTable) {

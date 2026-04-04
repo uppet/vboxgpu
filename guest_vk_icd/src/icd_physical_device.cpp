@@ -78,8 +78,11 @@ void IcdState::initDefaults() {
     limits.minStorageBufferOffsetAlignment = 16;
     limits.nonCoherentAtomSize = 64;
 
-    // --- Features: enable everything (we're a proxy, Host GPU does the real work) ---
-    memset(&physDeviceFeatures, VK_TRUE, sizeof(physDeviceFeatures));
+    // --- Features: enable everything ---
+    // Set every VkBool32 field to VK_TRUE (=1), not 0x01010101 from memset
+    VkBool32* featureBools = reinterpret_cast<VkBool32*>(&physDeviceFeatures);
+    size_t numFeatures = sizeof(physDeviceFeatures) / sizeof(VkBool32);
+    for (size_t i = 0; i < numFeatures; i++) featureBools[i] = VK_TRUE;
 
     // --- Memory properties ---
     memset(&memProps, 0, sizeof(memProps));
