@@ -25,12 +25,13 @@ bool VnDecoder::execute(const uint8_t* data, size_t size) {
 
         dispatch(cmdType, reader, cmdSize);
 
-        // Advance reader to exactly the next command based on cmdSize
-        // Layout: [cmdType:4][cmdSize:4][payload...]
-        // cmdSize = total bytes from cmdType to end of payload
+        // Ensure reader is at the correct position for the next command.
+        // Only adjust if handler read LESS than expected (e.g. unknown command skipped).
+        // If handler read exactly right, reader is already positioned correctly.
         size_t cmdStartOff = cmdStart - data;
         size_t nextOff = cmdStartOff + cmdSize;
-        if (nextOff <= size) {
+        size_t currentOff = reader.currentPtr() - data;
+        if (currentOff != nextOff && nextOff <= size) {
             reader.setPos(nextOff);
         }
     }
@@ -310,7 +311,11 @@ void VnDecoder::handleCreateCommandPool(VnStreamReader& r) {
     info.queueFamilyIndex = queueFamily;
 
     VkCommandPool pool;
-    if (vkCreateCommandPool(device_, &info, nullptr, &pool) != VK_SUCCESS) {
+    VkResult vr = vkCreateCommandPool(device_, &info, nullptr, &pool);
+    fprintf(stderr, "[Decoder] CreateCmdPool result=%d pool=%p\n", (int)vr, (void*)pool);
+    fflush(stderr);
+    if (vr != VK_SUCCESS) {
+        fprintf(stderr, "[Decoder] CreateCmdPool FAILED\n");
         error_ = true;
         return;
     }
@@ -341,7 +346,11 @@ void VnDecoder::handleAllocateCommandBuffers(VnStreamReader& r) {
     info.commandBufferCount = 1;
 
     VkCommandBuffer cb;
-    if (vkAllocateCommandBuffers(device_, &info, &cb) != VK_SUCCESS) {
+    VkResult vr = vkAllocateCommandBuffers(device_, &info, &cb);
+    fprintf(stderr, "[Decoder] AllocCmdBuf result=%d cb=%p\n", (int)vr, (void*)cb);
+    fflush(stderr);
+    if (vr != VK_SUCCESS) {
+        fprintf(stderr, "[Decoder] AllocCmdBuf FAILED\n");
         error_ = true;
         return;
     }
@@ -353,8 +362,9 @@ void VnDecoder::handleAllocateCommandBuffers(VnStreamReader& r) {
 void VnDecoder::handleBeginCommandBuffer(VnStreamReader& r) {
     uint64_t cbId = r.readU64();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
-    fprintf(stderr, "[Decoder] BeginCmdBuf: cb=%llu→%p\n",
-            (unsigned long long)cbId, (void*)cb);
+    fprintf(stderr, "[Decoder] BeginCmdBuf: cbId=0x%llx → cb=%p (map size=%zu)\n",
+            (unsigned long long)cbId, (void*)cb, commandBuffers_.size());
+    fflush(stderr);
     if (!cb) { error_ = true; return; }
 
     vkResetCommandBuffer(cb, 0);
