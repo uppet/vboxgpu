@@ -9,8 +9,7 @@
 void IcdState::initDefaults() {
     // --- Physical device properties ---
     memset(&physDeviceProps, 0, sizeof(physDeviceProps));
-    // Vulkan 1.2 — DXVK 2.3.x works with 1.2, DXVK 2.7+ needs 1.3
-    physDeviceProps.apiVersion = VK_API_VERSION_1_2;
+    physDeviceProps.apiVersion = VK_API_VERSION_1_3;
     physDeviceProps.driverVersion = 1;
     physDeviceProps.vendorID = 0x10DE; // NVIDIA
     physDeviceProps.deviceID = 0x2191; // GTX 1660 Ti
