@@ -208,15 +208,13 @@ static void VKAPI_CALL icd_vkGetPhysicalDeviceFeatures2(VkPhysicalDevice pd, VkP
 
         // Map sType → number of VkBool32 fields after the header
         size_t numBools = 0;
+        // Determine struct size (number of VkBool32 fields after header)
+        // Err on the side of filling more — DXVK expects all features to be present
         switch (next->sType) {
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES: numBools = 12; break;
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES: numBools = 47; break;
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES: numBools = 15; break;
-        default:
-            // For extension feature structs, conservatively fill 8 bools
-            // (most have 1-4 features; 8 covers all common ones)
-            numBools = 8;
-            break;
+        default: numBools = 32; break; // generous for extension structs
         }
         for (size_t i = 0; i < numBools; i++) bools[i] = VK_TRUE;
         next = next->pNext;
@@ -526,7 +524,7 @@ static VkResult VKAPI_CALL icd_vkEnumerateInstanceLayerProperties(uint32_t* pCou
 }
 
 static VkResult VKAPI_CALL icd_vkEnumerateInstanceVersion(uint32_t* pVersion) {
-    *pVersion = VK_API_VERSION_1_3;
+    *pVersion = VK_API_VERSION_1_2;
     return VK_SUCCESS;
 }
 
