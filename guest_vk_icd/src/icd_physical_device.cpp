@@ -9,7 +9,7 @@
 void IcdState::initDefaults() {
     // --- Physical device properties ---
     memset(&physDeviceProps, 0, sizeof(physDeviceProps));
-    // Use Vulkan 1.2 for compatibility with DXVK 2.3.x (doesn't require 1.3)
+    // Vulkan 1.2 — DXVK 2.3.x works with 1.2, DXVK 2.7+ needs 1.3
     physDeviceProps.apiVersion = VK_API_VERSION_1_2;
     physDeviceProps.driverVersion = 1;
     physDeviceProps.vendorID = 0x10DE; // NVIDIA

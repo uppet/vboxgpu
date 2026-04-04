@@ -102,51 +102,23 @@ static void VKAPI_CALL icd_vkGetPhysicalDeviceProperties(VkPhysicalDevice, VkPhy
 static void VKAPI_CALL icd_vkGetPhysicalDeviceProperties2(VkPhysicalDevice pd, VkPhysicalDeviceProperties2* p) {
     fprintf(stderr, "[ICD] vkGetPhysicalDeviceProperties2\n"); fflush(stderr);
     icd_vkGetPhysicalDeviceProperties(pd, &p->properties);
-    // Walk pNext chain and fill known property structs
+    // Carefully fill only the fields DXVK absolutely needs — leave everything else zero.
     VkBaseOutStructure* next = reinterpret_cast<VkBaseOutStructure*>(p->pNext);
     while (next) {
-        fprintf(stderr, "[ICD]   properties2 pNext sType=%u\n", next->sType); fflush(stderr);
         switch (next->sType) {
-        case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES: {
-            auto* dp = reinterpret_cast<VkPhysicalDeviceDriverProperties*>(next);
-            dp->driverID = VK_DRIVER_ID_NVIDIA_PROPRIETARY;
-            strncpy(dp->driverName, "VBox GPU Bridge", VK_MAX_DRIVER_NAME_SIZE);
-            strncpy(dp->driverInfo, "0.1.0", VK_MAX_DRIVER_INFO_SIZE);
-            dp->conformanceVersion = {1, 3, 0, 0};
-            break;
-        }
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES: {
             auto* p11 = reinterpret_cast<VkPhysicalDeviceVulkan11Properties*>(next);
-            // Device UUID / LUID (needed for DXGI adapter matching)
-            memset(p11->deviceUUID, 0x42, VK_UUID_SIZE);
-            memset(p11->driverUUID, 0x43, VK_UUID_SIZE);
-            memset(p11->deviceLUID, 0, VK_LUID_SIZE);
-            // Set a fake LUID that DXVK can use
-            p11->deviceLUID[0] = 0x0B;
-            p11->deviceLUID[1] = 0xBD;
-            p11->deviceLUID[2] = 0x25;
-            p11->deviceLUID[3] = 0x45;
-            p11->deviceLUIDValid = VK_TRUE;
-            p11->deviceNodeMask = 1;
             p11->subgroupSize = 32;
             p11->subgroupSupportedStages = VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_COMPUTE_BIT;
-            p11->subgroupSupportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT |
-                VK_SUBGROUP_FEATURE_VOTE_BIT | VK_SUBGROUP_FEATURE_ARITHMETIC_BIT |
-                VK_SUBGROUP_FEATURE_BALLOT_BIT | VK_SUBGROUP_FEATURE_SHUFFLE_BIT;
+            p11->subgroupSupportedOperations = 0xFF; // all basic ops
             p11->subgroupQuadOperationsInAllStages = VK_TRUE;
-            p11->maxMultiviewViewCount = 6;
-            p11->maxMultiviewInstanceIndex = 134217727;
-            p11->pointClippingBehavior = VK_POINT_CLIPPING_BEHAVIOR_ALL_CLIP_PLANES;
-            p11->protectedNoFault = VK_FALSE;
             break;
         }
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES: {
             auto* p12 = reinterpret_cast<VkPhysicalDeviceVulkan12Properties*>(next);
             p12->driverID = VK_DRIVER_ID_NVIDIA_PROPRIETARY;
             strncpy(p12->driverName, "VBox GPU Bridge", VK_MAX_DRIVER_NAME_SIZE);
-            strncpy(p12->driverInfo, "0.1.0", VK_MAX_DRIVER_INFO_SIZE);
-            p12->denormBehaviorIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL;
-            p12->roundingModeIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL;
+            p12->maxTimelineSemaphoreValueDifference = UINT64_MAX;
             p12->maxUpdateAfterBindDescriptorsInAllPools = 1048576;
             p12->maxPerStageDescriptorUpdateAfterBindSamplers = 1048576;
             p12->maxPerStageDescriptorUpdateAfterBindUniformBuffers = 15;
@@ -161,7 +133,6 @@ static void VKAPI_CALL icd_vkGetPhysicalDeviceProperties2(VkPhysicalDevice pd, V
             p12->maxDescriptorSetUpdateAfterBindSampledImages = 1048576;
             p12->maxDescriptorSetUpdateAfterBindStorageImages = 1048576;
             p12->maxDescriptorSetUpdateAfterBindInputAttachments = 256;
-            p12->maxTimelineSemaphoreValueDifference = UINT64_MAX;
             break;
         }
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES: {
@@ -169,7 +140,6 @@ static void VKAPI_CALL icd_vkGetPhysicalDeviceProperties2(VkPhysicalDevice pd, V
             p13->minSubgroupSize = 32;
             p13->maxSubgroupSize = 32;
             p13->maxComputeWorkgroupSubgroups = 32;
-            p13->requiredSubgroupSizeStages = VK_SHADER_STAGE_COMPUTE_BIT;
             p13->maxInlineUniformBlockSize = 256;
             p13->maxPerStageDescriptorInlineUniformBlocks = 4;
             p13->maxDescriptorSetInlineUniformBlocks = 4;
@@ -180,7 +150,7 @@ static void VKAPI_CALL icd_vkGetPhysicalDeviceProperties2(VkPhysicalDevice pd, V
             break;
         }
         default:
-            // Don't touch unknown structs — filling them may corrupt pointer fields
+            // Leave unknown pNext structs untouched (zero-initialized by DXVK)
             break;
         }
         next = next->pNext;
