@@ -7,6 +7,9 @@
 
 IcdState g_icd;
 
+// Lock guard for encoder — DXVK is multithreaded, encoder is not thread-safe
+#define ENC_LOCK std::lock_guard<std::mutex> _enc_lock(g_icd.encoderMutex)
+
 // --- Crash dump generation ---
 #include <dbghelp.h>
 #pragma comment(lib, "dbghelp.lib")
@@ -71,10 +74,11 @@ bool IcdState::connectToHost(const char* host, uint16_t port) {
 }
 
 bool IcdState::sendAndRecv(uint32_t* imageIndexOut) {
-    encoder.cmdEndOfStream();
+    std::lock_guard<std::mutex> lock(encoder.mutex_);
+    encoder.cmdEndOfStreamUnlocked(); // called with lock held
     bool ok = transport.send(encoder.data(), encoder.size());
-    // Reset encoder for next batch
-    encoder = VnEncoder();
+    // Reset encoder for next batch (keep mutex_)
+    encoder.w_ = VnStreamWriter();
     if (!ok) return false;
 
     // Receive host response

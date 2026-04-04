@@ -6,15 +6,21 @@
 
 #include "vn_command.h"
 #include "vn_stream.h"
+#include <mutex>
 
 class VnEncoder {
 public:
+    // Lock for thread safety (DXVK is multithreaded)
+    std::mutex mutex_;
+    // Helper: lock must be held for entire beginCommand→endCommand sequence
+    #define ENC_GUARD std::lock_guard<std::mutex> _lk(mutex_)
     // --- Instance / Device ---
 
     void cmdCreateRenderPass(uint64_t deviceId, uint64_t renderPassId,
                              uint32_t attachmentCount, const uint32_t* formats,
                              const uint32_t* loadOps, const uint32_t* storeOps,
                              const uint32_t* initialLayouts, const uint32_t* finalLayouts) {
+        ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCreateRenderPass);
         w_.writeU64(deviceId);
         w_.writeU64(renderPassId);
@@ -31,6 +37,7 @@ public:
 
     void cmdCreateShaderModule(uint64_t deviceId, uint64_t moduleId,
                                const uint32_t* spirvCode, size_t spirvSizeBytes) {
+        ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCreateShaderModule);
         w_.writeU64(deviceId);
         w_.writeU64(moduleId);
@@ -40,6 +47,7 @@ public:
     }
 
     void cmdCreatePipelineLayout(uint64_t deviceId, uint64_t layoutId) {
+        ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCreatePipelineLayout);
         w_.writeU64(deviceId);
         w_.writeU64(layoutId);
@@ -50,6 +58,7 @@ public:
                                    uint64_t renderPassId, uint64_t layoutId,
                                    uint64_t vertModuleId, uint64_t fragModuleId,
                                    uint32_t viewportWidth, uint32_t viewportHeight) {
+        ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCreateGraphicsPipelines);
         w_.writeU64(deviceId);
         w_.writeU64(pipelineId);
@@ -65,6 +74,7 @@ public:
     void cmdCreateFramebuffer(uint64_t deviceId, uint64_t framebufferId,
                               uint64_t renderPassId, uint64_t imageViewId,
                               uint32_t width, uint32_t height) {
+        ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCreateFramebuffer);
         w_.writeU64(deviceId);
         w_.writeU64(framebufferId);
@@ -76,6 +86,7 @@ public:
     }
 
     void cmdCreateCommandPool(uint64_t deviceId, uint64_t poolId, uint32_t queueFamily) {
+        ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCreateCommandPool);
         w_.writeU64(deviceId);
         w_.writeU64(poolId);
@@ -85,6 +96,7 @@ public:
 
     void cmdAllocateCommandBuffers(uint64_t deviceId, uint64_t poolId,
                                    uint64_t cmdBufferId) {
+        ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkAllocateCommandBuffers);
         w_.writeU64(deviceId);
         w_.writeU64(poolId);
@@ -93,12 +105,14 @@ public:
     }
 
     void cmdBeginCommandBuffer(uint64_t cmdBufferId) {
+        ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkBeginCommandBuffer);
         w_.writeU64(cmdBufferId);
         w_.endCommand(off);
     }
 
     void cmdEndCommandBuffer(uint64_t cmdBufferId) {
+        ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkEndCommandBuffer);
         w_.writeU64(cmdBufferId);
         w_.endCommand(off);
@@ -108,6 +122,7 @@ public:
                             uint64_t framebufferId,
                             uint32_t width, uint32_t height,
                             float clearR, float clearG, float clearB, float clearA) {
+        ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdBeginRenderPass);
         w_.writeU64(cmdBufferId);
         w_.writeU64(renderPassId);
@@ -122,12 +137,14 @@ public:
     }
 
     void cmdEndRenderPass(uint64_t cmdBufferId) {
+        ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdEndRenderPass);
         w_.writeU64(cmdBufferId);
         w_.endCommand(off);
     }
 
     void cmdBindPipeline(uint64_t cmdBufferId, uint64_t pipelineId) {
+        ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdBindPipeline);
         w_.writeU64(cmdBufferId);
         w_.writeU64(pipelineId);
@@ -136,6 +153,7 @@ public:
 
     void cmdSetViewport(uint64_t cmdBufferId,
                         float x, float y, float w, float h, float minD, float maxD) {
+        ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdSetViewport);
         w_.writeU64(cmdBufferId);
         w_.writeF32(x); w_.writeF32(y);
@@ -146,6 +164,7 @@ public:
 
     void cmdSetScissor(uint64_t cmdBufferId,
                        int32_t x, int32_t y, uint32_t w, uint32_t h) {
+        ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdSetScissor);
         w_.writeU64(cmdBufferId);
         w_.writeI32(x); w_.writeI32(y);
@@ -156,6 +175,7 @@ public:
     void cmdDraw(uint64_t cmdBufferId,
                  uint32_t vertexCount, uint32_t instanceCount,
                  uint32_t firstVertex, uint32_t firstInstance) {
+        ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdDraw);
         w_.writeU64(cmdBufferId);
         w_.writeU32(vertexCount);
@@ -168,6 +188,7 @@ public:
     // --- Sync ---
 
     void cmdCreateSemaphore(uint64_t deviceId, uint64_t semId) {
+        ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCreateSemaphore);
         w_.writeU64(deviceId);
         w_.writeU64(semId);
@@ -175,6 +196,7 @@ public:
     }
 
     void cmdCreateFence(uint64_t deviceId, uint64_t fenceId, uint32_t flags) {
+        ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCreateFence);
         w_.writeU64(deviceId);
         w_.writeU64(fenceId);
@@ -187,6 +209,7 @@ public:
     void cmdBridgeCreateSwapchain(uint64_t deviceId, uint64_t swapchainId,
                                   uint32_t width, uint32_t height,
                                   uint32_t imageCount) {
+        ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_BRIDGE_CreateSwapchain);
         w_.writeU64(deviceId);
         w_.writeU64(swapchainId);
@@ -197,6 +220,7 @@ public:
     }
 
     void cmdBridgeAcquireNextImage(uint64_t swapchainId, uint64_t semaphoreId) {
+        ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_BRIDGE_AcquireNextImage);
         w_.writeU64(swapchainId);
         w_.writeU64(semaphoreId);
@@ -205,6 +229,7 @@ public:
 
     void cmdBridgeQueuePresent(uint64_t queueId, uint64_t swapchainId,
                                uint64_t waitSemaphoreId) {
+        ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_BRIDGE_QueuePresent);
         w_.writeU64(queueId);
         w_.writeU64(swapchainId);
@@ -215,6 +240,7 @@ public:
     void cmdQueueSubmit(uint64_t queueId, uint64_t cmdBufferId,
                         uint64_t waitSemaphoreId, uint64_t signalSemaphoreId,
                         uint64_t fenceId) {
+        ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkQueueSubmit);
         w_.writeU64(queueId);
         w_.writeU64(cmdBufferId);
@@ -225,6 +251,7 @@ public:
     }
 
     void cmdWaitForFences(uint64_t deviceId, uint64_t fenceId) {
+        ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkWaitForFences);
         w_.writeU64(deviceId);
         w_.writeU64(fenceId);
@@ -232,13 +259,21 @@ public:
     }
 
     void cmdResetFences(uint64_t deviceId, uint64_t fenceId) {
+        ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkResetFences);
         w_.writeU64(deviceId);
         w_.writeU64(fenceId);
         w_.endCommand(off);
     }
 
+    // Unlocked version — caller must hold mutex_
+    void cmdEndOfStreamUnlocked() {
+        auto off = w_.beginCommand(VN_CMD_BRIDGE_EndOfStream);
+        w_.endCommand(off);
+    }
+
     void cmdEndOfStream() {
+        ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_BRIDGE_EndOfStream);
         w_.endCommand(off);
     }
@@ -246,6 +281,6 @@ public:
     const uint8_t* data() const { return w_.data(); }
     size_t size() const { return w_.size(); }
 
-private:
+    // Public for sendAndRecv to reset
     VnStreamWriter w_;
 };

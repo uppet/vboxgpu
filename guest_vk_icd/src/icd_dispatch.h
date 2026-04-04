@@ -57,8 +57,9 @@ struct IcdState {
     // Per-frame sync: image index returned by Host
     uint32_t currentImageIndex = 0;
 
-    // Command encoder for current batch
+    // Command encoder for current batch (MUST lock mutex before use — DXVK is multithreaded)
     VnEncoder encoder;
+    std::mutex encoderMutex;
 
     void initDefaults();
     bool connectToHost(const char* host, uint16_t port);

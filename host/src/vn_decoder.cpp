@@ -495,8 +495,10 @@ void VnDecoder::handleQueueSubmit(VnStreamReader& r) {
 
     VkSubmitInfo info{};
     info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    info.commandBufferCount = 1;
-    info.pCommandBuffers = &cb;
+    if (cb) {
+        info.commandBufferCount = 1;
+        info.pCommandBuffers = &cb;
+    }
     if (waitSem) {
         info.waitSemaphoreCount = 1;
         info.pWaitSemaphores = &waitSem;
