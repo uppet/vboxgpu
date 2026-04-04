@@ -228,17 +228,15 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
     inputAsm.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
     inputAsm.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
-    // Use dynamic viewport/scissor state so we don't need to specify them here
-    VkDynamicState dynStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
-    VkPipelineDynamicStateCreateInfo dynState{};
-    dynState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-    dynState.dynamicStateCount = 2;
-    dynState.pDynamicStates = dynStates;
+    VkViewport viewport{0, 0, (float)vpWidth, (float)vpHeight, 0, 1};
+    VkRect2D scissor{{0,0}, {vpWidth, vpHeight}};
 
     VkPipelineViewportStateCreateInfo vpState{};
     vpState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
     vpState.viewportCount = 1;
+    vpState.pViewports = &viewport;
     vpState.scissorCount = 1;
+    vpState.pScissors = &scissor;
 
     VkPipelineRasterizationStateCreateInfo raster{};
     raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
@@ -274,7 +272,6 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
     pInfo.pRasterizationState = &raster;
     pInfo.pMultisampleState = &ms;
     pInfo.pColorBlendState = &cb;
-    pInfo.pDynamicState = &dynState;
     pInfo.layout = lookup(pipelineLayouts_, layoutId);
 
     if (dynamicRendering) {
@@ -416,7 +413,12 @@ void VnDecoder::handleCmdBeginRenderPass(VnStreamReader& r) {
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     VkRenderPass rp = lookup(renderPasses_, rpId);
     VkFramebuffer fb = lookup(framebuffers_, fbId);
-    if (!cb || !rp || !fb) return;
+    if (!cb || !rp || !fb) {
+        fprintf(stderr, "[Decoder] BeginRenderPass SKIP: cb=%p rp=%p fb=%p (ids: cb=%u rp=%u fb=%u)\n",
+                (void*)cb, (void*)rp, (void*)fb,
+                (unsigned)cbId, (unsigned)rpId, (unsigned)fbId);
+        return;
+    }
 
     VkClearValue clearVal = {{{cr, cg, cb_, ca}}};
     VkRenderPassBeginInfo info{};
