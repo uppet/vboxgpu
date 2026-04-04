@@ -145,6 +145,35 @@ public:
         w_.endCommand(off);
     }
 
+    // Vulkan 1.3 dynamic rendering — Host uses current swapchain image view
+    void cmdBeginRendering(uint64_t cmdBufferId,
+                           uint32_t renderAreaX, uint32_t renderAreaY,
+                           uint32_t renderAreaW, uint32_t renderAreaH,
+                           uint32_t loadOp, uint32_t storeOp,
+                           float clearR, float clearG, float clearB, float clearA) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdBeginRendering);
+        w_.writeU64(cmdBufferId);
+        w_.writeU32(renderAreaX);
+        w_.writeU32(renderAreaY);
+        w_.writeU32(renderAreaW);
+        w_.writeU32(renderAreaH);
+        w_.writeU32(loadOp);
+        w_.writeU32(storeOp);
+        w_.writeF32(clearR);
+        w_.writeF32(clearG);
+        w_.writeF32(clearB);
+        w_.writeF32(clearA);
+        w_.endCommand(off);
+    }
+
+    void cmdEndRendering(uint64_t cmdBufferId) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdEndRendering);
+        w_.writeU64(cmdBufferId);
+        w_.endCommand(off);
+    }
+
     void cmdBindPipeline(uint64_t cmdBufferId, uint64_t pipelineId) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdBindPipeline);

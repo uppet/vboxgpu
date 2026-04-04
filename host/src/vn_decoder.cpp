@@ -67,6 +67,8 @@ void VnDecoder::dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdS
     case VN_CMD_vkBeginCommandBuffer:     handleBeginCommandBuffer(reader); break;
     case VN_CMD_vkEndCommandBuffer:       handleEndCommandBuffer(reader); break;
     case VN_CMD_vkCmdBeginRenderPass:     handleCmdBeginRenderPass(reader); break;
+    case VN_CMD_vkCmdBeginRendering:      handleCmdBeginRendering(reader); break;
+    case VN_CMD_vkCmdEndRendering:        handleCmdEndRendering(reader); break;
     case VN_CMD_vkCmdEndRenderPass:       handleCmdEndRenderPass(reader); break;
     case VN_CMD_vkCmdBindPipeline:        handleCmdBindPipeline(reader); break;
     case VN_CMD_vkCmdSetViewport:         handleCmdSetViewport(reader); break;
@@ -437,6 +439,87 @@ void VnDecoder::handleCmdEndRenderPass(VnStreamReader& r) {
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     if (!cb) return;
     vkCmdEndRenderPass(cb);
+}
+
+void VnDecoder::handleCmdBeginRendering(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint32_t areaX = r.readU32();
+    uint32_t areaY = r.readU32();
+    uint32_t areaW = r.readU32();
+    uint32_t areaH = r.readU32();
+    uint32_t loadOp = r.readU32();
+    uint32_t storeOp = r.readU32();
+    float cr = r.readF32(), cg = r.readF32(), cb_ = r.readF32(), ca = r.readF32();
+
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    if (!cb) return;
+
+    // Use the current swapchain image view (set by AcquireNextImage)
+    HostSwapchain* sc = nullptr;
+    for (auto& [id, s] : swapchains_) { sc = &s; break; }
+    if (!sc || sc->imageViews.empty()) return;
+
+    VkImageView currentView = sc->imageViews[sc->currentImageIndex];
+
+    VkRenderingAttachmentInfo colorAttachment{};
+    colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    colorAttachment.imageView = currentView;
+    colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    colorAttachment.loadOp = static_cast<VkAttachmentLoadOp>(loadOp);
+    colorAttachment.storeOp = static_cast<VkAttachmentStoreOp>(storeOp);
+    colorAttachment.clearValue.color = {{cr, cg, cb_, ca}};
+
+    VkRenderingInfo renderingInfo{};
+    renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    renderingInfo.renderArea = {{(int32_t)areaX, (int32_t)areaY}, {areaW, areaH}};
+    renderingInfo.layerCount = 1;
+    renderingInfo.colorAttachmentCount = 1;
+    renderingInfo.pColorAttachments = &colorAttachment;
+
+    // Transition swapchain image to COLOR_ATTACHMENT_OPTIMAL
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = sc->images[sc->currentImageIndex];
+    barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    barrier.srcAccessMask = 0;
+    barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    vkCmdPipelineBarrier(cb,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+    vkCmdBeginRendering(cb, &renderingInfo);
+}
+
+void VnDecoder::handleCmdEndRendering(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    if (!cb) return;
+    vkCmdEndRendering(cb);
+
+    // Transition swapchain image to PRESENT_SRC
+    HostSwapchain* sc = nullptr;
+    for (auto& [id, s] : swapchains_) { sc = &s; break; }
+    if (!sc) return;
+
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = sc->images[sc->currentImageIndex];
+    barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    barrier.dstAccessMask = 0;
+    vkCmdPipelineBarrier(cb,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &barrier);
 }
 
 void VnDecoder::handleCmdBindPipeline(VnStreamReader& r) {

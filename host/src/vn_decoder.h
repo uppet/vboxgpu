@@ -68,6 +68,8 @@ private:
     void handleEndCommandBuffer(VnStreamReader& r);
     void handleCmdBeginRenderPass(VnStreamReader& r);
     void handleCmdEndRenderPass(VnStreamReader& r);
+    void handleCmdBeginRendering(VnStreamReader& r);
+    void handleCmdEndRendering(VnStreamReader& r);
     void handleCmdBindPipeline(VnStreamReader& r);
     void handleCmdSetViewport(VnStreamReader& r);
     void handleCmdSetScissor(VnStreamReader& r);

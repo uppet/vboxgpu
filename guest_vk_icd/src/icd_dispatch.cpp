@@ -497,8 +497,28 @@ static VkResult VKAPI_CALL icd_vkWaitSemaphores(VkDevice, const VkSemaphoreWaitI
 static VkResult VKAPI_CALL icd_vkSignalSemaphore(VkDevice, const VkSemaphoreSignalInfo*) { return VK_SUCCESS; }
 
 // Vulkan 1.3 dynamic rendering
-static void VKAPI_CALL icd_vkCmdBeginRendering(VkCommandBuffer, const VkRenderingInfo*) {}
-static void VKAPI_CALL icd_vkCmdEndRendering(VkCommandBuffer) {}
+static void VKAPI_CALL icd_vkCmdBeginRendering(VkCommandBuffer cb, const VkRenderingInfo* pInfo) {
+    uint32_t loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    uint32_t storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    float cr = 0, cg = 0, cb_ = 0, ca = 1;
+    if (pInfo && pInfo->colorAttachmentCount > 0 && pInfo->pColorAttachments) {
+        loadOp = pInfo->pColorAttachments[0].loadOp;
+        storeOp = pInfo->pColorAttachments[0].storeOp;
+        cr = pInfo->pColorAttachments[0].clearValue.color.float32[0];
+        cg = pInfo->pColorAttachments[0].clearValue.color.float32[1];
+        cb_ = pInfo->pColorAttachments[0].clearValue.color.float32[2];
+        ca = pInfo->pColorAttachments[0].clearValue.color.float32[3];
+    }
+    g_icd.encoder.cmdBeginRendering(toId(cb),
+        pInfo ? pInfo->renderArea.offset.x : 0,
+        pInfo ? pInfo->renderArea.offset.y : 0,
+        pInfo ? pInfo->renderArea.extent.width : 800,
+        pInfo ? pInfo->renderArea.extent.height : 600,
+        loadOp, storeOp, cr, cg, cb_, ca);
+}
+static void VKAPI_CALL icd_vkCmdEndRendering(VkCommandBuffer cb) {
+    g_icd.encoder.cmdEndRendering(toId(cb));
+}
 static void VKAPI_CALL icd_vkCmdSetCullMode(VkCommandBuffer, VkCullModeFlags) {}
 static void VKAPI_CALL icd_vkCmdSetFrontFace(VkCommandBuffer, VkFrontFace) {}
 static void VKAPI_CALL icd_vkCmdSetPrimitiveTopology(VkCommandBuffer, VkPrimitiveTopology) {}

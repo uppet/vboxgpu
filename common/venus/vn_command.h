@@ -58,6 +58,10 @@ enum VnCommandType : uint32_t {
     VN_CMD_vkBindBufferMemory              = 44,
     VN_CMD_vkBindImageMemory               = 48,
 
+    // Vulkan 1.3 dynamic rendering
+    VN_CMD_vkCmdBeginRendering             = 0x1000,  // bridge-defined (not in Venus)
+    VN_CMD_vkCmdEndRendering               = 0x1001,
+
     // Extension: swapchain (handled specially by host)
     VN_CMD_BRIDGE_CreateSwapchain          = 0x10000,
     VN_CMD_BRIDGE_AcquireNextImage         = 0x10001,
