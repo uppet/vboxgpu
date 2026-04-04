@@ -492,6 +492,9 @@ void VnDecoder::handleCmdBeginRendering(VnStreamReader& r) {
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         0, 0, nullptr, 0, nullptr, 1, &barrier);
 
+    fprintf(stderr, "[Decoder] BeginRendering: cb=%p view=%p area=%u,%u,%ux%u load=%u clear=%.1f,%.1f,%.1f,%.1f\n",
+            (void*)cb, (void*)currentView, areaX, areaY, areaW, areaH, loadOp, cr, cg, cb_, ca);
+    fflush(stderr);
     vkCmdBeginRendering(cb, &renderingInfo);
 }
 
@@ -527,7 +530,11 @@ void VnDecoder::handleCmdBindPipeline(VnStreamReader& r) {
     uint64_t pipId = r.readU64();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     VkPipeline pip = lookup(pipelines_, pipId);
-    if (!cb || !pip) return; // skip if objects missing
+    if (!cb || !pip) {
+        fprintf(stderr, "[Decoder] BindPipeline SKIP: cb=%p pip=%p (ids: cb=%u pip=%u)\n",
+                (void*)cb, (void*)pip, (unsigned)cbId, (unsigned)pipId);
+        return;
+    }
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pip);
 }
 
@@ -555,7 +562,11 @@ void VnDecoder::handleCmdDraw(VnStreamReader& r) {
     uint32_t firstVertex = r.readU32();
     uint32_t firstInstance = r.readU32();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
-    if (!cb) return;
+    if (!cb) {
+        fprintf(stderr, "[Decoder] Draw SKIP: cb null\n");
+        return;
+    }
+    fprintf(stderr, "[Decoder] Draw: verts=%u instances=%u\n", vertexCount, instanceCount);
     vkCmdDraw(cb, vertexCount, instanceCount, firstVertex, firstInstance);
 }
 
@@ -709,6 +720,10 @@ void VnDecoder::handleBridgeCreateSwapchain(VnStreamReader& r) {
         store(imageViews_, scId * 100 + i + 1, sc.imageViews[i]);
     }
 
+    // Acquire first image so rendering can start immediately
+    vkAcquireNextImageKHR(device_, sc.swapchain, UINT64_MAX,
+                          VK_NULL_HANDLE, VK_NULL_HANDLE, &sc.currentImageIndex);
+
     store(swapchains_, scId, sc);
 }
 
@@ -744,7 +759,18 @@ void VnDecoder::handleBridgeQueuePresent(VnStreamReader& r) {
     info.pSwapchains = &it->second.swapchain;
     info.pImageIndices = &it->second.currentImageIndex;
 
-    vkQueuePresentKHR(graphicsQueue_, &info);
+    VkResult vr = vkQueuePresentKHR(graphicsQueue_, &info);
+    fprintf(stderr, "[Decoder] Present: sc=%p imgIdx=%u result=%d\n",
+            (void*)it->second.swapchain, it->second.currentImageIndex, (int)vr);
+    fflush(stderr);
+
+    // Auto-acquire next image for the next frame
+    // (DXVK's AcquireNextImage doesn't go through command stream)
+    VkSemaphore acqSem = VK_NULL_HANDLE;
+    // Find any image-available semaphore
+    for (auto& [sid, sem] : semaphores_) { acqSem = sem; break; }
+    vkAcquireNextImageKHR(device_, it->second.swapchain, UINT64_MAX,
+                          acqSem, VK_NULL_HANDLE, &it->second.currentImageIndex);
 }
 
 HostSwapchain* VnDecoder::getSwapchain(uint64_t id) {
