@@ -102,9 +102,6 @@ int main(int argc, char* argv[]) {
     constexpr size_t BUF_SIZE = 4 * 1024 * 1024; // 4 MB max per message
     std::vector<uint8_t> recvBuf(BUF_SIZE);
 
-    // Set recv timeout on the TCP socket so we can pump window messages
-    server.setRecvTimeout(50); // 50ms timeout
-
     while (g_running) {
         // Pump window messages
         MSG msg{};
@@ -114,14 +111,15 @@ int main(int argc, char* argv[]) {
         }
         if (!g_running) break;
 
-        // Receive a command stream message (non-blocking with timeout)
+        // Check if data is available (non-blocking) before blocking recv
+        if (!server.hasData(50)) continue; // 50ms poll, then pump messages again
+
+        // Receive a command stream message
         size_t bytesRead = 0;
         if (!server.recv(recvBuf.data(), BUF_SIZE, bytesRead)) {
-            if (bytesRead == 0) continue; // timeout, try again after pumping messages
             fprintf(stderr, "[Host] Client disconnected.\n");
             break;
         }
-        if (bytesRead == 0) continue;
 
         fprintf(stderr, "[Host] Received %zu bytes\n", bytesRead);
 

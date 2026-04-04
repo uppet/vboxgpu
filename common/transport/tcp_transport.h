@@ -148,10 +148,16 @@ public:
         return tcp_send_framed(clientSock_, data, size);
     }
 
-    void setRecvTimeout(uint32_t ms) {
-        DWORD timeout = ms;
-        setsockopt(clientSock_, SOL_SOCKET, SO_RCVTIMEO,
-                   reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+    // Check if data is available for reading within timeout_ms
+    bool hasData(uint32_t timeout_ms) {
+        fd_set readSet;
+        FD_ZERO(&readSet);
+        FD_SET(clientSock_, &readSet);
+        timeval tv;
+        tv.tv_sec = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+        int ret = select(0, &readSet, nullptr, nullptr, &tv);
+        return ret > 0;
     }
 
     void close() {
