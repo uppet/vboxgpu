@@ -544,7 +544,7 @@ void VnDecoder::handleWaitForFences(VnStreamReader& r) {
     uint64_t fenceId = r.readU64();
     VkFence fence = lookup(fences_, fenceId);
     if (fence)
-        vkWaitForFences(device_, 1, &fence, VK_TRUE, UINT64_MAX);
+        vkWaitForFences(device_, 1, &fence, VK_TRUE, 100000000ULL); // 100ms timeout
 }
 
 void VnDecoder::handleResetFences(VnStreamReader& r) {

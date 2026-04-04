@@ -49,6 +49,7 @@ static inline bool tcp_send_framed(SOCKET s, const uint8_t* data, size_t size) {
 }
 
 static inline bool tcp_recv_framed(SOCKET s, uint8_t* buf, size_t bufSize, size_t& bytesRead) {
+    bytesRead = 0;
     uint32_t len = 0;
     if (!tcp_recv_all(s, reinterpret_cast<uint8_t*>(&len), 4)) return false;
     if (len > bufSize) return false;
@@ -145,6 +146,12 @@ public:
 
     bool send(const uint8_t* data, size_t size) override {
         return tcp_send_framed(clientSock_, data, size);
+    }
+
+    void setRecvTimeout(uint32_t ms) {
+        DWORD timeout = ms;
+        setsockopt(clientSock_, SOL_SOCKET, SO_RCVTIMEO,
+                   reinterpret_cast<const char*>(&timeout), sizeof(timeout));
     }
 
     void close() {
