@@ -6,6 +6,25 @@
 #include <vector>
 #include <thread>
 #include <atomic>
+#include <dbghelp.h>
+#pragma comment(lib, "dbghelp.lib")
+
+static LONG WINAPI hostCrashHandler(EXCEPTION_POINTERS* ep) {
+    CreateDirectoryA("S:\\bld\\vboxgpu\\dumps", NULL);
+    HANDLE hFile = CreateFileA("S:\\bld\\vboxgpu\\dumps\\host_crash.dmp",
+        GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        MINIDUMP_EXCEPTION_INFORMATION mei;
+        mei.ThreadId = GetCurrentThreadId();
+        mei.ExceptionPointers = ep;
+        mei.ClientPointers = FALSE;
+        MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), hFile,
+            MiniDumpNormal, &mei, NULL, NULL);
+        CloseHandle(hFile);
+        fprintf(stderr, "[Host] Crash dump: S:\\bld\\vboxgpu\\dumps\\host_crash.dmp\n");
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
 
 static constexpr uint32_t WINDOW_WIDTH = 800;
 static constexpr uint32_t WINDOW_HEIGHT = 600;
@@ -26,6 +45,7 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
 }
 
 int main(int argc, char* argv[]) {
+    SetUnhandledExceptionFilter(hostCrashHandler);
     uint16_t port = DEFAULT_PORT;
     if (argc > 1) port = static_cast<uint16_t>(atoi(argv[1]));
 

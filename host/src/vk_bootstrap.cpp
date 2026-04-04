@@ -42,12 +42,9 @@ void createInstance(VulkanContext& ctx) {
         VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
     };
 
+    // Disable validation layer for host server — the proxy ICD sends commands
+    // that may reference objects in unusual ways, causing false validation errors.
     bool enableValidation = false;
-#ifdef _DEBUG
-    enableValidation = checkValidationLayerSupport();
-    if (enableValidation)
-        extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-#endif
 
     const char* validationLayer = "VK_LAYER_KHRONOS_validation";
 

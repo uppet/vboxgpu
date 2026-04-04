@@ -376,29 +376,37 @@ void VnDecoder::handleCmdBeginRenderPass(VnStreamReader& r) {
     uint32_t h = r.readU32();
     float cr = r.readF32(), cg = r.readF32(), cb_ = r.readF32(), ca = r.readF32();
 
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    VkRenderPass rp = lookup(renderPasses_, rpId);
+    VkFramebuffer fb = lookup(framebuffers_, fbId);
+    if (!cb || !rp || !fb) return;
+
     VkClearValue clearVal = {{{cr, cg, cb_, ca}}};
     VkRenderPassBeginInfo info{};
     info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    info.renderPass = lookup(renderPasses_, rpId);
-    info.framebuffer = lookup(framebuffers_, fbId);
+    info.renderPass = rp;
+    info.framebuffer = fb;
     info.renderArea = {{0,0}, {w, h}};
     info.clearValueCount = 1;
     info.pClearValues = &clearVal;
 
-    vkCmdBeginRenderPass(lookup(commandBuffers_, cbId), &info, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBeginRenderPass(cb, &info, VK_SUBPASS_CONTENTS_INLINE);
 }
 
 void VnDecoder::handleCmdEndRenderPass(VnStreamReader& r) {
     uint64_t cbId = r.readU64();
-    vkCmdEndRenderPass(lookup(commandBuffers_, cbId));
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    if (!cb) return;
+    vkCmdEndRenderPass(cb);
 }
 
 void VnDecoder::handleCmdBindPipeline(VnStreamReader& r) {
     uint64_t cbId = r.readU64();
     uint64_t pipId = r.readU64();
-    vkCmdBindPipeline(lookup(commandBuffers_, cbId),
-                      VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      lookup(pipelines_, pipId));
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    VkPipeline pip = lookup(pipelines_, pipId);
+    if (!cb || !pip) return; // skip if objects missing
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pip);
 }
 
 void VnDecoder::handleCmdSetViewport(VnStreamReader& r) {
@@ -424,7 +432,9 @@ void VnDecoder::handleCmdDraw(VnStreamReader& r) {
     uint32_t instanceCount = r.readU32();
     uint32_t firstVertex = r.readU32();
     uint32_t firstInstance = r.readU32();
-    vkCmdDraw(lookup(commandBuffers_, cbId), vertexCount, instanceCount, firstVertex, firstInstance);
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    if (!cb) return;
+    vkCmdDraw(cb, vertexCount, instanceCount, firstVertex, firstInstance);
 }
 
 // --- Sync ---
