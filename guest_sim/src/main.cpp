@@ -70,7 +70,8 @@ static std::vector<uint8_t> buildSetupStream(const char* shaderDir) {
 
     enc.cmdCreatePipelineLayout(H_DEVICE, H_PIPE_LAYOUT);
     enc.cmdCreateGraphicsPipeline(H_DEVICE, H_PIPELINE, H_RENDER_PASS, H_PIPE_LAYOUT,
-                                  H_VERT_SHADER, H_FRAG_SHADER, WINDOW_WIDTH, WINDOW_HEIGHT);
+                                  H_VERT_SHADER, H_FRAG_SHADER, WINDOW_WIDTH, WINDOW_HEIGHT,
+                                  0); // 0 = use renderPass (not dynamic rendering)
 
     for (uint32_t i = 0; i < 3; i++) {
         uint64_t imageViewId = H_SWAPCHAIN * 100 + i + 1;
@@ -92,6 +93,7 @@ static std::vector<uint8_t> buildSetupStream(const char* shaderDir) {
 static std::vector<uint8_t> buildFrameStream(uint64_t fbId) {
     VnEncoder enc;
 
+    enc.cmdBridgeAcquireNextImage(H_SWAPCHAIN, H_SEM_IMAGE);
     enc.cmdWaitForFences(H_DEVICE, H_FENCE);
     enc.cmdResetFences(H_DEVICE, H_FENCE);
 

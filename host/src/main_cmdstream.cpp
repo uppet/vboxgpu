@@ -83,7 +83,8 @@ static std::vector<uint8_t> buildSetupStream(const char* shaderDir) {
     // Create pipeline
     enc.cmdCreatePipelineLayout(H_DEVICE, H_PIPE_LAYOUT);
     enc.cmdCreateGraphicsPipeline(H_DEVICE, H_PIPELINE, H_RENDER_PASS, H_PIPE_LAYOUT,
-                                  H_VERT_SHADER, H_FRAG_SHADER, WINDOW_WIDTH, WINDOW_HEIGHT);
+                                  H_VERT_SHADER, H_FRAG_SHADER, WINDOW_WIDTH, WINDOW_HEIGHT,
+                                  0); // 0 = use renderPass
 
     // Create framebuffers for each swapchain image
     // Image view IDs are assigned by decoder as: swapchainId*100 + i + 1
