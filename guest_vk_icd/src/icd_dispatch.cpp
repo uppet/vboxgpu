@@ -67,18 +67,7 @@ static VkResult VKAPI_CALL icd_vkCreateInstance(
     const VkInstanceCreateInfo*, const VkAllocationCallbacks*, VkInstance* pInstance)
 {
     g_icd.initDefaults();
-
-    // Connect to host (env var or default)
-    const char* hostAddr = getenv("VBOX_GPU_HOST");
-    if (!hostAddr) hostAddr = "127.0.0.1";
-    const char* portStr = getenv("VBOX_GPU_PORT");
-    uint16_t port = portStr ? (uint16_t)atoi(portStr) : DEFAULT_PORT;
-
-    if (!g_icd.connectToHost(hostAddr, port)) {
-        fprintf(stderr, "[ICD] Failed to connect to Host at %s:%u\n", hostAddr, port);
-        return VK_ERROR_INITIALIZATION_FAILED;
-    }
-    fprintf(stderr, "[ICD] Connected to Host at %s:%u\n", hostAddr, port);
+    fprintf(stderr, "[ICD] vkCreateInstance called\n");
 
     uint64_t id = g_icd.handles.alloc();
     *pInstance = reinterpret_cast<VkInstance>(makeDispatchable(id));
@@ -285,10 +274,26 @@ static VkResult VKAPI_CALL icd_vkGetPhysicalDeviceSurfacePresentModesKHR(
 
 // --- Device ---
 static VkResult VKAPI_CALL icd_vkCreateDevice(
-    VkPhysicalDevice, const VkDeviceCreateInfo*, const VkAllocationCallbacks*, VkDevice* pDevice)
+    VkPhysicalDevice, const VkDeviceCreateInfo* pInfo, const VkAllocationCallbacks*, VkDevice* pDevice)
 {
+    // Connect to host now (deferred from vkCreateInstance)
+    if (!g_icd.connected) {
+        const char* hostAddr = getenv("VBOX_GPU_HOST");
+        if (!hostAddr) hostAddr = "127.0.0.1";
+        const char* portStr = getenv("VBOX_GPU_PORT");
+        uint16_t port = portStr ? (uint16_t)atoi(portStr) : DEFAULT_PORT;
+
+        if (!g_icd.connectToHost(hostAddr, port)) {
+            fprintf(stderr, "[ICD] Failed to connect to Host at %s:%u\n", hostAddr, port);
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        fprintf(stderr, "[ICD] Connected to Host at %s:%u\n", hostAddr, port);
+    }
+
     uint64_t id = g_icd.handles.alloc();
     *pDevice = reinterpret_cast<VkDevice>(makeDispatchable(id));
+    fprintf(stderr, "[ICD] vkCreateDevice: id=%llu, extensions=%u\n",
+            (unsigned long long)id, pInfo ? pInfo->enabledExtensionCount : 0);
     return VK_SUCCESS;
 }
 
@@ -300,6 +305,58 @@ static void VKAPI_CALL icd_vkGetDeviceQueue(VkDevice, uint32_t, uint32_t, VkQueu
     static DispatchableHandle queueHandle = { nullptr, 2 }; // H_QUEUE = 2
     *pQueue = reinterpret_cast<VkQueue>(&queueHandle);
 }
+
+static void VKAPI_CALL icd_vkGetDeviceQueue2(VkDevice, const VkDeviceQueueInfo2*, VkQueue* pQueue) {
+    static DispatchableHandle queueHandle2 = { nullptr, 2 };
+    *pQueue = reinterpret_cast<VkQueue>(&queueHandle2);
+}
+
+// Vulkan 1.2+ device functions DXVK needs
+static VkResult VKAPI_CALL icd_vkBindBufferMemory2(VkDevice, uint32_t, const VkBindBufferMemoryInfo*) { return VK_SUCCESS; }
+static VkResult VKAPI_CALL icd_vkBindImageMemory2(VkDevice, uint32_t, const VkBindImageMemoryInfo*) { return VK_SUCCESS; }
+static VkDeviceAddress VKAPI_CALL icd_vkGetBufferDeviceAddress(VkDevice, const VkBufferDeviceAddressInfo*) { return 0x1000; }
+static uint64_t VKAPI_CALL icd_vkGetBufferOpaqueCaptureAddress(VkDevice, const VkBufferDeviceAddressInfo*) { return 0; }
+static uint64_t VKAPI_CALL icd_vkGetDeviceMemoryOpaqueCaptureAddress(VkDevice, const VkDeviceMemoryOpaqueCaptureAddressInfo*) { return 0; }
+static VkResult VKAPI_CALL icd_vkGetSemaphoreCounterValue(VkDevice, VkSemaphore, uint64_t* p) { *p = 0; return VK_SUCCESS; }
+static VkResult VKAPI_CALL icd_vkWaitSemaphores(VkDevice, const VkSemaphoreWaitInfo*, uint64_t) { return VK_SUCCESS; }
+static VkResult VKAPI_CALL icd_vkSignalSemaphore(VkDevice, const VkSemaphoreSignalInfo*) { return VK_SUCCESS; }
+
+// Vulkan 1.3 dynamic rendering
+static void VKAPI_CALL icd_vkCmdBeginRendering(VkCommandBuffer, const VkRenderingInfo*) {}
+static void VKAPI_CALL icd_vkCmdEndRendering(VkCommandBuffer) {}
+static void VKAPI_CALL icd_vkCmdSetCullMode(VkCommandBuffer, VkCullModeFlags) {}
+static void VKAPI_CALL icd_vkCmdSetFrontFace(VkCommandBuffer, VkFrontFace) {}
+static void VKAPI_CALL icd_vkCmdSetPrimitiveTopology(VkCommandBuffer, VkPrimitiveTopology) {}
+static void VKAPI_CALL icd_vkCmdSetViewportWithCount(VkCommandBuffer, uint32_t, const VkViewport*) {}
+static void VKAPI_CALL icd_vkCmdSetScissorWithCount(VkCommandBuffer, uint32_t, const VkRect2D*) {}
+static void VKAPI_CALL icd_vkCmdSetDepthTestEnable(VkCommandBuffer, VkBool32) {}
+static void VKAPI_CALL icd_vkCmdSetDepthWriteEnable(VkCommandBuffer, VkBool32) {}
+static void VKAPI_CALL icd_vkCmdSetDepthCompareOp(VkCommandBuffer, VkCompareOp) {}
+static void VKAPI_CALL icd_vkCmdSetDepthBoundsTestEnable(VkCommandBuffer, VkBool32) {}
+static void VKAPI_CALL icd_vkCmdSetStencilTestEnable(VkCommandBuffer, VkBool32) {}
+static void VKAPI_CALL icd_vkCmdSetStencilOp(VkCommandBuffer, VkStencilFaceFlags, VkStencilOp, VkStencilOp, VkStencilOp, VkCompareOp) {}
+static void VKAPI_CALL icd_vkCmdSetRasterizerDiscardEnable(VkCommandBuffer, VkBool32) {}
+static void VKAPI_CALL icd_vkCmdSetDepthBiasEnable(VkCommandBuffer, VkBool32) {}
+static void VKAPI_CALL icd_vkCmdSetPrimitiveRestartEnable(VkCommandBuffer, VkBool32) {}
+static void VKAPI_CALL icd_vkCmdBindVertexBuffers2(VkCommandBuffer, uint32_t, uint32_t, const VkBuffer*, const VkDeviceSize*, const VkDeviceSize*, const VkDeviceSize*) {}
+static void VKAPI_CALL icd_vkCmdSetDepthBounds(VkCommandBuffer, float, float) {}
+static void VKAPI_CALL icd_vkCmdDrawIndirect(VkCommandBuffer, VkBuffer, VkDeviceSize, uint32_t, uint32_t) {}
+static void VKAPI_CALL icd_vkCmdDrawIndexedIndirect(VkCommandBuffer, VkBuffer, VkDeviceSize, uint32_t, uint32_t) {}
+
+// Descriptor update template
+static VkResult VKAPI_CALL icd_vkCreateDescriptorUpdateTemplate(VkDevice, const VkDescriptorUpdateTemplateCreateInfo*, const VkAllocationCallbacks*, VkDescriptorUpdateTemplate* p) {
+    *p = (VkDescriptorUpdateTemplate)g_icd.handles.alloc(); return VK_SUCCESS;
+}
+static void VKAPI_CALL icd_vkDestroyDescriptorUpdateTemplate(VkDevice, VkDescriptorUpdateTemplate, const VkAllocationCallbacks*) {}
+static void VKAPI_CALL icd_vkUpdateDescriptorSetWithTemplate(VkDevice, VkDescriptorSet, VkDescriptorUpdateTemplate, const void*) {}
+
+// Private data
+static VkResult VKAPI_CALL icd_vkCreatePrivateDataSlot(VkDevice, const VkPrivateDataSlotCreateInfo*, const VkAllocationCallbacks*, VkPrivateDataSlot* p) {
+    *p = (VkPrivateDataSlot)g_icd.handles.alloc(); return VK_SUCCESS;
+}
+static void VKAPI_CALL icd_vkDestroyPrivateDataSlot(VkDevice, VkPrivateDataSlot, const VkAllocationCallbacks*) {}
+static VkResult VKAPI_CALL icd_vkSetPrivateData(VkDevice, VkObjectType, uint64_t, VkPrivateDataSlot, uint64_t) { return VK_SUCCESS; }
+static void VKAPI_CALL icd_vkGetPrivateData(VkDevice, VkObjectType, uint64_t, VkPrivateDataSlot, uint64_t* p) { *p = 0; }
 
 static VkResult VKAPI_CALL icd_vkDeviceWaitIdle(VkDevice) {
     return VK_SUCCESS;
@@ -887,6 +944,15 @@ static const FuncEntry g_funcTable[] = {
     ENTRY(vkGetDeviceQueue),
     ENTRY(vkDeviceWaitIdle),
     ENTRY(vkQueueWaitIdle),
+    ENTRY(vkGetDeviceQueue2),
+    ENTRY(vkBindBufferMemory2),
+    ENTRY(vkBindImageMemory2),
+    ENTRY(vkGetBufferDeviceAddress),
+    ENTRY(vkGetBufferOpaqueCaptureAddress),
+    ENTRY(vkGetDeviceMemoryOpaqueCaptureAddress),
+    ENTRY(vkGetSemaphoreCounterValue),
+    ENTRY(vkWaitSemaphores),
+    ENTRY(vkSignalSemaphore),
 
     // Swapchain
     ENTRY(vkCreateSwapchainKHR),
@@ -996,6 +1062,39 @@ static const FuncEntry g_funcTable[] = {
     ENTRY(vkCmdResetQueryPool),
     ENTRY(vkCmdCopyQueryPoolResults),
 
+    // Vulkan 1.3 dynamic rendering / dynamic state
+    ENTRY(vkCmdBeginRendering),
+    ENTRY(vkCmdEndRendering),
+    ENTRY(vkCmdSetCullMode),
+    ENTRY(vkCmdSetFrontFace),
+    ENTRY(vkCmdSetPrimitiveTopology),
+    ENTRY(vkCmdSetViewportWithCount),
+    ENTRY(vkCmdSetScissorWithCount),
+    ENTRY(vkCmdSetDepthTestEnable),
+    ENTRY(vkCmdSetDepthWriteEnable),
+    ENTRY(vkCmdSetDepthCompareOp),
+    ENTRY(vkCmdSetDepthBoundsTestEnable),
+    ENTRY(vkCmdSetStencilTestEnable),
+    ENTRY(vkCmdSetStencilOp),
+    ENTRY(vkCmdSetRasterizerDiscardEnable),
+    ENTRY(vkCmdSetDepthBiasEnable),
+    ENTRY(vkCmdSetPrimitiveRestartEnable),
+    ENTRY(vkCmdBindVertexBuffers2),
+    ENTRY(vkCmdSetDepthBounds),
+    ENTRY(vkCmdDrawIndirect),
+    ENTRY(vkCmdDrawIndexedIndirect),
+
+    // Descriptor update template
+    ENTRY(vkCreateDescriptorUpdateTemplate),
+    ENTRY(vkDestroyDescriptorUpdateTemplate),
+    ENTRY(vkUpdateDescriptorSetWithTemplate),
+
+    // Private data
+    ENTRY(vkCreatePrivateDataSlot),
+    ENTRY(vkDestroyPrivateDataSlot),
+    ENTRY(vkSetPrivateData),
+    ENTRY(vkGetPrivateData),
+
     // Sync
     ENTRY(vkCreateSemaphore),
     ENTRY(vkDestroySemaphore),
@@ -1033,14 +1132,52 @@ static const FuncEntry g_funcTable[] = {
 
 #undef ENTRY
 
+// Generic stub that returns VK_SUCCESS (0) for any unimplemented function.
+// This prevents segfaults when DXVK calls optional functions.
+static VkResult VKAPI_CALL icd_generic_stub() { return VK_SUCCESS; }
+
 static PFN_vkVoidFunction lookupFunc(const char* pName) {
     for (const auto& e : g_funcTable) {
         if (strcmp(e.name, pName) == 0)
             return e.func;
     }
-    // Log unknown functions for debugging
-    fprintf(stderr, "[ICD] Unknown function: %s\n", pName);
-    return nullptr;
+
+    // Try stripping KHR/EXT suffix and look up core version
+    // e.g. "vkGetPhysicalDeviceFeatures2KHR" → "vkGetPhysicalDeviceFeatures2"
+    std::string name(pName);
+    for (const char* suffix : {"KHR", "EXT"}) {
+        size_t slen = strlen(suffix);
+        if (name.size() > slen && name.compare(name.size() - slen, slen, suffix) == 0) {
+            std::string coreName = name.substr(0, name.size() - slen);
+            for (const auto& e : g_funcTable) {
+                if (coreName == e.name)
+                    return e.func;
+            }
+        }
+    }
+
+    // Instance-level query functions: return nullptr (DXVK checks null = unsupported extension)
+    // Device-level functions: return stub to prevent crashes during device init
+    static const char* nullPrefixes[] = {
+        "vkEnumeratePhysicalDevice",
+        "vkGetPhysicalDeviceDisplay", "vkGetPhysicalDeviceVideo",
+        "vkGetPhysicalDeviceCooperative", "vkGetPhysicalDeviceOptical",
+        "vkGetPhysicalDeviceMultisample", "vkGetPhysicalDeviceCalibrate",
+        "vkGetPhysicalDeviceExternal", "vkGetPhysicalDevicePresent",
+        "vkGetPhysicalDeviceTool", "vkGetPhysicalDeviceFragment",
+        "vkGetPhysicalDeviceSupported",
+        "vkCreateDisplay", "vkCreateHeadless", "vkCreateDebugReport",
+        "vkAcquireDrm", "vkAcquireWinrt",
+        nullptr
+    };
+    for (const char** p = nullPrefixes; *p; p++) {
+        if (strncmp(pName, *p, strlen(*p)) == 0)
+            return nullptr;
+    }
+
+    // Everything else: return stub (VK_SUCCESS / no-op)
+    fprintf(stderr, "[ICD] Stubbed: %s\n", pName);
+    return reinterpret_cast<PFN_vkVoidFunction>(icd_generic_stub);
 }
 
 // --- ICD entry points ---
@@ -1058,8 +1195,18 @@ vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
 
 __declspec(dllexport) VkResult VKAPI_CALL
 vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t* pVersion) {
-    *pVersion = 5;
+    // Version 5: loader uses vk_icdGetInstanceProcAddr for all functions
+    // and expects dispatchable handles to have loader's table as first pointer.
+    // The loader will set up the dispatch table in our returned handle.
+    if (*pVersion > 5) *pVersion = 5;
+    fprintf(stderr, "[ICD] Negotiated loader interface version: %u\n", *pVersion);
     return VK_SUCCESS;
+}
+
+__declspec(dllexport) PFN_vkVoidFunction VKAPI_CALL
+vk_icdGetPhysicalDeviceProcAddr(VkInstance instance, const char* pName) {
+    // For physical device commands, return our implementation
+    return lookupFunc(pName);
 }
 
 } // extern "C"
