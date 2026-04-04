@@ -209,7 +209,9 @@ static void VKAPI_CALL icd_vkGetPhysicalDeviceFeatures2(VkPhysicalDevice pd, VkP
         // All feature structs: { sType(4) + pad(4) + pNext(8) + VkBool32 fields... }
         // Use compile-time sizeof for exact VkBool32 count — prevents pNext corruption
         #define FB(stype, ctype) case stype: \
-            numBools = (sizeof(ctype) - sizeof(VkBaseOutStructure)) / sizeof(VkBool32); break
+            numBools = (sizeof(ctype) - sizeof(VkBaseOutStructure)) / sizeof(VkBool32); \
+            fprintf(stderr, "[ICD]   features2 sType=%u → %zu bools\n", (unsigned)stype, numBools); \
+            break
         switch (next->sType) {
         FB(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, VkPhysicalDeviceVulkan11Features);
         FB(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, VkPhysicalDeviceVulkan12Features);
@@ -271,9 +273,20 @@ static void VKAPI_CALL icd_vkGetPhysicalDeviceFeatures2(VkPhysicalDevice pd, VkP
         FB(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFORM_BUFFER_STANDARD_LAYOUT_FEATURES, VkPhysicalDeviceUniformBufferStandardLayoutFeatures);
         FB(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES, VkPhysicalDeviceVulkanMemoryModelFeatures);
         FB(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_FILTER_MINMAX_PROPERTIES, VkPhysicalDeviceSamplerFilterMinmaxProperties);
-        default: numBools = 0; break;
+        default:
+            // Unknown extension feature struct — most have 1 bool field.
+            // Safe: 1 VkBool32 (4 bytes) can't reach pNext at offset 8.
+            numBools = 1;
+            break;
         }
         #undef FB
+        for (size_t i = 0; i < numBools; i++) bools[i] = VK_TRUE;
+        // Verify critical feature
+        if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES) {
+            auto* f = reinterpret_cast<VkPhysicalDeviceVulkan11Features*>(next);
+            fprintf(stderr, "[ICD]   vk11.shaderDrawParameters=%d\n", (int)f->shaderDrawParameters);
+            fflush(stderr);
+        }
         next = next->pNext;
     }
     fprintf(stderr, "[ICD] vkGetPhysicalDeviceFeatures2 DONE\n"); fflush(stderr);
