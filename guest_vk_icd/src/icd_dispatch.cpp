@@ -8,23 +8,41 @@
 IcdState g_icd;
 
 // Dispatchable handles (VkInstance, VkDevice, VkQueue, VkCommandBuffer)
-// need a loader dispatch table pointer as their first member.
-// We store a dummy pointer followed by our ID.
+// The Vulkan loader wraps our handles in its own trampoline objects,
+// so we CANNOT embed our ID inside the handle struct.
+// Instead we maintain a global pointer→ID mapping.
 struct DispatchableHandle {
-    void* loaderDisp; // the Vulkan loader writes its trampoline table pointer here
+    void* loaderDisp; // loader writes its dispatch table here (MUST be first)
     uint64_t id;
 };
 
+static std::unordered_map<void*, uint64_t> g_handleIdMap;
+static std::mutex g_handleMutex;
+
 static uint64_t toId(void* handle) {
     if (!handle) return 0;
+    // First try our internal map (for handles returned by us that loader wraps)
+    std::lock_guard<std::mutex> lock(g_handleMutex);
+    auto it = g_handleIdMap.find(handle);
+    if (it != g_handleIdMap.end()) return it->second;
+    // Fallback: try reading from our struct (works if loader didn't wrap)
     return reinterpret_cast<DispatchableHandle*>(handle)->id;
 }
 
 static void* makeDispatchable(uint64_t id) {
     auto* h = new DispatchableHandle();
-    h->loaderDisp = nullptr; // loader will overwrite this
+    h->loaderDisp = nullptr;
     h->id = id;
+    // Register in map
+    std::lock_guard<std::mutex> lock(g_handleMutex);
+    g_handleIdMap[h] = id;
     return h;
+}
+
+// Register an external handle (from loader) with our ID
+static void registerHandle(void* handle, uint64_t id) {
+    std::lock_guard<std::mutex> lock(g_handleMutex);
+    g_handleIdMap[handle] = id;
 }
 
 // Non-dispatchable handles: cast uint64_t directly
@@ -565,7 +583,10 @@ static VkResult VKAPI_CALL icd_vkAllocateCommandBuffers(
 {
     for (uint32_t i = 0; i < pInfo->commandBufferCount; i++) {
         uint64_t id = g_icd.handles.alloc();
-        pCBs[i] = reinterpret_cast<VkCommandBuffer>(makeDispatchable(id));
+        auto* h = reinterpret_cast<DispatchableHandle*>(makeDispatchable(id));
+        pCBs[i] = reinterpret_cast<VkCommandBuffer>(h);
+        fprintf(stderr, "[ICD] AllocCB: id=%llu handle=%p pool=%llu\n",
+                (unsigned long long)id, (void*)h, (unsigned long long)(uint64_t)pInfo->commandPool);
         g_icd.encoder.cmdAllocateCommandBuffers(1, (uint64_t)pInfo->commandPool, id);
     }
     return VK_SUCCESS;
@@ -577,7 +598,9 @@ static void VKAPI_CALL icd_vkFreeCommandBuffers(VkDevice, VkCommandPool, uint32_
 }
 
 static VkResult VKAPI_CALL icd_vkBeginCommandBuffer(VkCommandBuffer cb, const VkCommandBufferBeginInfo*) {
-    g_icd.encoder.cmdBeginCommandBuffer(toId(cb));
+    uint64_t id = toId(cb);
+    fprintf(stderr, "[ICD] BeginCB: handle=%p id=%llu\n", (void*)cb, (unsigned long long)id);
+    g_icd.encoder.cmdBeginCommandBuffer(id);
     return VK_SUCCESS;
 }
 

@@ -47,6 +47,12 @@ public:
     // Lookup a semaphore by stream ID (for host-side acquire)
     VkSemaphore lookupSemaphore(uint64_t id) { return lookup(semaphores_, id); }
 
+    // Get first available swapchain (for server mode)
+    HostSwapchain* getFirstSwapchain() {
+        if (swapchains_.empty()) return nullptr;
+        return &swapchains_.begin()->second;
+    }
+
 private:
     void dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdSize);
 

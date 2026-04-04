@@ -98,15 +98,18 @@ int main(int argc, char* argv[]) {
             break;
         }
 
+        fprintf(stderr, "[Host] Received %zu bytes\n", bytesRead);
+
         // Execute the command stream
         if (!decoder.execute(recvBuf.data(), bytesRead)) {
             fprintf(stderr, "[Host] Command stream execution failed.\n");
             break;
         }
 
-        // Send back current swapchain image index (for next frame's framebuffer selection)
-        auto* sc = decoder.getSwapchain(3); // H_SWAPCHAIN = 3
-        uint32_t imageIndex = sc ? sc->currentImageIndex : 0;
+        // Find any swapchain (not hardcoded to ID 3)
+        uint32_t imageIndex = 0;
+        auto* sc = decoder.getFirstSwapchain();
+        if (sc) imageIndex = sc->currentImageIndex;
         server.send(reinterpret_cast<const uint8_t*>(&imageIndex), sizeof(imageIndex));
     }
 

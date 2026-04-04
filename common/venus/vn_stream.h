@@ -105,6 +105,14 @@ public:
         pos_ += aligned;
     }
 
+    // Skip exact bytes without alignment (for command framing)
+    void skipExact(size_t bytes) {
+        check(bytes);
+        pos_ += bytes;
+    }
+
+    void setPos(size_t pos) { pos_ = pos; }
+
     const uint8_t* currentPtr() const { return data_ + pos_; }
 
 private:
