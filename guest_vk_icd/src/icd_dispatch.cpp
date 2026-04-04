@@ -725,9 +725,26 @@ static VkResult VKAPI_CALL icd_vkCreateGraphicsPipelines(
             h = (uint32_t)pInfos[i].pViewportState->pViewports[0].height;
         }
 
+        // Extract color attachment format for dynamic rendering (renderPass == null)
+        uint32_t colorFmt = 0;
+        if (!pInfos[i].renderPass) {
+            // Walk pNext for VkPipelineRenderingCreateInfo
+            auto* base = reinterpret_cast<const VkBaseInStructure*>(pInfos[i].pNext);
+            while (base) {
+                if (base->sType == VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO) {
+                    auto* pri = reinterpret_cast<const VkPipelineRenderingCreateInfo*>(base);
+                    if (pri->colorAttachmentCount > 0)
+                        colorFmt = pri->pColorAttachmentFormats[0];
+                    break;
+                }
+                base = base->pNext;
+            }
+            if (!colorFmt) colorFmt = VK_FORMAT_B8G8R8A8_SRGB; // fallback
+        }
+
         g_icd.encoder.cmdCreateGraphicsPipeline(1, id,
             (uint64_t)pInfos[i].renderPass, (uint64_t)pInfos[i].layout,
-            vertMod, fragMod, w, h);
+            vertMod, fragMod, w, h, colorFmt);
     }
     return VK_SUCCESS;
 }

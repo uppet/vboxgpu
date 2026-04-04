@@ -57,7 +57,8 @@ public:
     void cmdCreateGraphicsPipeline(uint64_t deviceId, uint64_t pipelineId,
                                    uint64_t renderPassId, uint64_t layoutId,
                                    uint64_t vertModuleId, uint64_t fragModuleId,
-                                   uint32_t viewportWidth, uint32_t viewportHeight) {
+                                   uint32_t viewportWidth, uint32_t viewportHeight,
+                                   uint32_t colorAttachmentFormat = 0) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCreateGraphicsPipelines);
         w_.writeU64(deviceId);
@@ -68,6 +69,7 @@ public:
         w_.writeU64(fragModuleId);
         w_.writeU32(viewportWidth);
         w_.writeU32(viewportHeight);
+        w_.writeU32(colorAttachmentFormat); // 0 = use renderPass, nonzero = dynamic rendering format
         w_.endCommand(off);
     }
 

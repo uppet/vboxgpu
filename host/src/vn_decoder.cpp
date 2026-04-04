@@ -185,32 +185,41 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
     uint64_t fragModuleId = r.readU64();
     uint32_t vpWidth = r.readU32();
     uint32_t vpHeight = r.readU32();
+    uint32_t colorFmt = r.readU32(); // 0 = use renderPass, nonzero = dynamic rendering format
 
     VkShaderModule vertMod = lookup(shaderModules_, vertModuleId);
     VkShaderModule fragMod = lookup(shaderModules_, fragModuleId);
+    bool dynamicRendering = (renderPassId == 0 && colorFmt != 0);
 
-    fprintf(stderr, "[Decoder] CreatePipeline: id=%llu rp=%llu vert=%llu→%p frag=%llu→%p %ux%u\n",
-            (unsigned long long)pipelineId,
-            (unsigned long long)renderPassId,
-            (unsigned long long)vertModuleId, (void*)vertMod,
-            (unsigned long long)fragModuleId, (void*)fragMod,
-            vpWidth, vpHeight);
+    fprintf(stderr, "[Decoder] CreatePipeline: id=%u rp=%u vert→%p frag→%p %ux%u dynRender=%d fmt=%u\n",
+            (unsigned)pipelineId, (unsigned)renderPassId,
+            (void*)vertMod, (void*)fragMod, vpWidth, vpHeight,
+            (int)dynamicRendering, colorFmt);
 
-    if (!vertMod || !fragMod || !lookup(renderPasses_, renderPassId)) {
-        fprintf(stderr, "[Decoder] CreatePipeline: missing shader or renderpass, skipping\n");
+    if (!vertMod || !fragMod) {
+        fprintf(stderr, "[Decoder] CreatePipeline: missing shader, skipping\n");
+        store(pipelines_, pipelineId, (VkPipeline)VK_NULL_HANDLE);
+        return;
+    }
+    if (!dynamicRendering && !lookup(renderPasses_, renderPassId)) {
+        fprintf(stderr, "[Decoder] CreatePipeline: missing renderpass, skipping\n");
         store(pipelines_, pipelineId, (VkPipeline)VK_NULL_HANDLE);
         return;
     }
 
+    // Shader stages
+    uint32_t stageCount = fragMod ? 2 : 1;
     VkPipelineShaderStageCreateInfo stages[2]{};
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
     stages[0].module = vertMod;
     stages[0].pName = "main";
-    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    stages[1].module = fragMod;
-    stages[1].pName = "main";
+    if (fragMod) {
+        stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[1].module = fragMod;
+        stages[1].pName = "main";
+    }
 
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -219,22 +228,24 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
     inputAsm.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
     inputAsm.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
-    VkViewport viewport{0, 0, (float)vpWidth, (float)vpHeight, 0, 1};
-    VkRect2D scissor{{0,0}, {vpWidth, vpHeight}};
+    // Use dynamic viewport/scissor state so we don't need to specify them here
+    VkDynamicState dynStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dynState{};
+    dynState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynState.dynamicStateCount = 2;
+    dynState.pDynamicStates = dynStates;
 
     VkPipelineViewportStateCreateInfo vpState{};
     vpState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
     vpState.viewportCount = 1;
-    vpState.pViewports = &viewport;
     vpState.scissorCount = 1;
-    vpState.pScissors = &scissor;
 
     VkPipelineRasterizationStateCreateInfo raster{};
     raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
     raster.polygonMode = VK_POLYGON_MODE_FILL;
     raster.lineWidth = 1.0f;
-    raster.cullMode = VK_CULL_MODE_BACK_BIT;
-    raster.frontFace = VK_FRONT_FACE_CLOCKWISE;
+    raster.cullMode = VK_CULL_MODE_NONE; // don't cull — DXVK manages culling
+    raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 
     VkPipelineMultisampleStateCreateInfo ms{};
     ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -249,9 +260,13 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
     cb.attachmentCount = 1;
     cb.pAttachments = &cbAtt;
 
+    // Dynamic rendering info (Vulkan 1.3)
+    VkPipelineRenderingCreateInfo renderingInfo{};
+    VkFormat colorFormat = static_cast<VkFormat>(colorFmt);
+
     VkGraphicsPipelineCreateInfo pInfo{};
     pInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    pInfo.stageCount = 2;
+    pInfo.stageCount = stageCount;
     pInfo.pStages = stages;
     pInfo.pVertexInputState = &vertexInput;
     pInfo.pInputAssemblyState = &inputAsm;
@@ -259,13 +274,25 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
     pInfo.pRasterizationState = &raster;
     pInfo.pMultisampleState = &ms;
     pInfo.pColorBlendState = &cb;
+    pInfo.pDynamicState = &dynState;
     pInfo.layout = lookup(pipelineLayouts_, layoutId);
-    pInfo.renderPass = lookup(renderPasses_, renderPassId);
-    pInfo.subpass = 0;
+
+    if (dynamicRendering) {
+        renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+        renderingInfo.colorAttachmentCount = 1;
+        renderingInfo.pColorAttachmentFormats = &colorFormat;
+        pInfo.pNext = &renderingInfo;
+        pInfo.renderPass = VK_NULL_HANDLE;
+    } else {
+        pInfo.renderPass = lookup(renderPasses_, renderPassId);
+        pInfo.subpass = 0;
+    }
 
     VkPipeline pipeline;
-    if (vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pInfo, nullptr, &pipeline) != VK_SUCCESS) {
-        error_ = true;
+    VkResult vr = vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pInfo, nullptr, &pipeline);
+    fprintf(stderr, "[Decoder] CreatePipeline result=%d\n", (int)vr);
+    if (vr != VK_SUCCESS) {
+        store(pipelines_, pipelineId, (VkPipeline)VK_NULL_HANDLE);
         return;
     }
     store(pipelines_, pipelineId, pipeline);

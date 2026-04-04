@@ -35,7 +35,7 @@ void createInstance(VulkanContext& ctx) {
     appInfo.applicationVersion = VK_MAKE_VERSION(0, 1, 0);
     appInfo.pEngineName = "vbox-gpu-bridge";
     appInfo.engineVersion = VK_MAKE_VERSION(0, 1, 0);
-    appInfo.apiVersion = VK_API_VERSION_1_2;
+    appInfo.apiVersion = VK_API_VERSION_1_3;
 
     std::vector<const char*> extensions = {
         VK_KHR_SURFACE_EXTENSION_NAME,
