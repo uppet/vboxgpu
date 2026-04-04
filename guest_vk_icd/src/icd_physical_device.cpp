@@ -112,17 +112,49 @@ void IcdState::initDefaults() {
         ext.specVersion = 1;
         deviceExtensions.push_back(ext);
     };
-    addExt(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
-    addExt(VK_KHR_MAINTENANCE1_EXTENSION_NAME);
-    addExt(VK_KHR_MAINTENANCE2_EXTENSION_NAME);
-    addExt(VK_KHR_MAINTENANCE3_EXTENSION_NAME);
-    addExt(VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME);
-    addExt(VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME);
-    addExt(VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME);
-    addExt(VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME);
-    addExt(VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME);
-    addExt(VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
-    addExt(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
+    // Report all extensions DXVK may request. We're a proxy — Host GPU handles them.
+    const char* extNames[] = {
+        // KHR extensions
+        "VK_KHR_swapchain", "VK_KHR_maintenance1", "VK_KHR_maintenance2",
+        "VK_KHR_maintenance3", "VK_KHR_maintenance4", "VK_KHR_maintenance5",
+        "VK_KHR_maintenance6", "VK_KHR_maintenance7",
+        "VK_KHR_create_renderpass2", "VK_KHR_image_format_list",
+        "VK_KHR_sampler_mirror_clamp_to_edge", "VK_KHR_driver_properties",
+        "VK_KHR_external_memory_win32", "VK_KHR_external_semaphore_win32",
+        "VK_KHR_load_store_op_none", "VK_KHR_pipeline_library",
+        "VK_KHR_present_id", "VK_KHR_present_wait",
+        "VK_KHR_swapchain_mutable_format", "VK_KHR_win32_keyed_mutex",
+        "VK_KHR_buffer_device_address", "VK_KHR_dynamic_rendering",
+        "VK_KHR_depth_stencil_resolve", "VK_KHR_timeline_semaphore",
+        "VK_KHR_descriptor_update_template", "VK_KHR_shader_draw_parameters",
+        "VK_KHR_draw_indirect_count", "VK_KHR_uniform_buffer_standard_layout",
+        "VK_KHR_vulkan_memory_model", "VK_KHR_synchronization2",
+        "VK_KHR_copy_commands2", "VK_KHR_format_feature_flags2",
+        "VK_KHR_shader_integer_dot_product", "VK_KHR_shader_non_semantic_info",
+        "VK_KHR_zero_initialize_workgroup_memory",
+        // EXT extensions
+        "VK_EXT_transform_feedback", "VK_EXT_vertex_attribute_divisor",
+        "VK_EXT_robustness2", "VK_EXT_attachment_feedback_loop_layout",
+        "VK_EXT_conservative_rasterization", "VK_EXT_custom_border_color",
+        "VK_EXT_depth_clip_enable", "VK_EXT_depth_bias_control",
+        "VK_EXT_extended_dynamic_state3", "VK_EXT_shader_module_identifier",
+        "VK_EXT_shader_stencil_export", "VK_EXT_swapchain_colorspace",
+        "VK_EXT_swapchain_maintenance1", "VK_EXT_descriptor_indexing",
+        "VK_EXT_host_query_reset", "VK_EXT_sampler_filter_minmax",
+        "VK_EXT_scalar_block_layout", "VK_EXT_separate_stencil_usage",
+        "VK_EXT_shader_demote_to_helper_invocation",
+        "VK_EXT_shader_viewport_index_layer", "VK_EXT_subgroup_size_control",
+        "VK_EXT_inline_uniform_block", "VK_EXT_pipeline_creation_cache_control",
+        "VK_EXT_private_data", "VK_EXT_image_robustness",
+        "VK_EXT_4444_formats", "VK_EXT_texel_buffer_alignment",
+        "VK_EXT_ycbcr_2plane_444_formats", "VK_EXT_extended_dynamic_state",
+        "VK_EXT_extended_dynamic_state2", "VK_EXT_shader_atomic_float",
+        // NV extensions
+        "VK_NV_descriptor_pool_overallocation", "VK_NV_low_latency2",
+        "VK_NV_raw_access_chains", "VK_NVX_binary_import", "VK_NVX_image_view_handle",
+    };
+    for (const char* name : extNames)
+        addExt(name);
 
     // --- Surface formats ---
     surfaceFormats.push_back({ VK_FORMAT_B8G8R8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR });
