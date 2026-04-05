@@ -65,6 +65,13 @@ enum VnCommandType : uint32_t {
     VN_CMD_vkCmdBeginRendering             = 0x1000,  // bridge-defined (not in Venus)
     VN_CMD_vkCmdEndRendering               = 0x1001,
 
+    // Bridge-defined resource commands (not in Venus protocol)
+    VN_CMD_vkCreateSampler                 = 0x1002,
+    VN_CMD_vkCreateDescriptorPool          = 0x1003,
+    VN_CMD_vkAllocateDescriptorSets        = 0x1004,
+    VN_CMD_vkUpdateDescriptorSets          = 0x1005,
+    VN_CMD_vkCmdBindDescriptorSets         = 0x1006,
+
     // Extension: swapchain (handled specially by host)
     VN_CMD_BRIDGE_CreateSwapchain          = 0x10000,
     VN_CMD_BRIDGE_AcquireNextImage         = 0x10001,

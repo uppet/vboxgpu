@@ -85,6 +85,15 @@ private:
     void handleQueueSubmit(VnStreamReader& r);
     void handleWaitForFences(VnStreamReader& r);
     void handleResetFences(VnStreamReader& r);
+    void handleCreateImage(VnStreamReader& r);
+    void handleAllocateMemory(VnStreamReader& r);
+    void handleBindImageMemory(VnStreamReader& r);
+    void handleCreateImageView(VnStreamReader& r);
+    void handleCreateSampler(VnStreamReader& r);
+    void handleCreateDescriptorPool(VnStreamReader& r);
+    void handleAllocateDescriptorSets(VnStreamReader& r);
+    void handleUpdateDescriptorSets(VnStreamReader& r);
+    void handleCmdBindDescriptorSets(VnStreamReader& r);
     void handleBridgeCreateSwapchain(VnStreamReader& r);
     void handleBridgeAcquireNextImage(VnStreamReader& r);
     void handleBridgeQueuePresent(VnStreamReader& r);
@@ -108,6 +117,11 @@ private:
 
     std::unordered_map<uint64_t, VkRenderPass> renderPasses_;
     std::unordered_map<uint64_t, VkShaderModule> shaderModules_;
+    std::unordered_map<uint64_t, VkImage> images_;
+    std::unordered_map<uint64_t, VkDeviceMemory> deviceMemories_;
+    std::unordered_map<uint64_t, VkSampler> samplers_;
+    std::unordered_map<uint64_t, VkDescriptorPool> descriptorPools_;
+    std::unordered_map<uint64_t, VkDescriptorSet> descriptorSets_;
     std::unordered_map<uint64_t, VkDescriptorSetLayout> descriptorSetLayouts_;
     std::unordered_map<uint64_t, VkPipelineLayout> pipelineLayouts_;
     std::unordered_map<uint64_t, VkPipeline> pipelines_;

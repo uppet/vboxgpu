@@ -46,6 +46,7 @@ public:
         w_.endCommand(off);
     }
 
+#ifdef VK_VERSION_1_0 // Requires VkDescriptorSetLayoutBinding
     void cmdCreateDescriptorSetLayout(uint64_t deviceId, uint64_t layoutId,
                                        uint32_t bindingCount,
                                        const VkDescriptorSetLayoutBinding* pBindings) {
@@ -63,10 +64,13 @@ public:
         w_.endCommand(off);
     }
 
+#endif // VK_VERSION_1_0
+
+    // stageFlags/offset/size triplets packed as uint32_t arrays
     void cmdCreatePipelineLayout(uint64_t deviceId, uint64_t layoutId,
                                   uint32_t setLayoutCount, const uint64_t* setLayoutIds,
                                   uint32_t pushConstantRangeCount,
-                                  const VkPushConstantRange* pPushConstantRanges) {
+                                  const uint32_t* pushRangeData /* 3 u32 per range: stageFlags, offset, size */) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCreatePipelineLayout);
         w_.writeU64(deviceId);
@@ -76,9 +80,9 @@ public:
             w_.writeU64(setLayoutIds[i]);
         w_.writeU32(pushConstantRangeCount);
         for (uint32_t i = 0; i < pushConstantRangeCount; i++) {
-            w_.writeU32(pPushConstantRanges[i].stageFlags);
-            w_.writeU32(pPushConstantRanges[i].offset);
-            w_.writeU32(pPushConstantRanges[i].size);
+            w_.writeU32(pushRangeData[i*3+0]); // stageFlags
+            w_.writeU32(pushRangeData[i*3+1]); // offset
+            w_.writeU32(pushRangeData[i*3+2]); // size
         }
         w_.endCommand(off);
     }
@@ -99,6 +103,148 @@ public:
         w_.writeU32(viewportWidth);
         w_.writeU32(viewportHeight);
         w_.writeU32(colorAttachmentFormat); // 0 = use renderPass, nonzero = dynamic rendering format
+        w_.endCommand(off);
+    }
+
+    // --- GPU Resource creation ---
+
+    void cmdCreateImage(uint64_t deviceId, uint64_t imageId,
+                        uint32_t imageType, uint32_t format,
+                        uint32_t width, uint32_t height, uint32_t depth,
+                        uint32_t mipLevels, uint32_t arrayLayers, uint32_t samples,
+                        uint32_t tiling, uint32_t usage) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCreateImage);
+        w_.writeU64(deviceId); w_.writeU64(imageId);
+        w_.writeU32(imageType); w_.writeU32(format);
+        w_.writeU32(width); w_.writeU32(height); w_.writeU32(depth);
+        w_.writeU32(mipLevels); w_.writeU32(arrayLayers); w_.writeU32(samples);
+        w_.writeU32(tiling); w_.writeU32(usage);
+        w_.endCommand(off);
+    }
+
+    void cmdAllocateMemory(uint64_t deviceId, uint64_t memoryId,
+                           uint64_t allocationSize, uint32_t memoryTypeIndex) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkAllocateMemory);
+        w_.writeU64(deviceId); w_.writeU64(memoryId);
+        w_.writeU64(allocationSize); w_.writeU32(memoryTypeIndex);
+        w_.endCommand(off);
+    }
+
+    void cmdBindImageMemory(uint64_t deviceId, uint64_t imageId,
+                            uint64_t memoryId, uint64_t memoryOffset) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkBindImageMemory);
+        w_.writeU64(deviceId); w_.writeU64(imageId);
+        w_.writeU64(memoryId); w_.writeU64(memoryOffset);
+        w_.endCommand(off);
+    }
+
+    void cmdCreateImageView(uint64_t deviceId, uint64_t viewId, uint64_t imageId,
+                            uint32_t viewType, uint32_t format,
+                            uint32_t compR, uint32_t compG, uint32_t compB, uint32_t compA,
+                            uint32_t aspectMask, uint32_t baseMipLevel, uint32_t levelCount,
+                            uint32_t baseArrayLayer, uint32_t layerCount) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCreateImageView);
+        w_.writeU64(deviceId); w_.writeU64(viewId); w_.writeU64(imageId);
+        w_.writeU32(viewType); w_.writeU32(format);
+        w_.writeU32(compR); w_.writeU32(compG); w_.writeU32(compB); w_.writeU32(compA);
+        w_.writeU32(aspectMask); w_.writeU32(baseMipLevel); w_.writeU32(levelCount);
+        w_.writeU32(baseArrayLayer); w_.writeU32(layerCount);
+        w_.endCommand(off);
+    }
+
+#ifdef VK_VERSION_1_0 // These methods require Vulkan types (VkSamplerCreateInfo etc.)
+    void cmdCreateSampler(uint64_t deviceId, uint64_t samplerId,
+                          const VkSamplerCreateInfo* ci) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCreateSampler);
+        w_.writeU64(deviceId); w_.writeU64(samplerId);
+        w_.writeU32(ci->magFilter); w_.writeU32(ci->minFilter); w_.writeU32(ci->mipmapMode);
+        w_.writeU32(ci->addressModeU); w_.writeU32(ci->addressModeV); w_.writeU32(ci->addressModeW);
+        w_.writeF32(ci->mipLodBias);
+        w_.writeU32(ci->anisotropyEnable); w_.writeF32(ci->maxAnisotropy);
+        w_.writeU32(ci->compareEnable); w_.writeU32(ci->compareOp);
+        w_.writeF32(ci->minLod); w_.writeF32(ci->maxLod);
+        w_.writeU32(ci->borderColor); w_.writeU32(ci->unnormalizedCoordinates);
+        w_.endCommand(off);
+    }
+
+    void cmdCreateDescriptorPool(uint64_t deviceId, uint64_t poolId,
+                                  uint32_t flags, uint32_t maxSets,
+                                  uint32_t poolSizeCount,
+                                  const VkDescriptorPoolSize* pPoolSizes) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCreateDescriptorPool);
+        w_.writeU64(deviceId); w_.writeU64(poolId);
+        w_.writeU32(flags); w_.writeU32(maxSets); w_.writeU32(poolSizeCount);
+        for (uint32_t i = 0; i < poolSizeCount; i++) {
+            w_.writeU32(pPoolSizes[i].type);
+            w_.writeU32(pPoolSizes[i].descriptorCount);
+        }
+        w_.endCommand(off);
+    }
+
+    void cmdAllocateDescriptorSets(uint64_t deviceId, uint64_t poolId,
+                                    uint32_t setCount,
+                                    const uint64_t* layoutIds,
+                                    const uint64_t* setIds) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkAllocateDescriptorSets);
+        w_.writeU64(deviceId); w_.writeU64(poolId); w_.writeU32(setCount);
+        for (uint32_t i = 0; i < setCount; i++) {
+            w_.writeU64(layoutIds[i]); w_.writeU64(setIds[i]);
+        }
+        w_.endCommand(off);
+    }
+
+    void cmdUpdateDescriptorSets(uint64_t deviceId, uint32_t writeCount,
+                                  const VkWriteDescriptorSet* pWrites) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkUpdateDescriptorSets);
+        w_.writeU64(deviceId); w_.writeU32(writeCount);
+        for (uint32_t i = 0; i < writeCount; i++) {
+            w_.writeU64((uint64_t)pWrites[i].dstSet);
+            w_.writeU32(pWrites[i].dstBinding);
+            w_.writeU32(pWrites[i].dstArrayElement);
+            w_.writeU32(pWrites[i].descriptorCount);
+            w_.writeU32(pWrites[i].descriptorType);
+            for (uint32_t j = 0; j < pWrites[i].descriptorCount; j++) {
+                // Encode image info (sampler + imageView + layout)
+                uint64_t samId = 0, ivId = 0; uint32_t layout = 0;
+                if (pWrites[i].pImageInfo) {
+                    samId = (uint64_t)pWrites[i].pImageInfo[j].sampler;
+                    ivId = (uint64_t)pWrites[i].pImageInfo[j].imageView;
+                    layout = pWrites[i].pImageInfo[j].imageLayout;
+                }
+                w_.writeU64(samId); w_.writeU64(ivId); w_.writeU32(layout);
+                // Encode buffer info
+                uint64_t bufId = 0; uint64_t bufOff = 0, bufRange = 0;
+                if (pWrites[i].pBufferInfo) {
+                    bufId = (uint64_t)pWrites[i].pBufferInfo[j].buffer;
+                    bufOff = pWrites[i].pBufferInfo[j].offset;
+                    bufRange = pWrites[i].pBufferInfo[j].range;
+                }
+                w_.writeU64(bufId); w_.writeU64(bufOff); w_.writeU64(bufRange);
+            }
+        }
+        w_.endCommand(off);
+    }
+
+#endif // VK_VERSION_1_0
+
+    void cmdBindDescriptorSets(uint64_t cbId, uint32_t bindPoint, uint64_t layoutId,
+                                uint32_t firstSet, uint32_t setCount, const uint64_t* setIds,
+                                uint32_t dynamicOffsetCount, const uint32_t* dynamicOffsets) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdBindDescriptorSets);
+        w_.writeU64(cbId); w_.writeU32(bindPoint); w_.writeU64(layoutId);
+        w_.writeU32(firstSet); w_.writeU32(setCount);
+        for (uint32_t i = 0; i < setCount; i++) w_.writeU64(setIds[i]);
+        w_.writeU32(dynamicOffsetCount);
+        for (uint32_t i = 0; i < dynamicOffsetCount; i++) w_.writeU32(dynamicOffsets[i]);
         w_.endCommand(off);
     }
 

@@ -88,6 +88,15 @@ void VnDecoder::dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdS
     case VN_CMD_vkCmdSetScissor:          handleCmdSetScissor(reader); break;
     case VN_CMD_vkCmdDraw:                handleCmdDraw(reader); break;
     case VN_CMD_vkCmdPushConstants:      handleCmdPushConstants(reader); break;
+    case VN_CMD_vkCreateImage:           handleCreateImage(reader); break;
+    case VN_CMD_vkAllocateMemory:        handleAllocateMemory(reader); break;
+    case VN_CMD_vkBindImageMemory:       handleBindImageMemory(reader); break;
+    case VN_CMD_vkCreateImageView:       handleCreateImageView(reader); break;
+    case VN_CMD_vkCreateSampler:         handleCreateSampler(reader); break;
+    case VN_CMD_vkCreateDescriptorPool:  handleCreateDescriptorPool(reader); break;
+    case VN_CMD_vkAllocateDescriptorSets:handleAllocateDescriptorSets(reader); break;
+    case VN_CMD_vkUpdateDescriptorSets:  handleUpdateDescriptorSets(reader); break;
+    case VN_CMD_vkCmdBindDescriptorSets: handleCmdBindDescriptorSets(reader); break;
     case VN_CMD_vkCreateSemaphore:        handleCreateSemaphore(reader); break;
     case VN_CMD_vkCreateFence:            handleCreateFence(reader); break;
     case VN_CMD_vkQueueSubmit:            handleQueueSubmit(reader); break;
@@ -236,6 +245,251 @@ void VnDecoder::handleCreatePipelineLayout(VnStreamReader& r) {
         return;
     }
     store(pipelineLayouts_, layoutId, layout);
+}
+
+// --- GPU Resource handlers ---
+
+void VnDecoder::handleCreateImage(VnStreamReader& r) {
+    uint64_t deviceId = r.readU64();
+    uint64_t imageId = r.readU64();
+    uint32_t imageType = r.readU32(), format = r.readU32();
+    uint32_t w = r.readU32(), h = r.readU32(), d = r.readU32();
+    uint32_t mipLevels = r.readU32(), arrayLayers = r.readU32(), samples = r.readU32();
+    uint32_t tiling = r.readU32(), usage = r.readU32();
+
+    VkImageCreateInfo ci{};
+    ci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ci.imageType = static_cast<VkImageType>(imageType);
+    ci.format = static_cast<VkFormat>(format);
+    ci.extent = {w, h, d};
+    ci.mipLevels = mipLevels; ci.arrayLayers = arrayLayers;
+    ci.samples = static_cast<VkSampleCountFlagBits>(samples);
+    ci.tiling = static_cast<VkImageTiling>(tiling);
+    ci.usage = usage;
+    ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VkImage image;
+    VkResult vr = vkCreateImage(device_, &ci, nullptr, &image);
+    fprintf(stderr, "[Decoder] CreateImage: id=%llu %ux%u fmt=%u usage=0x%x result=%d\n",
+            (unsigned long long)imageId, w, h, format, usage, (int)vr);
+    if (vr != VK_SUCCESS) return;
+    store(images_, imageId, image);
+}
+
+uint32_t VnDecoder_mapMemoryType(VkPhysicalDevice physDev, uint32_t icdType) {
+    VkPhysicalDeviceMemoryProperties props;
+    vkGetPhysicalDeviceMemoryProperties(physDev, &props);
+    VkMemoryPropertyFlags wanted = (icdType == 0)
+        ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+        : (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    for (uint32_t i = 0; i < props.memoryTypeCount; i++)
+        if ((props.memoryTypes[i].propertyFlags & wanted) == wanted) return i;
+    return 0;
+}
+
+void VnDecoder::handleAllocateMemory(VnStreamReader& r) {
+    uint64_t deviceId = r.readU64();
+    uint64_t memoryId = r.readU64();
+    uint64_t allocSize = r.readU64();
+    uint32_t memTypeIdx = r.readU32();
+
+    uint32_t hostType = VnDecoder_mapMemoryType(physDevice_, memTypeIdx);
+
+    VkMemoryAllocateInfo ai{};
+    ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    ai.allocationSize = allocSize;
+    ai.memoryTypeIndex = hostType;
+
+    VkDeviceMemory mem;
+    VkResult vr = vkAllocateMemory(device_, &ai, nullptr, &mem);
+    fprintf(stderr, "[Decoder] AllocMemory: id=%llu size=%llu icdType=%u→hostType=%u result=%d\n",
+            (unsigned long long)memoryId, (unsigned long long)allocSize, memTypeIdx, hostType, (int)vr);
+    if (vr != VK_SUCCESS) return;
+    store(deviceMemories_, memoryId, mem);
+}
+
+void VnDecoder::handleBindImageMemory(VnStreamReader& r) {
+    uint64_t deviceId = r.readU64();
+    uint64_t imageId = r.readU64();
+    uint64_t memoryId = r.readU64();
+    uint64_t offset = r.readU64();
+
+    VkImage img = lookup(images_, imageId);
+    VkDeviceMemory mem = lookup(deviceMemories_, memoryId);
+    if (!img || !mem) return;
+    vkBindImageMemory(device_, img, mem, offset);
+}
+
+void VnDecoder::handleCreateImageView(VnStreamReader& r) {
+    uint64_t deviceId = r.readU64();
+    uint64_t viewId = r.readU64();
+    uint64_t imageId = r.readU64();
+    uint32_t viewType = r.readU32(), format = r.readU32();
+    uint32_t cR = r.readU32(), cG = r.readU32(), cB = r.readU32(), cA = r.readU32();
+    uint32_t aspect = r.readU32(), baseMip = r.readU32(), levels = r.readU32();
+    uint32_t baseLayer = r.readU32(), layers = r.readU32();
+
+    VkImage img = lookup(images_, imageId);
+    if (!img) return;
+
+    VkImageViewCreateInfo ci{};
+    ci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    ci.image = img;
+    ci.viewType = static_cast<VkImageViewType>(viewType);
+    ci.format = static_cast<VkFormat>(format);
+    ci.components = {static_cast<VkComponentSwizzle>(cR), static_cast<VkComponentSwizzle>(cG),
+                     static_cast<VkComponentSwizzle>(cB), static_cast<VkComponentSwizzle>(cA)};
+    ci.subresourceRange = {aspect, baseMip, levels, baseLayer, layers};
+
+    VkImageView view;
+    VkResult vr = vkCreateImageView(device_, &ci, nullptr, &view);
+    if (vr != VK_SUCCESS) return;
+    store(imageViews_, viewId, view);
+}
+
+void VnDecoder::handleCreateSampler(VnStreamReader& r) {
+    uint64_t deviceId = r.readU64();
+    uint64_t samplerId = r.readU64();
+
+    VkSamplerCreateInfo ci{};
+    ci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    ci.magFilter = static_cast<VkFilter>(r.readU32());
+    ci.minFilter = static_cast<VkFilter>(r.readU32());
+    ci.mipmapMode = static_cast<VkSamplerMipmapMode>(r.readU32());
+    ci.addressModeU = static_cast<VkSamplerAddressMode>(r.readU32());
+    ci.addressModeV = static_cast<VkSamplerAddressMode>(r.readU32());
+    ci.addressModeW = static_cast<VkSamplerAddressMode>(r.readU32());
+    ci.mipLodBias = r.readF32();
+    ci.anisotropyEnable = r.readU32();
+    ci.maxAnisotropy = r.readF32();
+    ci.compareEnable = r.readU32();
+    ci.compareOp = static_cast<VkCompareOp>(r.readU32());
+    ci.minLod = r.readF32();
+    ci.maxLod = r.readF32();
+    ci.borderColor = static_cast<VkBorderColor>(r.readU32());
+    ci.unnormalizedCoordinates = r.readU32();
+
+    VkSampler sampler;
+    VkResult vr = vkCreateSampler(device_, &ci, nullptr, &sampler);
+    if (vr != VK_SUCCESS) return;
+    store(samplers_, samplerId, sampler);
+}
+
+void VnDecoder::handleCreateDescriptorPool(VnStreamReader& r) {
+    uint64_t deviceId = r.readU64();
+    uint64_t poolId = r.readU64();
+    uint32_t flags = r.readU32(), maxSets = r.readU32(), poolSizeCount = r.readU32();
+
+    std::vector<VkDescriptorPoolSize> sizes(poolSizeCount);
+    for (uint32_t i = 0; i < poolSizeCount; i++) {
+        sizes[i].type = static_cast<VkDescriptorType>(r.readU32());
+        sizes[i].descriptorCount = r.readU32();
+    }
+
+    VkDescriptorPoolCreateInfo ci{};
+    ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    ci.flags = flags;
+    ci.maxSets = maxSets;
+    ci.poolSizeCount = poolSizeCount;
+    ci.pPoolSizes = sizes.data();
+
+    VkDescriptorPool pool;
+    VkResult vr = vkCreateDescriptorPool(device_, &ci, nullptr, &pool);
+    if (vr != VK_SUCCESS) return;
+    store(descriptorPools_, poolId, pool);
+}
+
+void VnDecoder::handleAllocateDescriptorSets(VnStreamReader& r) {
+    uint64_t deviceId = r.readU64();
+    uint64_t poolId = r.readU64();
+    uint32_t setCount = r.readU32();
+
+    VkDescriptorPool pool = lookup(descriptorPools_, poolId);
+    if (!pool) return;
+
+    std::vector<VkDescriptorSetLayout> layouts(setCount);
+    std::vector<uint64_t> setIds(setCount);
+    for (uint32_t i = 0; i < setCount; i++) {
+        uint64_t layoutId = r.readU64();
+        setIds[i] = r.readU64();
+        layouts[i] = lookup(descriptorSetLayouts_, layoutId);
+    }
+
+    VkDescriptorSetAllocateInfo ai{};
+    ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    ai.descriptorPool = pool;
+    ai.descriptorSetCount = setCount;
+    ai.pSetLayouts = layouts.data();
+
+    std::vector<VkDescriptorSet> sets(setCount);
+    VkResult vr = vkAllocateDescriptorSets(device_, &ai, sets.data());
+    if (vr != VK_SUCCESS) {
+        fprintf(stderr, "[Decoder] AllocDescSets FAILED: result=%d\n", (int)vr);
+        return;
+    }
+    for (uint32_t i = 0; i < setCount; i++)
+        store(descriptorSets_, setIds[i], sets[i]);
+}
+
+void VnDecoder::handleUpdateDescriptorSets(VnStreamReader& r) {
+    uint64_t deviceId = r.readU64();
+    uint32_t writeCount = r.readU32();
+
+    std::vector<VkWriteDescriptorSet> writes(writeCount);
+    std::vector<std::vector<VkDescriptorImageInfo>> allImageInfos(writeCount);
+    std::vector<std::vector<VkDescriptorBufferInfo>> allBufferInfos(writeCount);
+
+    for (uint32_t i = 0; i < writeCount; i++) {
+        uint64_t dstSetId = r.readU64();
+        uint32_t dstBinding = r.readU32(), dstArrayElem = r.readU32();
+        uint32_t descCount = r.readU32(), descType = r.readU32();
+
+        allImageInfos[i].resize(descCount);
+        allBufferInfos[i].resize(descCount);
+        for (uint32_t j = 0; j < descCount; j++) {
+            uint64_t samId = r.readU64(), ivId = r.readU64();
+            uint32_t imgLayout = r.readU32();
+            uint64_t bufId = r.readU64(), bufOff = r.readU64(), bufRange = r.readU64();
+            allImageInfos[i][j].sampler = lookup(samplers_, samId);
+            allImageInfos[i][j].imageView = lookup(imageViews_, ivId);
+            allImageInfos[i][j].imageLayout = static_cast<VkImageLayout>(imgLayout);
+            // Buffer info not used yet but read to advance stream
+        }
+
+        writes[i] = {};
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = lookup(descriptorSets_, dstSetId);
+        writes[i].dstBinding = dstBinding;
+        writes[i].dstArrayElement = dstArrayElem;
+        writes[i].descriptorCount = descCount;
+        writes[i].descriptorType = static_cast<VkDescriptorType>(descType);
+        writes[i].pImageInfo = allImageInfos[i].data();
+    }
+
+    vkUpdateDescriptorSets(device_, writeCount, writes.data(), 0, nullptr);
+}
+
+void VnDecoder::handleCmdBindDescriptorSets(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint32_t bindPoint = r.readU32();
+    uint64_t layoutId = r.readU64();
+    uint32_t firstSet = r.readU32(), setCount = r.readU32();
+
+    std::vector<VkDescriptorSet> sets(setCount);
+    for (uint32_t i = 0; i < setCount; i++) {
+        uint64_t setId = r.readU64();
+        sets[i] = lookup(descriptorSets_, setId);
+    }
+    uint32_t dynOffCount = r.readU32();
+    std::vector<uint32_t> dynOffs(dynOffCount);
+    for (uint32_t i = 0; i < dynOffCount; i++) dynOffs[i] = r.readU32();
+
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    VkPipelineLayout layout = lookup(pipelineLayouts_, layoutId);
+    if (!cb || !layout) return;
+
+    vkCmdBindDescriptorSets(cb, static_cast<VkPipelineBindPoint>(bindPoint), layout,
+        firstSet, setCount, sets.data(), dynOffCount, dynOffs.data());
 }
 
 void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
@@ -1064,6 +1318,11 @@ void VnDecoder::cleanup() {
     for (auto& [id, p] : pipelines_) vkDestroyPipeline(device_, p, nullptr);
     for (auto& [id, l] : pipelineLayouts_) vkDestroyPipelineLayout(device_, l, nullptr);
     for (auto& [id, dsl] : descriptorSetLayouts_) vkDestroyDescriptorSetLayout(device_, dsl, nullptr);
+    for (auto& [id, pool] : descriptorPools_) vkDestroyDescriptorPool(device_, pool, nullptr);
+    for (auto& [id, s] : samplers_) vkDestroySampler(device_, s, nullptr);
+    for (auto& [id, iv] : imageViews_) vkDestroyImageView(device_, iv, nullptr);
+    for (auto& [id, img] : images_) vkDestroyImage(device_, img, nullptr);
+    for (auto& [id, mem] : deviceMemories_) vkFreeMemory(device_, mem, nullptr);
     for (auto& [id, m] : shaderModules_) vkDestroyShaderModule(device_, m, nullptr);
     for (auto& [id, fb] : framebuffers_) vkDestroyFramebuffer(device_, fb, nullptr);
     for (auto& [id, rp] : renderPasses_) vkDestroyRenderPass(device_, rp, nullptr);

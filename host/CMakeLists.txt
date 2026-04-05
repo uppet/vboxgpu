@@ -50,11 +50,12 @@ set(CMDSTREAM_SOURCES
     src/main_cmdstream.cpp
     src/vk_bootstrap.cpp
     src/vn_decoder.cpp
+    src/win_capture.cpp
 )
 
 add_executable(vbox_host_cmd ${CMDSTREAM_SOURCES})
 target_include_directories(vbox_host_cmd PRIVATE src)
-target_link_libraries(vbox_host_cmd PRIVATE Vulkan::Vulkan)
+target_link_libraries(vbox_host_cmd PRIVATE Vulkan::Vulkan windowsapp)
 add_dependencies(vbox_host_cmd shaders)
 target_compile_definitions(vbox_host_cmd PRIVATE
     VK_USE_PLATFORM_WIN32_KHR

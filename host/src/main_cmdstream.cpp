@@ -82,7 +82,7 @@ static std::vector<uint8_t> buildSetupStream(const char* shaderDir) {
                               reinterpret_cast<const uint32_t*>(fragSpv.data()), fragSpv.size());
 
     // Create pipeline
-    enc.cmdCreatePipelineLayout(H_DEVICE, H_PIPE_LAYOUT);
+    enc.cmdCreatePipelineLayout(H_DEVICE, H_PIPE_LAYOUT, 0, (const uint64_t*)nullptr, 0, (const uint32_t*)nullptr);
     enc.cmdCreateGraphicsPipeline(H_DEVICE, H_PIPELINE, H_RENDER_PASS, H_PIPE_LAYOUT,
                                   H_VERT_SHADER, H_FRAG_SHADER, WINDOW_WIDTH, WINDOW_HEIGHT,
                                   0); // 0 = use renderPass

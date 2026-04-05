@@ -627,9 +627,16 @@ static PFN_vkVoidFunction VKAPI_CALL icd_vkGetDeviceProcAddr(VkDevice device, co
 // --- Resource creation stubs (forward to encoder) ---
 
 static VkResult VKAPI_CALL icd_vkCreateImageView(
-    VkDevice, const VkImageViewCreateInfo*, const VkAllocationCallbacks*, VkImageView* p)
+    VkDevice, const VkImageViewCreateInfo* pInfo, const VkAllocationCallbacks*, VkImageView* p)
 {
-    *p = (VkImageView)g_icd.handles.alloc();
+    uint64_t id = g_icd.handles.alloc();
+    *p = (VkImageView)id;
+    g_icd.encoder.cmdCreateImageView(1, id, (uint64_t)pInfo->image,
+        pInfo->viewType, pInfo->format,
+        pInfo->components.r, pInfo->components.g, pInfo->components.b, pInfo->components.a,
+        pInfo->subresourceRange.aspectMask, pInfo->subresourceRange.baseMipLevel,
+        pInfo->subresourceRange.levelCount, pInfo->subresourceRange.baseArrayLayer,
+        pInfo->subresourceRange.layerCount);
     return VK_SUCCESS;
 }
 
@@ -698,9 +705,16 @@ static VkResult VKAPI_CALL icd_vkCreatePipelineLayout(
     for (uint32_t i = 0; i < pInfo->setLayoutCount; i++)
         setLayoutIds[i] = (uint64_t)pInfo->pSetLayouts[i];
 
+    // Pack push constant ranges as flat u32 array (stageFlags, offset, size per range)
+    std::vector<uint32_t> pushData(pInfo->pushConstantRangeCount * 3);
+    for (uint32_t i = 0; i < pInfo->pushConstantRangeCount; i++) {
+        pushData[i*3+0] = pInfo->pPushConstantRanges[i].stageFlags;
+        pushData[i*3+1] = pInfo->pPushConstantRanges[i].offset;
+        pushData[i*3+2] = pInfo->pPushConstantRanges[i].size;
+    }
     g_icd.encoder.cmdCreatePipelineLayout(1, id,
         pInfo->setLayoutCount, setLayoutIds.data(),
-        pInfo->pushConstantRangeCount, pInfo->pPushConstantRanges);
+        pInfo->pushConstantRangeCount, pushData.data());
     return VK_SUCCESS;
 }
 
@@ -962,8 +976,10 @@ static VkResult VKAPI_CALL icd_vkQueueWaitIdle(VkQueue) { return VK_SUCCESS; }
 
 // --- Memory ---
 
-static VkResult VKAPI_CALL icd_vkAllocateMemory(VkDevice, const VkMemoryAllocateInfo*, const VkAllocationCallbacks*, VkDeviceMemory* p) {
-    *p = (VkDeviceMemory)g_icd.handles.alloc();
+static VkResult VKAPI_CALL icd_vkAllocateMemory(VkDevice, const VkMemoryAllocateInfo* pInfo, const VkAllocationCallbacks*, VkDeviceMemory* p) {
+    uint64_t id = g_icd.handles.alloc();
+    *p = (VkDeviceMemory)id;
+    g_icd.encoder.cmdAllocateMemory(1, id, pInfo->allocationSize, pInfo->memoryTypeIndex);
     return VK_SUCCESS;
 }
 static void VKAPI_CALL icd_vkFreeMemory(VkDevice, VkDeviceMemory, const VkAllocationCallbacks*) {}
@@ -974,7 +990,10 @@ static VkResult VKAPI_CALL icd_vkMapMemory(VkDevice, VkDeviceMemory, VkDeviceSiz
 }
 static void VKAPI_CALL icd_vkUnmapMemory(VkDevice, VkDeviceMemory) {}
 static VkResult VKAPI_CALL icd_vkBindBufferMemory(VkDevice, VkBuffer, VkDeviceMemory, VkDeviceSize) { return VK_SUCCESS; }
-static VkResult VKAPI_CALL icd_vkBindImageMemory(VkDevice, VkImage, VkDeviceMemory, VkDeviceSize) { return VK_SUCCESS; }
+static VkResult VKAPI_CALL icd_vkBindImageMemory(VkDevice, VkImage img, VkDeviceMemory mem, VkDeviceSize offset) {
+    g_icd.encoder.cmdBindImageMemory(1, (uint64_t)img, (uint64_t)mem, offset);
+    return VK_SUCCESS;
+}
 static void VKAPI_CALL icd_vkGetBufferMemoryRequirements(VkDevice, VkBuffer, VkMemoryRequirements* p) {
     p->size = 65536; p->alignment = 256; p->memoryTypeBits = 0x3;
 }
@@ -994,15 +1013,25 @@ static VkResult VKAPI_CALL icd_vkCreateBuffer(VkDevice, const VkBufferCreateInfo
     *p = (VkBuffer)g_icd.handles.alloc(); return VK_SUCCESS;
 }
 static void VKAPI_CALL icd_vkDestroyBuffer(VkDevice, VkBuffer, const VkAllocationCallbacks*) {}
-static VkResult VKAPI_CALL icd_vkCreateImage(VkDevice, const VkImageCreateInfo*, const VkAllocationCallbacks*, VkImage* p) {
-    *p = (VkImage)g_icd.handles.alloc(); return VK_SUCCESS;
+static VkResult VKAPI_CALL icd_vkCreateImage(VkDevice, const VkImageCreateInfo* pInfo, const VkAllocationCallbacks*, VkImage* p) {
+    uint64_t id = g_icd.handles.alloc();
+    *p = (VkImage)id;
+    g_icd.encoder.cmdCreateImage(1, id,
+        pInfo->imageType, pInfo->format,
+        pInfo->extent.width, pInfo->extent.height, pInfo->extent.depth,
+        pInfo->mipLevels, pInfo->arrayLayers, pInfo->samples,
+        pInfo->tiling, pInfo->usage);
+    return VK_SUCCESS;
 }
 static void VKAPI_CALL icd_vkDestroyImage(VkDevice, VkImage, const VkAllocationCallbacks*) {}
 
 // --- Sampler / Descriptor ---
 
-static VkResult VKAPI_CALL icd_vkCreateSampler(VkDevice, const VkSamplerCreateInfo*, const VkAllocationCallbacks*, VkSampler* p) {
-    *p = (VkSampler)g_icd.handles.alloc(); return VK_SUCCESS;
+static VkResult VKAPI_CALL icd_vkCreateSampler(VkDevice, const VkSamplerCreateInfo* pInfo, const VkAllocationCallbacks*, VkSampler* p) {
+    uint64_t id = g_icd.handles.alloc();
+    *p = (VkSampler)id;
+    g_icd.encoder.cmdCreateSampler(1, id, pInfo);
+    return VK_SUCCESS;
 }
 static void VKAPI_CALL icd_vkDestroySampler(VkDevice, VkSampler, const VkAllocationCallbacks*) {}
 
@@ -1018,19 +1047,33 @@ static VkResult VKAPI_CALL icd_vkCreateDescriptorSetLayout(
 }
 static void VKAPI_CALL icd_vkDestroyDescriptorSetLayout(VkDevice, VkDescriptorSetLayout, const VkAllocationCallbacks*) {}
 
-static VkResult VKAPI_CALL icd_vkCreateDescriptorPool(VkDevice, const VkDescriptorPoolCreateInfo*, const VkAllocationCallbacks*, VkDescriptorPool* p) {
-    *p = (VkDescriptorPool)g_icd.handles.alloc(); return VK_SUCCESS;
+static VkResult VKAPI_CALL icd_vkCreateDescriptorPool(VkDevice, const VkDescriptorPoolCreateInfo* pInfo, const VkAllocationCallbacks*, VkDescriptorPool* p) {
+    uint64_t id = g_icd.handles.alloc();
+    *p = (VkDescriptorPool)id;
+    g_icd.encoder.cmdCreateDescriptorPool(1, id, pInfo->flags, pInfo->maxSets,
+        pInfo->poolSizeCount, pInfo->pPoolSizes);
+    return VK_SUCCESS;
 }
 static void VKAPI_CALL icd_vkDestroyDescriptorPool(VkDevice, VkDescriptorPool, const VkAllocationCallbacks*) {}
 static VkResult VKAPI_CALL icd_vkResetDescriptorPool(VkDevice, VkDescriptorPool, VkDescriptorPoolResetFlags) { return VK_SUCCESS; }
 
 static VkResult VKAPI_CALL icd_vkAllocateDescriptorSets(VkDevice, const VkDescriptorSetAllocateInfo* pInfo, VkDescriptorSet* p) {
-    for (uint32_t i = 0; i < pInfo->descriptorSetCount; i++)
-        p[i] = (VkDescriptorSet)g_icd.handles.alloc();
+    std::vector<uint64_t> layoutIds(pInfo->descriptorSetCount);
+    std::vector<uint64_t> setIds(pInfo->descriptorSetCount);
+    for (uint32_t i = 0; i < pInfo->descriptorSetCount; i++) {
+        setIds[i] = g_icd.handles.alloc();
+        p[i] = (VkDescriptorSet)setIds[i];
+        layoutIds[i] = (uint64_t)pInfo->pSetLayouts[i];
+    }
+    g_icd.encoder.cmdAllocateDescriptorSets(1, (uint64_t)pInfo->descriptorPool,
+        pInfo->descriptorSetCount, layoutIds.data(), setIds.data());
     return VK_SUCCESS;
 }
 static VkResult VKAPI_CALL icd_vkFreeDescriptorSets(VkDevice, VkDescriptorPool, uint32_t, const VkDescriptorSet*) { return VK_SUCCESS; }
-static void VKAPI_CALL icd_vkUpdateDescriptorSets(VkDevice, uint32_t, const VkWriteDescriptorSet*, uint32_t, const VkCopyDescriptorSet*) {}
+static void VKAPI_CALL icd_vkUpdateDescriptorSets(VkDevice, uint32_t writeCount, const VkWriteDescriptorSet* pWrites, uint32_t, const VkCopyDescriptorSet*) {
+    if (writeCount > 0 && pWrites)
+        g_icd.encoder.cmdUpdateDescriptorSets(1, writeCount, pWrites);
+}
 
 // --- Pipeline cache ---
 
@@ -1041,8 +1084,13 @@ static void VKAPI_CALL icd_vkDestroyPipelineCache(VkDevice, VkPipelineCache, con
 
 // --- Various command stubs ---
 
-static void VKAPI_CALL icd_vkCmdBindDescriptorSets(VkCommandBuffer, VkPipelineBindPoint, VkPipelineLayout,
-    uint32_t, uint32_t, const VkDescriptorSet*, uint32_t, const uint32_t*) {}
+static void VKAPI_CALL icd_vkCmdBindDescriptorSets(VkCommandBuffer cb, VkPipelineBindPoint bindPoint, VkPipelineLayout layout,
+    uint32_t firstSet, uint32_t setCount, const VkDescriptorSet* pSets, uint32_t dynOffCount, const uint32_t* pDynOff) {
+    std::vector<uint64_t> setIds(setCount);
+    for (uint32_t i = 0; i < setCount; i++) setIds[i] = (uint64_t)pSets[i];
+    g_icd.encoder.cmdBindDescriptorSets(toId(cb), bindPoint, (uint64_t)layout,
+        firstSet, setCount, setIds.data(), dynOffCount, pDynOff);
+}
 static void VKAPI_CALL icd_vkCmdBindVertexBuffers(VkCommandBuffer, uint32_t, uint32_t, const VkBuffer*, const VkDeviceSize*) {}
 static void VKAPI_CALL icd_vkCmdBindIndexBuffer(VkCommandBuffer, VkBuffer, VkDeviceSize, VkIndexType) {}
 static void VKAPI_CALL icd_vkCmdDrawIndexed(VkCommandBuffer cb, uint32_t indexCount, uint32_t instanceCount,
