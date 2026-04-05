@@ -1192,20 +1192,50 @@ void VnDecoder::flushPendingPresents() {
 
         uint32_t presentIdx = it->second.currentImageIndex;
 
-        // DEBUG: capture Vulkan image content AND WGC window content at frame 5
-        // to see if they match (diagnose present vs rendering mismatch)
-        // DEBUG: read pixels from the presenting image right before present
-        static int dbgFr = 0;
-        dbgFr++;
-        if (dbgFr == 5) {
-            uint32_t savedLast = lastPresentedImageIndex_;
-            lastPresentedImageIndex_ = presentIdx; // make captureScreenshot read the correct image
-            captureScreenshot("S:/bld/vboxgpu/dbg_presenting_img.bmp");
-            lastPresentedImageIndex_ = savedLast;
+        // captureScreenshot at frame 5 + WGC at frame 5 to reproduce the earlier "success"
+        static int dbgFr2 = 0;
+        dbgFr2++;
+        if (dbgFr2 == 5) {
+            uint32_t savedLPI = lastPresentedImageIndex_;
+            lastPresentedImageIndex_ = presentIdx;
+            captureScreenshot("S:/bld/vboxgpu/dbg_frame5.bmp");
+            lastPresentedImageIndex_ = savedLPI;
         }
+#if 0
+        {
+            VkCommandBuffer tcb;
+            VkCommandBufferAllocateInfo ca{}; ca.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+            ca.commandPool = commandPools_.begin()->second; ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ca.commandBufferCount = 1;
+            vkAllocateCommandBuffers(device_, &ca, &tcb);
+            VkCommandBufferBeginInfo cbi{}; cbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            vkBeginCommandBuffer(tcb, &cbi);
+            VkImageMemoryBarrier b{}; b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+            b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            b.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            b.image = it->second.images[presentIdx];
+            b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            vkCmdPipelineBarrier(tcb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+            b.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+            b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            b.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            vkCmdPipelineBarrier(tcb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+            vkEndCommandBuffer(tcb);
+            VkSubmitInfo si{}; si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO; si.commandBufferCount = 1; si.pCommandBuffers = &tcb;
+            vkQueueSubmit(graphicsQueue_, 1, &si, VK_NULL_HANDLE);
+            vkQueueWaitIdle(graphicsQueue_);
+            vkFreeCommandBuffers(device_, ca.commandPool, 1, &tcb);
+        }
+#endif
 
         VkResult vr = vkQueuePresentKHR(graphicsQueue_, &info);
 
+        // WGC window capture at frame 5 (no Vulkan-side captureScreenshot to avoid layout side effects)
         static int wgcFrame = 0;
         wgcFrame++;
         if (wgcFrame == 5) {
