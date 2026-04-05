@@ -97,6 +97,7 @@ void VnDecoder::dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdS
     case VN_CMD_vkAllocateDescriptorSets:handleAllocateDescriptorSets(reader); break;
     case VN_CMD_vkUpdateDescriptorSets:  handleUpdateDescriptorSets(reader); break;
     case VN_CMD_vkCmdBindDescriptorSets: handleCmdBindDescriptorSets(reader); break;
+    case VN_CMD_vkCmdPushDescriptorSet:  handleCmdPushDescriptorSet(reader); break;
     case VN_CMD_vkCreateSemaphore:        handleCreateSemaphore(reader); break;
     case VN_CMD_vkCreateFence:            handleCreateFence(reader); break;
     case VN_CMD_vkQueueSubmit:            handleQueueSubmit(reader); break;
@@ -200,15 +201,23 @@ void VnDecoder::handleCreateDescriptorSetLayout(VnStreamReader& r) {
         bindings[i].stageFlags = r.readU32();
     }
 
+    // Create two versions: one without push flag (for regular pipeline layouts)
+    // and one with push flag (for push descriptor). Store the push version.
+    // This is needed because DXVK uses push descriptors on Host.
     VkDescriptorSetLayoutCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     info.bindingCount = bindingCount;
     info.pBindings = bindings.data();
 
+    // Try with push descriptor flag first
+    info.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
     VkDescriptorSetLayout layout;
-    if (vkCreateDescriptorSetLayout(device_, &info, nullptr, &layout) != VK_SUCCESS) {
-        error_ = true;
-        return;
+    VkResult vr = vkCreateDescriptorSetLayout(device_, &info, nullptr, &layout);
+    if (vr != VK_SUCCESS) {
+        // Fallback without push flag
+        info.flags = 0;
+        vr = vkCreateDescriptorSetLayout(device_, &info, nullptr, &layout);
+        if (vr != VK_SUCCESS) { error_ = true; return; }
     }
     store(descriptorSetLayouts_, layoutId, layout);
 }
@@ -490,6 +499,58 @@ void VnDecoder::handleCmdBindDescriptorSets(VnStreamReader& r) {
 
     vkCmdBindDescriptorSets(cb, static_cast<VkPipelineBindPoint>(bindPoint), layout,
         firstSet, setCount, sets.data(), dynOffCount, dynOffs.data());
+}
+
+void VnDecoder::handleCmdPushDescriptorSet(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint32_t bindPoint = r.readU32();
+    uint64_t layoutId = r.readU64();
+    uint32_t set = r.readU32();
+    uint32_t writeCount = r.readU32();
+
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    VkPipelineLayout layout = lookup(pipelineLayouts_, layoutId);
+
+    std::vector<VkWriteDescriptorSet> writes(writeCount);
+    std::vector<std::vector<VkDescriptorImageInfo>> allImageInfos(writeCount);
+
+    for (uint32_t i = 0; i < writeCount; i++) {
+        uint32_t binding = r.readU32();
+        uint32_t descCount = r.readU32();
+        uint32_t descType = r.readU32();
+
+        allImageInfos[i].resize(descCount);
+        for (uint32_t j = 0; j < descCount; j++) {
+            uint64_t samId = r.readU64();
+            uint64_t ivId = r.readU64();
+            uint32_t imgLayout = r.readU32();
+            allImageInfos[i][j].sampler = lookup(samplers_, samId);
+            allImageInfos[i][j].imageView = lookup(imageViews_, ivId);
+            allImageInfos[i][j].imageLayout = static_cast<VkImageLayout>(imgLayout);
+        }
+
+        writes[i] = {};
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstBinding = binding;
+        writes[i].descriptorCount = descCount;
+        writes[i].descriptorType = static_cast<VkDescriptorType>(descType);
+        writes[i].pImageInfo = allImageInfos[i].data();
+    }
+
+    if (!cb || !layout) return;
+
+    // Use VK_KHR_push_descriptor
+    static PFN_vkCmdPushDescriptorSetKHR pfnPush = nullptr;
+    if (!pfnPush) {
+        pfnPush = (PFN_vkCmdPushDescriptorSetKHR)
+            vkGetDeviceProcAddr(device_, "vkCmdPushDescriptorSetKHR");
+    }
+    if (pfnPush) {
+        pfnPush(cb, static_cast<VkPipelineBindPoint>(bindPoint), layout,
+                set, writeCount, writes.data());
+        fprintf(stderr, "[Decoder] PushDescriptorSet: cb=%p set=%u writes=%u\n",
+                (void*)cb, set, writeCount);
+    }
 }
 
 void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {

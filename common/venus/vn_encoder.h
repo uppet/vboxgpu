@@ -248,6 +248,36 @@ public:
         w_.endCommand(off);
     }
 
+    // Push descriptor set: encode writes directly into command stream
+    // (used by vkCmdPushDescriptorSetKHR / vkCmdPushDescriptorSetWithTemplateKHR)
+    void cmdPushDescriptorSet(uint64_t cbId, uint32_t bindPoint, uint64_t layoutId,
+                               uint32_t set, uint32_t writeCount,
+                               const uint64_t* dstBindings,    // [writeCount] binding indices
+                               const uint32_t* descriptorCounts,
+                               const uint32_t* descriptorTypes,
+                               const uint64_t* samplerIds,     // per descriptor
+                               const uint64_t* imageViewIds,
+                               const uint32_t* imageLayouts,
+                               uint32_t totalDescriptors) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdPushDescriptorSet);
+        w_.writeU64(cbId); w_.writeU32(bindPoint); w_.writeU64(layoutId); w_.writeU32(set);
+        w_.writeU32(writeCount);
+        uint32_t descIdx = 0;
+        for (uint32_t i = 0; i < writeCount; i++) {
+            w_.writeU32((uint32_t)dstBindings[i]);
+            w_.writeU32(descriptorCounts[i]);
+            w_.writeU32(descriptorTypes[i]);
+            for (uint32_t j = 0; j < descriptorCounts[i]; j++) {
+                w_.writeU64(samplerIds[descIdx]);
+                w_.writeU64(imageViewIds[descIdx]);
+                w_.writeU32(imageLayouts[descIdx]);
+                descIdx++;
+            }
+        }
+        w_.endCommand(off);
+    }
+
     void cmdCreateFramebuffer(uint64_t deviceId, uint64_t framebufferId,
                               uint64_t renderPassId, uint64_t imageViewId,
                               uint32_t width, uint32_t height) {

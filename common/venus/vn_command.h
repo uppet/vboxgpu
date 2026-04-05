@@ -71,6 +71,7 @@ enum VnCommandType : uint32_t {
     VN_CMD_vkAllocateDescriptorSets        = 0x1004,
     VN_CMD_vkUpdateDescriptorSets          = 0x1005,
     VN_CMD_vkCmdBindDescriptorSets         = 0x1006,
+    VN_CMD_vkCmdPushDescriptorSet         = 0x1007,
 
     // Extension: swapchain (handled specially by host)
     VN_CMD_BRIDGE_CreateSwapchain          = 0x10000,

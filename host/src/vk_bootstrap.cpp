@@ -177,7 +177,10 @@ void createLogicalDevice(VulkanContext& ctx) {
     vk11Features.pNext = &vk12Features;
     vk12Features.pNext = &vk13Features;
 
-    const char* deviceExtensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    const char* deviceExtensions[] = {
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
+    };
 
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -185,7 +188,7 @@ void createLogicalDevice(VulkanContext& ctx) {
     createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueInfos.size());
     createInfo.pQueueCreateInfos = queueInfos.data();
     createInfo.pEnabledFeatures = nullptr; // using pNext chain instead
-    createInfo.enabledExtensionCount = 1;
+    createInfo.enabledExtensionCount = 2;
     createInfo.ppEnabledExtensionNames = deviceExtensions;
 
     if (vkCreateDevice(ctx.physicalDevice, &createInfo, nullptr, &ctx.device) != VK_SUCCESS)

@@ -119,7 +119,8 @@ void IcdState::initDefaults() {
     // DXVK to skip vkCreateShaderModule (shader_module_identifier).
     const char* extNames[] = {
         // KHR core
-        "VK_KHR_swapchain", "VK_KHR_maintenance1", "VK_KHR_maintenance2",
+        "VK_KHR_swapchain", "VK_KHR_push_descriptor",
+        "VK_KHR_maintenance1", "VK_KHR_maintenance2",
         "VK_KHR_maintenance3", "VK_KHR_maintenance4", "VK_KHR_maintenance5",
         "VK_KHR_maintenance6", "VK_KHR_maintenance7",
         "VK_KHR_create_renderpass2", "VK_KHR_image_format_list",

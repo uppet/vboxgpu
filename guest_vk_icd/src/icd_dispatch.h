@@ -57,6 +57,12 @@ struct IcdState {
     // Per-frame sync: image index returned by Host
     uint32_t currentImageIndex = 0;
 
+    // Descriptor update templates: save entries so we can interpret pData later
+    struct DescriptorTemplateInfo {
+        std::vector<VkDescriptorUpdateTemplateEntry> entries;
+    };
+    std::unordered_map<uint64_t, DescriptorTemplateInfo> descriptorTemplates;
+
     // Command encoder for current batch (MUST lock mutex before use — DXVK is multithreaded)
     VnEncoder encoder;
     std::mutex encoderMutex;

@@ -539,11 +539,163 @@ static void VKAPI_CALL icd_vkCmdDrawIndirect(VkCommandBuffer, VkBuffer, VkDevice
 static void VKAPI_CALL icd_vkCmdDrawIndexedIndirect(VkCommandBuffer, VkBuffer, VkDeviceSize, uint32_t, uint32_t) {}
 
 // Descriptor update template
-static VkResult VKAPI_CALL icd_vkCreateDescriptorUpdateTemplate(VkDevice, const VkDescriptorUpdateTemplateCreateInfo*, const VkAllocationCallbacks*, VkDescriptorUpdateTemplate* p) {
-    *p = (VkDescriptorUpdateTemplate)g_icd.handles.alloc(); return VK_SUCCESS;
+static VkResult VKAPI_CALL icd_vkCreateDescriptorUpdateTemplate(VkDevice,
+    const VkDescriptorUpdateTemplateCreateInfo* pInfo, const VkAllocationCallbacks*, VkDescriptorUpdateTemplate* p)
+{
+    uint64_t id = g_icd.handles.alloc();
+    *p = (VkDescriptorUpdateTemplate)id;
+    // Save template entries so UpdateDescriptorSetWithTemplate can interpret pData
+    IcdState::DescriptorTemplateInfo info;
+    info.entries.assign(pInfo->pDescriptorUpdateEntries,
+                        pInfo->pDescriptorUpdateEntries + pInfo->descriptorUpdateEntryCount);
+    g_icd.descriptorTemplates[id] = std::move(info);
+    fprintf(stderr, "[ICD] CreateDescriptorUpdateTemplate: id=%llu entries=%u\n",
+            (unsigned long long)id, pInfo->descriptorUpdateEntryCount);
+    return VK_SUCCESS;
 }
-static void VKAPI_CALL icd_vkDestroyDescriptorUpdateTemplate(VkDevice, VkDescriptorUpdateTemplate, const VkAllocationCallbacks*) {}
-static void VKAPI_CALL icd_vkUpdateDescriptorSetWithTemplate(VkDevice, VkDescriptorSet, VkDescriptorUpdateTemplate, const void*) {}
+static void VKAPI_CALL icd_vkDestroyDescriptorUpdateTemplate(VkDevice, VkDescriptorUpdateTemplate t, const VkAllocationCallbacks*) {
+    g_icd.descriptorTemplates.erase((uint64_t)t);
+}
+static void VKAPI_CALL icd_vkUpdateDescriptorSetWithTemplate(VkDevice,
+    VkDescriptorSet dstSet, VkDescriptorUpdateTemplate tmpl, const void* pData)
+{
+    uint64_t tmplId = (uint64_t)tmpl;
+    auto it = g_icd.descriptorTemplates.find(tmplId);
+    if (it == g_icd.descriptorTemplates.end()) return;
+
+    // Convert template update to regular VkWriteDescriptorSet array
+    const auto& entries = it->second.entries;
+    std::vector<VkWriteDescriptorSet> writes(entries.size());
+    std::vector<std::vector<VkDescriptorImageInfo>> allImageInfos(entries.size());
+    std::vector<std::vector<VkDescriptorBufferInfo>> allBufferInfos(entries.size());
+
+    for (size_t i = 0; i < entries.size(); i++) {
+        const auto& e = entries[i];
+        writes[i] = {};
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = dstSet;
+        writes[i].dstBinding = e.dstBinding;
+        writes[i].dstArrayElement = e.dstArrayElement;
+        writes[i].descriptorCount = e.descriptorCount;
+        writes[i].descriptorType = e.descriptorType;
+
+        bool isImage = (e.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER ||
+                        e.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
+                        e.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
+                        e.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE ||
+                        e.descriptorType == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT);
+        bool isBuffer = (e.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
+                         e.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ||
+                         e.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
+                         e.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC);
+
+        if (isImage) {
+            allImageInfos[i].resize(e.descriptorCount);
+            for (uint32_t j = 0; j < e.descriptorCount; j++) {
+                const auto* src = reinterpret_cast<const VkDescriptorImageInfo*>(
+                    static_cast<const char*>(pData) + e.offset + j * e.stride);
+                allImageInfos[i][j] = *src;
+            }
+            writes[i].pImageInfo = allImageInfos[i].data();
+        } else if (isBuffer) {
+            allBufferInfos[i].resize(e.descriptorCount);
+            for (uint32_t j = 0; j < e.descriptorCount; j++) {
+                const auto* src = reinterpret_cast<const VkDescriptorBufferInfo*>(
+                    static_cast<const char*>(pData) + e.offset + j * e.stride);
+                allBufferInfos[i][j] = *src;
+            }
+            writes[i].pBufferInfo = allBufferInfos[i].data();
+        }
+    }
+
+    // Encode as regular UpdateDescriptorSets
+    g_icd.encoder.cmdUpdateDescriptorSets(1, (uint32_t)writes.size(), writes.data());
+    fprintf(stderr, "[ICD] UpdateDescriptorSetWithTemplate: set=%llu tmpl=%llu writes=%zu\n",
+            (unsigned long long)(uint64_t)dstSet, (unsigned long long)tmplId, writes.size());
+}
+
+// Push descriptor set (VK_KHR_push_descriptor)
+static void VKAPI_CALL icd_vkCmdPushDescriptorSetKHR(
+    VkCommandBuffer cb, VkPipelineBindPoint bindPoint,
+    VkPipelineLayout layout, uint32_t set,
+    uint32_t writeCount, const VkWriteDescriptorSet* pWrites)
+{
+    // Encode as UpdateDescriptorSets in the command stream (reuse same encoding)
+    // but with push semantics — the Host will use vkCmdPushDescriptorSetKHR
+    std::vector<uint64_t> dstBindings;
+    std::vector<uint32_t> descCounts, descTypes;
+    std::vector<uint64_t> samplerIds, imageViewIds;
+    std::vector<uint32_t> imageLayouts;
+
+    for (uint32_t i = 0; i < writeCount; i++) {
+        dstBindings.push_back(pWrites[i].dstBinding);
+        descCounts.push_back(pWrites[i].descriptorCount);
+        descTypes.push_back(pWrites[i].descriptorType);
+        for (uint32_t j = 0; j < pWrites[i].descriptorCount; j++) {
+            if (pWrites[i].pImageInfo) {
+                samplerIds.push_back((uint64_t)pWrites[i].pImageInfo[j].sampler);
+                imageViewIds.push_back((uint64_t)pWrites[i].pImageInfo[j].imageView);
+                imageLayouts.push_back(pWrites[i].pImageInfo[j].imageLayout);
+            } else {
+                samplerIds.push_back(0); imageViewIds.push_back(0); imageLayouts.push_back(0);
+            }
+        }
+    }
+
+    g_icd.encoder.cmdPushDescriptorSet(
+        toId(cb), bindPoint, (uint64_t)layout, set,
+        writeCount, dstBindings.data(), descCounts.data(), descTypes.data(),
+        samplerIds.data(), imageViewIds.data(), imageLayouts.data(),
+        (uint32_t)samplerIds.size());
+}
+
+// Push descriptor set with template (VK_KHR_push_descriptor + descriptor_update_template)
+static void VKAPI_CALL icd_vkCmdPushDescriptorSetWithTemplateKHR(
+    VkCommandBuffer cb, VkDescriptorUpdateTemplate tmpl,
+    VkPipelineLayout layout, uint32_t set, const void* pData)
+{
+    uint64_t tmplId = (uint64_t)tmpl;
+    auto it = g_icd.descriptorTemplates.find(tmplId);
+    if (it == g_icd.descriptorTemplates.end()) return;
+
+    const auto& entries = it->second.entries;
+    std::vector<uint64_t> dstBindings;
+    std::vector<uint32_t> descCounts, descTypes;
+    std::vector<uint64_t> samplerIds, imageViewIds;
+    std::vector<uint32_t> imageLayouts;
+
+    for (const auto& e : entries) {
+        dstBindings.push_back(e.dstBinding);
+        descCounts.push_back(e.descriptorCount);
+        descTypes.push_back(e.descriptorType);
+
+        bool isImage = (e.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER ||
+                        e.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
+                        e.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
+                        e.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE ||
+                        e.descriptorType == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT);
+
+        for (uint32_t j = 0; j < e.descriptorCount; j++) {
+            if (isImage) {
+                const auto* info = reinterpret_cast<const VkDescriptorImageInfo*>(
+                    static_cast<const char*>(pData) + e.offset + j * e.stride);
+                samplerIds.push_back((uint64_t)info->sampler);
+                imageViewIds.push_back((uint64_t)info->imageView);
+                imageLayouts.push_back(info->imageLayout);
+            } else {
+                samplerIds.push_back(0);
+                imageViewIds.push_back(0);
+                imageLayouts.push_back(0);
+            }
+        }
+    }
+
+    g_icd.encoder.cmdPushDescriptorSet(
+        toId(cb), VK_PIPELINE_BIND_POINT_GRAPHICS, (uint64_t)layout, set,
+        (uint32_t)entries.size(), dstBindings.data(), descCounts.data(), descTypes.data(),
+        samplerIds.data(), imageViewIds.data(), imageLayouts.data(),
+        (uint32_t)samplerIds.size());
+}
 
 // Private data
 static VkResult VKAPI_CALL icd_vkCreatePrivateDataSlot(VkDevice, const VkPrivateDataSlotCreateInfo*, const VkAllocationCallbacks*, VkPrivateDataSlot* p) {
@@ -1065,6 +1217,8 @@ static VkResult VKAPI_CALL icd_vkAllocateDescriptorSets(VkDevice, const VkDescri
         p[i] = (VkDescriptorSet)setIds[i];
         layoutIds[i] = (uint64_t)pInfo->pSetLayouts[i];
     }
+    fprintf(stderr, "[ICD] AllocateDescriptorSets: pool=%llu count=%u\n",
+            (unsigned long long)(uint64_t)pInfo->descriptorPool, pInfo->descriptorSetCount);
     g_icd.encoder.cmdAllocateDescriptorSets(1, (uint64_t)pInfo->descriptorPool,
         pInfo->descriptorSetCount, layoutIds.data(), setIds.data());
     return VK_SUCCESS;
@@ -1414,6 +1568,15 @@ static const FuncEntry g_funcTable[] = {
     ENTRY(vkCreateDescriptorUpdateTemplate),
     ENTRY(vkDestroyDescriptorUpdateTemplate),
     ENTRY(vkUpdateDescriptorSetWithTemplate),
+    // Push descriptors — DXVK uses this instead of alloc+update+bind
+    {"vkCmdPushDescriptorSetKHR", (PFN_vkVoidFunction)icd_vkCmdPushDescriptorSetKHR},
+    {"vkCmdPushDescriptorSet", (PFN_vkVoidFunction)icd_vkCmdPushDescriptorSetKHR},
+    {"vkCmdPushDescriptorSet2KHR", (PFN_vkVoidFunction)icd_vkCmdPushDescriptorSetKHR},
+    {"vkCmdPushDescriptorSet2", (PFN_vkVoidFunction)icd_vkCmdPushDescriptorSetKHR},
+    {"vkCmdPushDescriptorSetWithTemplateKHR", (PFN_vkVoidFunction)icd_vkCmdPushDescriptorSetWithTemplateKHR},
+    {"vkCmdPushDescriptorSetWithTemplate", (PFN_vkVoidFunction)icd_vkCmdPushDescriptorSetWithTemplateKHR},
+    {"vkCmdPushDescriptorSetWithTemplate2KHR", (PFN_vkVoidFunction)icd_vkCmdPushDescriptorSetWithTemplateKHR},
+    {"vkCmdPushDescriptorSetWithTemplate2", (PFN_vkVoidFunction)icd_vkCmdPushDescriptorSetWithTemplateKHR},
 
     // Private data
     ENTRY(vkCreatePrivateDataSlot),

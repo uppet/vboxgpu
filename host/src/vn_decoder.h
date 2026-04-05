@@ -94,6 +94,7 @@ private:
     void handleAllocateDescriptorSets(VnStreamReader& r);
     void handleUpdateDescriptorSets(VnStreamReader& r);
     void handleCmdBindDescriptorSets(VnStreamReader& r);
+    void handleCmdPushDescriptorSet(VnStreamReader& r);
     void handleBridgeCreateSwapchain(VnStreamReader& r);
     void handleBridgeAcquireNextImage(VnStreamReader& r);
     void handleBridgeQueuePresent(VnStreamReader& r);
