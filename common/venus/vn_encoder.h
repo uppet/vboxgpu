@@ -216,6 +216,20 @@ public:
         w_.endCommand(off);
     }
 
+    void cmdPushConstants(uint64_t cmdBufferId, uint64_t layoutId,
+                          uint32_t stageFlags, uint32_t offset, uint32_t size,
+                          const void* pValues) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdPushConstants);
+        w_.writeU64(cmdBufferId);
+        w_.writeU64(layoutId);
+        w_.writeU32(stageFlags);
+        w_.writeU32(offset);
+        w_.writeU32(size);
+        w_.writeBytes(pValues, size);
+        w_.endCommand(off);
+    }
+
     // --- Sync ---
 
     void cmdCreateSemaphore(uint64_t deviceId, uint64_t semId) {

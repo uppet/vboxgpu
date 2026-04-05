@@ -6,6 +6,7 @@
 #include <fstream>
 #include <string>
 #include <cstdio>
+#include <cstring>
 
 static constexpr uint32_t WINDOW_WIDTH = 800;
 static constexpr uint32_t WINDOW_HEIGHT = 600;
@@ -135,7 +136,162 @@ static std::vector<uint8_t> buildFrameStream(uint64_t fbId) {
     return std::vector<uint8_t>(d, d + enc.size());
 }
 
+// --- Replay mode: read recorded command stream from dump file ---
+struct DumpBatch {
+    std::vector<uint8_t> data;
+};
+
+static std::vector<DumpBatch> loadDumpFile(const char* path) {
+    std::vector<DumpBatch> batches;
+    FILE* f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "[Replay] Cannot open dump file: %s\n", path);
+        return batches;
+    }
+    while (true) {
+        uint32_t sz;
+        if (fread(&sz, sizeof(sz), 1, f) != 1) break;
+        DumpBatch batch;
+        batch.data.resize(sz);
+        if (fread(batch.data.data(), 1, sz, f) != sz) break;
+        batches.push_back(std::move(batch));
+    }
+    fclose(f);
+    fprintf(stderr, "[Replay] Loaded %zu batches from %s\n", batches.size(), path);
+    return batches;
+}
+
+static int replayMode(const char* dumpPath) {
+    HINSTANCE hInstance = GetModuleHandle(nullptr);
+
+    auto batches = loadDumpFile(dumpPath);
+    if (batches.empty()) {
+        fprintf(stderr, "[Replay] No batches to replay.\n");
+        return 1;
+    }
+
+    // --- Create window ---
+    WNDCLASSEXA wc{};
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_HREDRAW | CS_HREDRAW;
+    wc.lpfnWndProc = WindowProc;
+    wc.hInstance = hInstance;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.lpszClassName = "VBoxGPUReplay";
+    RegisterClassExA(&wc);
+
+    RECT rect = { 0, 0, (LONG)WINDOW_WIDTH, (LONG)WINDOW_HEIGHT };
+    AdjustWindowRect(&rect, WS_OVERLAPPEDWINDOW, FALSE);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName,
+                                "VBox GPU Bridge - Replay Mode",
+                                WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+                                rect.right - rect.left, rect.bottom - rect.top,
+                                nullptr, nullptr, hInstance, nullptr);
+    ShowWindow(hwnd, SW_SHOW);
+
+    // --- Vulkan bootstrap ---
+    VulkanContext vk{};
+    try {
+        createInstance(vk);
+        createSurface(vk, hwnd, hInstance);
+        pickPhysicalDevice(vk);
+        createLogicalDevice(vk);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "Vulkan Init Error: %s\n", e.what());
+        return 1;
+    }
+
+    VnDecoder decoder;
+    decoder.init(vk.physicalDevice, vk.device, vk.graphicsQueue, vk.graphicsFamily, vk.surface);
+
+    // Execute setup batches (all batches before first Present)
+    // Then loop the rendering batches
+    size_t setupEnd = batches.size(); // default: replay all once
+    // Find where the first Present happens — everything before is setup
+    for (size_t i = 0; i < batches.size(); i++) {
+        // Look for Present command (0x10002) in the batch
+        if (batches[i].data.size() >= 8) {
+            const uint8_t* p = batches[i].data.data();
+            const uint8_t* end = p + batches[i].data.size();
+            while (p + 8 <= end) {
+                uint32_t cmd = *reinterpret_cast<const uint32_t*>(p);
+                uint32_t sz = *reinterpret_cast<const uint32_t*>(p + 4);
+                if (cmd == 0x10002) { // VN_CMD_vkBridgeQueuePresent
+                    setupEnd = i + 1;
+                    goto found_present;
+                }
+                if (p + 8 + sz > end) break;
+                p += 8 + sz;
+            }
+        }
+    }
+found_present:
+
+    fprintf(stderr, "[Replay] Setup batches: 0..%zu, Frame batches: %zu..%zu\n",
+            setupEnd - 1, setupEnd, batches.size() - 1);
+
+    // Execute setup batches once
+    for (size_t i = 0; i < setupEnd; i++) {
+        fprintf(stderr, "[Replay] Setup batch %zu (%zu bytes)\n", i, batches[i].data.size());
+        if (!decoder.execute(batches[i].data.data(), batches[i].data.size())) {
+            fprintf(stderr, "[Replay] Setup batch %zu failed\n", i);
+            return 1;
+        }
+    }
+
+    fprintf(stderr, "[Replay] Setup complete. Executing frame batches once.\n");
+
+    // Execute frame batches once (DXVK command streams have complex CB lifecycle,
+    // safe single-pass replay first)
+    for (size_t i = setupEnd; i < batches.size() && g_running; i++) {
+        MSG msg{};
+        while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+        if (!g_running) break;
+
+        fprintf(stderr, "[Replay] Frame batch %zu (%zu bytes)\n", i, batches[i].data.size());
+        if (!decoder.execute(batches[i].data.data(), batches[i].data.size())) {
+            fprintf(stderr, "[Replay] Frame batch %zu failed\n", i);
+            break;
+        }
+    }
+
+    fprintf(stderr, "[Replay] All batches executed. Capturing screenshot.\n");
+    // Use dump filename to derive screenshot path
+    std::string ssPath = dumpPath;
+    auto dotPos = ssPath.rfind('.');
+    if (dotPos != std::string::npos) ssPath = ssPath.substr(0, dotPos);
+    ssPath += "_screenshot.bmp";
+    decoder.captureScreenshot(ssPath.c_str());
+    fprintf(stderr, "[Replay] Keeping window open (press ESC to exit).\n");
+
+    // Keep window open so user can see the result
+    while (g_running) {
+        MSG msg{};
+        while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+        Sleep(50);
+    }
+
+    decoder.cleanup();
+    cleanupVulkan(vk);
+    DestroyWindow(hwnd);
+    UnregisterClassA(wc.lpszClassName, hInstance);
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
+    // Check for --replay mode
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--replay") == 0 && i + 1 < argc) {
+            return replayMode(argv[++i]);
+        }
+    }
+
     HINSTANCE hInstance = GetModuleHandle(nullptr);
 
     // --- Create window ---

@@ -58,6 +58,8 @@ enum VnCommandType : uint32_t {
     VN_CMD_vkBindBufferMemory              = 44,
     VN_CMD_vkBindImageMemory               = 48,
 
+    VN_CMD_vkCmdPushConstants              = 87,
+
     // Vulkan 1.3 dynamic rendering
     VN_CMD_vkCmdBeginRendering             = 0x1000,  // bridge-defined (not in Venus)
     VN_CMD_vkCmdEndRendering               = 0x1001,

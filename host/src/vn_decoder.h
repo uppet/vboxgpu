@@ -53,6 +53,10 @@ public:
         return &swapchains_.begin()->second;
     }
 
+    // Capture current swapchain image to a BMP file.
+    // Returns true on success.
+    bool captureScreenshot(const char* path);
+
 private:
     void dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdSize);
 
@@ -74,6 +78,7 @@ private:
     void handleCmdSetViewport(VnStreamReader& r);
     void handleCmdSetScissor(VnStreamReader& r);
     void handleCmdDraw(VnStreamReader& r);
+    void handleCmdPushConstants(VnStreamReader& r);
     void handleCreateSemaphore(VnStreamReader& r);
     void handleCreateFence(VnStreamReader& r);
     void handleQueueSubmit(VnStreamReader& r);
@@ -111,6 +116,17 @@ private:
     std::unordered_map<uint64_t, VkFence> fences_;
     std::unordered_map<uint64_t, VkImageView> imageViews_;
     std::unordered_map<uint64_t, HostSwapchain> swapchains_;
+    bool activeRendering_ = false;
+    uint32_t lastPresentedImageIndex_ = 0; // for screenshot fidelity
+
+    // Deferred present: collect during batch, execute after all QueueSubmits
+    struct PendingPresent {
+        uint64_t queueId;
+        uint64_t scId;
+        uint64_t waitSemId;
+    };
+    std::vector<PendingPresent> pendingPresents_;
+    void flushPendingPresents();
 
     bool error_ = false;
 };

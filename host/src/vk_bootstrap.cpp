@@ -146,15 +146,45 @@ void createLogicalDevice(VulkanContext& ctx) {
         queueInfos.push_back(queueInfo);
     }
 
-    VkPhysicalDeviceFeatures deviceFeatures{};
+    // Enable all Vulkan 1.1/1.2/1.3 features DXVK shaders may require
+    VkPhysicalDeviceFeatures2 deviceFeatures2{};
+    deviceFeatures2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    deviceFeatures2.features.shaderClipDistance = VK_TRUE;
+    deviceFeatures2.features.shaderCullDistance = VK_TRUE;
+
+    VkPhysicalDeviceVulkan11Features vk11Features{};
+    vk11Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    vk11Features.shaderDrawParameters = VK_TRUE;
+
+    VkPhysicalDeviceVulkan12Features vk12Features{};
+    vk12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    vk12Features.bufferDeviceAddress = VK_TRUE;
+    vk12Features.vulkanMemoryModel = VK_TRUE;
+    vk12Features.vulkanMemoryModelDeviceScope = VK_TRUE;
+    vk12Features.descriptorIndexing = VK_TRUE;
+    vk12Features.runtimeDescriptorArray = VK_TRUE;
+    vk12Features.timelineSemaphore = VK_TRUE;
+    vk12Features.scalarBlockLayout = VK_TRUE;
+    vk12Features.uniformBufferStandardLayout = VK_TRUE;
+
+    VkPhysicalDeviceVulkan13Features vk13Features{};
+    vk13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    vk13Features.dynamicRendering = VK_TRUE;
+    vk13Features.synchronization2 = VK_TRUE;
+
+    // Chain: deviceFeatures2 → vk11 → vk12 → vk13
+    deviceFeatures2.pNext = &vk11Features;
+    vk11Features.pNext = &vk12Features;
+    vk12Features.pNext = &vk13Features;
 
     const char* deviceExtensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    createInfo.pNext = &deviceFeatures2;
     createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueInfos.size());
     createInfo.pQueueCreateInfos = queueInfos.data();
-    createInfo.pEnabledFeatures = &deviceFeatures;
+    createInfo.pEnabledFeatures = nullptr; // using pNext chain instead
     createInfo.enabledExtensionCount = 1;
     createInfo.ppEnabledExtensionNames = deviceExtensions;
 

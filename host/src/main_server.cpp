@@ -1,4 +1,5 @@
 // Host TCP server: receives Venus command streams from Guest, decodes and renders.
+// Also supports --replay <dump.bin> to replay a recorded command stream with screenshot.
 
 #include "vn_decoder.h"
 #include "../../common/transport/tcp_transport.h"
@@ -6,6 +7,7 @@
 #include <vector>
 #include <thread>
 #include <atomic>
+#include <cstring>
 #include <dbghelp.h>
 #pragma comment(lib, "dbghelp.lib")
 
@@ -44,10 +46,130 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
     return DefWindowProcA(hwnd, msg, wParam, lParam);
 }
 
+// --- Replay mode ---
+struct DumpBatch { std::vector<uint8_t> data; };
+
+static std::vector<DumpBatch> loadDumpFile(const char* path) {
+    std::vector<DumpBatch> batches;
+    FILE* f = fopen(path, "rb");
+    if (!f) { fprintf(stderr, "[Replay] Cannot open: %s\n", path); return batches; }
+    while (true) {
+        uint32_t sz;
+        if (fread(&sz, sizeof(sz), 1, f) != 1) break;
+        DumpBatch batch;
+        batch.data.resize(sz);
+        if (fread(batch.data.data(), 1, sz, f) != sz) break;
+        batches.push_back(std::move(batch));
+    }
+    fclose(f);
+    fprintf(stderr, "[Replay] Loaded %zu batches from %s\n", batches.size(), path);
+    return batches;
+}
+
+static int replayMode(const char* dumpPath) {
+    auto batches = loadDumpFile(dumpPath);
+    if (batches.empty()) { fprintf(stderr, "[Replay] No batches.\n"); return 1; }
+
+    HINSTANCE hInstance = GetModuleHandle(nullptr);
+    WNDCLASSEXA wc{};
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = WindowProc;
+    wc.hInstance = hInstance;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.lpszClassName = "VBoxGPUReplay";
+    RegisterClassExA(&wc);
+
+    RECT rect = { 0, 0, (LONG)WINDOW_WIDTH, (LONG)WINDOW_HEIGHT };
+    AdjustWindowRect(&rect, WS_OVERLAPPEDWINDOW, FALSE);
+    HWND hwnd = CreateWindowExA(0, wc.lpszClassName,
+                                "VBox GPU Bridge - Replay",
+                                WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+                                rect.right - rect.left, rect.bottom - rect.top,
+                                nullptr, nullptr, hInstance, nullptr);
+    ShowWindow(hwnd, SW_SHOW);
+
+    VulkanContext vk{};
+    try {
+        createInstance(vk);
+        createSurface(vk, hwnd, hInstance);
+        pickPhysicalDevice(vk);
+        createLogicalDevice(vk);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "Vulkan Init Error: %s\n", e.what());
+        return 1;
+    }
+
+    VnDecoder decoder;
+    decoder.init(vk.physicalDevice, vk.device, vk.graphicsQueue, vk.graphicsFamily, vk.surface);
+
+    // Execute all batches once
+    for (size_t i = 0; i < batches.size() && g_running; i++) {
+        MSG msg{};
+        while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+        if (!g_running) break;
+        if (!decoder.execute(batches[i].data.data(), batches[i].data.size())) {
+            fprintf(stderr, "[Replay] Batch %zu failed\n", i);
+            break;
+        }
+    }
+
+    // Screenshot
+    std::string ssPath = dumpPath;
+    auto dotPos = ssPath.rfind('.');
+    if (dotPos != std::string::npos) ssPath = ssPath.substr(0, dotPos);
+    ssPath += "_screenshot.bmp";
+    fprintf(stderr, "[Replay] All batches done. Capturing screenshot.\n");
+    decoder.captureScreenshot(ssPath.c_str());
+
+    fprintf(stderr, "[Replay] Keeping window open (ESC to exit).\n");
+    while (g_running) {
+        MSG msg{};
+        while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+        Sleep(50);
+    }
+
+    decoder.cleanup();
+    cleanupVulkan(vk);
+    DestroyWindow(hwnd);
+    UnregisterClassA(wc.lpszClassName, hInstance);
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
     SetUnhandledExceptionFilter(hostCrashHandler);
+
+    // Check --replay mode first
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--replay") == 0 && i + 1 < argc) {
+            return replayMode(argv[++i]);
+        }
+    }
+
     uint16_t port = DEFAULT_PORT;
-    if (argc > 1) port = static_cast<uint16_t>(atoi(argv[1]));
+    const char* dumpPath = nullptr;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--dump") == 0 && i + 1 < argc) {
+            dumpPath = argv[++i];
+        } else {
+            port = static_cast<uint16_t>(atoi(argv[i]));
+        }
+    }
+    FILE* dumpFile = nullptr;
+    if (dumpPath) {
+        dumpFile = fopen(dumpPath, "wb");
+        if (!dumpFile) {
+            fprintf(stderr, "[Host] Failed to open dump file: %s\n", dumpPath);
+            return 1;
+        }
+        fprintf(stderr, "[Host] Dumping command stream to: %s\n", dumpPath);
+    }
 
     HINSTANCE hInstance = GetModuleHandle(nullptr);
 
@@ -123,6 +245,14 @@ int main(int argc, char* argv[]) {
 
         fprintf(stderr, "[Host] Received %zu bytes\n", bytesRead);
 
+        // Dump to file if recording
+        if (dumpFile) {
+            uint32_t sz = static_cast<uint32_t>(bytesRead);
+            fwrite(&sz, sizeof(sz), 1, dumpFile);
+            fwrite(recvBuf.data(), 1, bytesRead, dumpFile);
+            fflush(dumpFile);
+        }
+
         // Execute the command stream
         if (!decoder.execute(recvBuf.data(), bytesRead)) {
             fprintf(stderr, "[Host] Command stream execution failed.\n");
@@ -137,6 +267,7 @@ int main(int argc, char* argv[]) {
     }
 
     // --- Cleanup ---
+    if (dumpFile) fclose(dumpFile);
     decoder.cleanup();
     cleanupVulkan(vk);
     server.close();

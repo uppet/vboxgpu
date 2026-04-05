@@ -913,20 +913,40 @@ static VkResult VKAPI_CALL icd_vkGetFenceStatus(VkDevice, VkFence) { return VK_S
 
 static VkResult VKAPI_CALL icd_vkQueueSubmit(VkQueue q, uint32_t count, const VkSubmitInfo* pSubmits, VkFence fence) {
     for (uint32_t i = 0; i < count; i++) {
-        uint64_t cbId = pSubmits[i].commandBufferCount > 0 ? toId(pSubmits[i].pCommandBuffers[0]) : 0;
+        uint32_t cbCount = pSubmits[i].commandBufferCount;
         uint64_t waitSem = pSubmits[i].waitSemaphoreCount > 0 ? (uint64_t)pSubmits[i].pWaitSemaphores[0] : 0;
         uint64_t sigSem = pSubmits[i].signalSemaphoreCount > 0 ? (uint64_t)pSubmits[i].pSignalSemaphores[0] : 0;
-        g_icd.encoder.cmdQueueSubmit(toId(q), cbId, waitSem, sigSem, (uint64_t)fence);
+        fprintf(stderr, "[ICD] QueueSubmit: submit[%u] cbCount=%u waitSem=%llu sigSem=%llu\n",
+                i, cbCount, (unsigned long long)waitSem, (unsigned long long)sigSem);
+        // Encode ALL command buffers, not just the first one.
+        // Only the first CB gets the wait semaphore, only the last CB gets signal semaphore + fence.
+        for (uint32_t j = 0; j < cbCount; j++) {
+            uint64_t cbId = toId(pSubmits[i].pCommandBuffers[j]);
+            uint64_t ws = (j == 0) ? waitSem : 0;
+            uint64_t ss = (j == cbCount - 1) ? sigSem : 0;
+            uint64_t f  = (i == count - 1 && j == cbCount - 1) ? (uint64_t)fence : 0;
+            fprintf(stderr, "[ICD]   -> cb[%u]=%llu ws=%llu ss=%llu fence=%llu\n",
+                    j, (unsigned long long)cbId, (unsigned long long)ws, (unsigned long long)ss, (unsigned long long)f);
+            g_icd.encoder.cmdQueueSubmit(toId(q), cbId, ws, ss, f);
+        }
     }
     return VK_SUCCESS;
 }
 
 static VkResult VKAPI_CALL icd_vkQueueSubmit2(VkQueue q, uint32_t count, const VkSubmitInfo2* pSubmits, VkFence fence) {
     for (uint32_t i = 0; i < count; i++) {
-        uint64_t cbId = pSubmits[i].commandBufferInfoCount > 0 ? toId(pSubmits[i].pCommandBufferInfos[0].commandBuffer) : 0;
+        uint32_t cbCount = pSubmits[i].commandBufferInfoCount;
         uint64_t waitSem = pSubmits[i].waitSemaphoreInfoCount > 0 ? (uint64_t)pSubmits[i].pWaitSemaphoreInfos[0].semaphore : 0;
         uint64_t sigSem = pSubmits[i].signalSemaphoreInfoCount > 0 ? (uint64_t)pSubmits[i].pSignalSemaphoreInfos[0].semaphore : 0;
-        g_icd.encoder.cmdQueueSubmit(toId(q), cbId, waitSem, sigSem, (uint64_t)fence);
+        fprintf(stderr, "[ICD] QueueSubmit2: submit[%u] cbCount=%u\n", i, cbCount);
+        for (uint32_t j = 0; j < cbCount; j++) {
+            uint64_t cbId = toId(pSubmits[i].pCommandBufferInfos[j].commandBuffer);
+            uint64_t ws = (j == 0) ? waitSem : 0;
+            uint64_t ss = (j == cbCount - 1) ? sigSem : 0;
+            uint64_t f  = (i == count - 1 && j == cbCount - 1) ? (uint64_t)fence : 0;
+            fprintf(stderr, "[ICD]   -> cb[%u]=%llu\n", j, (unsigned long long)cbId);
+            g_icd.encoder.cmdQueueSubmit(toId(q), cbId, ws, ss, f);
+        }
     }
     return VK_SUCCESS;
 }
@@ -1026,7 +1046,10 @@ static void VKAPI_CALL icd_vkCmdClearColorImage(VkCommandBuffer, VkImage, VkImag
 static void VKAPI_CALL icd_vkCmdClearAttachments(VkCommandBuffer, uint32_t, const VkClearAttachment*, uint32_t, const VkClearRect*) {}
 static void VKAPI_CALL icd_vkCmdSetStencilReference(VkCommandBuffer, VkStencilFaceFlags, uint32_t) {}
 static void VKAPI_CALL icd_vkCmdSetBlendConstants(VkCommandBuffer, const float[4]) {}
-static void VKAPI_CALL icd_vkCmdPushConstants(VkCommandBuffer, VkPipelineLayout, VkShaderStageFlags, uint32_t, uint32_t, const void*) {}
+static void VKAPI_CALL icd_vkCmdPushConstants(VkCommandBuffer cb, VkPipelineLayout layout,
+    VkShaderStageFlags stageFlags, uint32_t offset, uint32_t size, const void* pValues) {
+    g_icd.encoder.cmdPushConstants(toId(cb), (uint64_t)layout, stageFlags, offset, size, pValues);
+}
 static void VKAPI_CALL icd_vkCmdDispatch(VkCommandBuffer, uint32_t, uint32_t, uint32_t) {}
 static void VKAPI_CALL icd_vkCmdFillBuffer(VkCommandBuffer, VkBuffer, VkDeviceSize, VkDeviceSize, uint32_t) {}
 static void VKAPI_CALL icd_vkCmdUpdateBuffer(VkCommandBuffer, VkBuffer, VkDeviceSize, VkDeviceSize, const void*) {}
