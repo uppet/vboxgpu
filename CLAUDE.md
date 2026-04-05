@@ -10,7 +10,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目状态
 
-当前处于规划阶段，尚无实际代码。技术方案见 `vbox-gpu-bridge-full-plan-v1.0.md`。
+**阶段一 M1.2 进行中** — ICD 代理 + DXVK 集成。
+
+已完成：
+- ICD 代理框架，DXVK 完整初始化通过（Vulkan 1.3, Features2 填充）
+- Venus 命令流编解码 + TCP 传输
+- Host 端 Vulkan 1.3 Dynamic Rendering + Swapchain 管理
+- 端到端三角形渲染验证（内嵌 shader → 橙色三角形）
+- 命令流 dump/replay + BMP 截图调试工具
+- 延迟 Present 机制（修复多线程编码时序问题）
+
+当前工作（P0）：
+- 转发 DescriptorSetLayout / PipelineLayout → 让 DXVK 原始 SPIR-V shader 工作
+
+下一步（P1-P3）：
+- 清理 activeRendering_ 全局状态、CB reset-while-pending
+- GPU 资源序列化（Buffer/Image/Memory）
+- 更多 DX11 测试用例
 
 ## 架构要点
 
