@@ -20,12 +20,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 命令流 dump/replay + BMP 截图调试工具
 - 延迟 Present 机制（修复多线程编码时序问题）
 
-当前工作（P0）：
-- 转发 DescriptorSetLayout / PipelineLayout → 让 DXVK 原始 SPIR-V shader 工作
+已完成：
+- DescriptorSetLayout / PipelineLayout 序列化
+- 命令流反汇编工具 (scripts/disasm_cmdstream.py)
+- Windows.Graphics.Capture 窗口截图验证
+- Swapchain format/imageUsage 修复
 
-下一步（P1-P3）：
+当前工作：
+- **GPU 资源序列化** — 详见 `docs/plan-gpu-resource-serialization.md`
+  DXVK 先渲染到内部 VkImage 再 blit 到 swapchain。
+  需要在 Host 上创建真实的 Image/Memory/ImageView/DescriptorSet，
+  让 blit shader 能采样到渲染结果。
+
+后续：
 - 清理 activeRendering_ 全局状态、CB reset-while-pending
-- GPU 资源序列化（Buffer/Image/Memory）
 - 更多 DX11 测试用例
 
 ## 架构要点
