@@ -1,65 +1,7 @@
 #include "vn_decoder.h"
+#include "win_capture.h"
 #include <fstream>
 #include <algorithm>
-
-// Built-in simple triangle shaders (GLSL 450, compiled with glslc)
-// Vertex: hardcoded triangle positions via gl_VertexIndex
-static const uint32_t builtinVertSpv[] = {
-    0x07230203, 0x00010000, 0x000d000a, 0x00000028, 0x00000000, 0x00020011, 0x00000001, 0x0006000b,
-    0x00000001, 0x4c534c47, 0x6474732e, 0x3035342e, 0x00000000, 0x0003000e, 0x00000000, 0x00000001,
-    0x0007000f, 0x00000000, 0x00000004, 0x6e69616d, 0x00000000, 0x00000019, 0x0000001d, 0x00030003,
-    0x00000002, 0x000001c2, 0x000a0004, 0x475f4c47, 0x4c474f4f, 0x70635f45, 0x74735f70, 0x5f656c79,
-    0x656e696c, 0x7269645f, 0x69746365, 0x00006576, 0x00080004, 0x475f4c47, 0x4c474f4f, 0x6e695f45,
-    0x64756c63, 0x69645f65, 0x74636572, 0x00657669, 0x00040005, 0x00000004, 0x6e69616d, 0x00000000,
-    0x00050005, 0x0000000c, 0x69736f70, 0x6e6f6974, 0x00000073, 0x00060005, 0x00000017, 0x505f6c67,
-    0x65567265, 0x78657472, 0x00000000, 0x00060006, 0x00000017, 0x00000000, 0x505f6c67, 0x7469736f,
-    0x006e6f69, 0x00070006, 0x00000017, 0x00000001, 0x505f6c67, 0x746e696f, 0x657a6953, 0x00000000,
-    0x00070006, 0x00000017, 0x00000002, 0x435f6c67, 0x4470696c, 0x61747369, 0x0065636e, 0x00070006,
-    0x00000017, 0x00000003, 0x435f6c67, 0x446c6c75, 0x61747369, 0x0065636e, 0x00030005, 0x00000019,
-    0x00000000, 0x00060005, 0x0000001d, 0x565f6c67, 0x65747265, 0x646e4978, 0x00007865, 0x00050048,
-    0x00000017, 0x00000000, 0x0000000b, 0x00000000, 0x00050048, 0x00000017, 0x00000001, 0x0000000b,
-    0x00000001, 0x00050048, 0x00000017, 0x00000002, 0x0000000b, 0x00000003, 0x00050048, 0x00000017,
-    0x00000003, 0x0000000b, 0x00000004, 0x00030047, 0x00000017, 0x00000002, 0x00040047, 0x0000001d,
-    0x0000000b, 0x0000002a, 0x00020013, 0x00000002, 0x00030021, 0x00000003, 0x00000002, 0x00030016,
-    0x00000006, 0x00000020, 0x00040017, 0x00000007, 0x00000006, 0x00000002, 0x00040015, 0x00000008,
-    0x00000020, 0x00000000, 0x0004002b, 0x00000008, 0x00000009, 0x00000003, 0x0004001c, 0x0000000a,
-    0x00000007, 0x00000009, 0x00040020, 0x0000000b, 0x00000006, 0x0000000a, 0x0004003b, 0x0000000b,
-    0x0000000c, 0x00000006, 0x0004002b, 0x00000006, 0x0000000d, 0x00000000, 0x0004002b, 0x00000006,
-    0x0000000e, 0xbf000000, 0x0005002c, 0x00000007, 0x0000000f, 0x0000000d, 0x0000000e, 0x0004002b,
-    0x00000006, 0x00000010, 0x3f000000, 0x0005002c, 0x00000007, 0x00000011, 0x00000010, 0x00000010,
-    0x0005002c, 0x00000007, 0x00000012, 0x0000000e, 0x00000010, 0x0006002c, 0x0000000a, 0x00000013,
-    0x0000000f, 0x00000011, 0x00000012, 0x00040017, 0x00000014, 0x00000006, 0x00000004, 0x0004002b,
-    0x00000008, 0x00000015, 0x00000001, 0x0004001c, 0x00000016, 0x00000006, 0x00000015, 0x0006001e,
-    0x00000017, 0x00000014, 0x00000006, 0x00000016, 0x00000016, 0x00040020, 0x00000018, 0x00000003,
-    0x00000017, 0x0004003b, 0x00000018, 0x00000019, 0x00000003, 0x00040015, 0x0000001a, 0x00000020,
-    0x00000001, 0x0004002b, 0x0000001a, 0x0000001b, 0x00000000, 0x00040020, 0x0000001c, 0x00000001,
-    0x0000001a, 0x0004003b, 0x0000001c, 0x0000001d, 0x00000001, 0x00040020, 0x0000001f, 0x00000006,
-    0x00000007, 0x0004002b, 0x00000006, 0x00000022, 0x3f800000, 0x00040020, 0x00000026, 0x00000003,
-    0x00000014, 0x00050036, 0x00000002, 0x00000004, 0x00000000, 0x00000003, 0x000200f8, 0x00000005,
-    0x0003003e, 0x0000000c, 0x00000013, 0x0004003d, 0x0000001a, 0x0000001e, 0x0000001d, 0x00050041,
-    0x0000001f, 0x00000020, 0x0000000c, 0x0000001e, 0x0004003d, 0x00000007, 0x00000021, 0x00000020,
-    0x00050051, 0x00000006, 0x00000023, 0x00000021, 0x00000000, 0x00050051, 0x00000006, 0x00000024,
-    0x00000021, 0x00000001, 0x00070050, 0x00000014, 0x00000025, 0x00000023, 0x00000024, 0x0000000d,
-    0x00000022, 0x00050041, 0x00000026, 0x00000027, 0x00000019, 0x0000001b, 0x0003003e, 0x00000027,
-    0x00000025, 0x000100fd, 0x00010038,
-};
-// Fragment: constant orange output
-static const uint32_t builtinFragSpv[] = {
-    0x07230203, 0x00010000, 0x000d000a, 0x0000000e, 0x00000000, 0x00020011, 0x00000001, 0x0006000b,
-    0x00000001, 0x4c534c47, 0x6474732e, 0x3035342e, 0x00000000, 0x0003000e, 0x00000000, 0x00000001,
-    0x0006000f, 0x00000004, 0x00000004, 0x6e69616d, 0x00000000, 0x00000009, 0x00030010, 0x00000004,
-    0x00000007, 0x00030003, 0x00000002, 0x000001c2, 0x000a0004, 0x475f4c47, 0x4c474f4f, 0x70635f45,
-    0x74735f70, 0x5f656c79, 0x656e696c, 0x7269645f, 0x69746365, 0x00006576, 0x00080004, 0x475f4c47,
-    0x4c474f4f, 0x6e695f45, 0x64756c63, 0x69645f65, 0x74636572, 0x00657669, 0x00040005, 0x00000004,
-    0x6e69616d, 0x00000000, 0x00050005, 0x00000009, 0x4374756f, 0x726f6c6f, 0x00000000, 0x00040047,
-    0x00000009, 0x0000001e, 0x00000000, 0x00020013, 0x00000002, 0x00030021, 0x00000003, 0x00000002,
-    0x00030016, 0x00000006, 0x00000020, 0x00040017, 0x00000007, 0x00000006, 0x00000004, 0x00040020,
-    0x00000008, 0x00000003, 0x00000007, 0x0004003b, 0x00000008, 0x00000009, 0x00000003, 0x0004002b,
-    0x00000006, 0x0000000a, 0x3f800000, 0x0004002b, 0x00000006, 0x0000000b, 0x3f000000, 0x0004002b,
-    0x00000006, 0x0000000c, 0x00000000, 0x0007002c, 0x00000007, 0x0000000d, 0x0000000a, 0x0000000b,
-    0x0000000c, 0x0000000a, 0x00050036, 0x00000002, 0x00000004, 0x00000000, 0x00000003, 0x000200f8,
-    0x00000005, 0x0003003e, 0x00000009, 0x0000000d, 0x000100fd, 0x00010038,
-};
 
 void VnDecoder::init(VkPhysicalDevice physDevice, VkDevice device,
                      VkQueue graphicsQueue, uint32_t graphicsFamily,
@@ -69,6 +11,12 @@ void VnDecoder::init(VkPhysicalDevice physDevice, VkDevice device,
     graphicsQueue_ = graphicsQueue;
     graphicsFamily_ = graphicsFamily;
     surface_ = surface;
+
+    // Create semaphore + fence for swapchain acquire synchronization
+    VkSemaphoreCreateInfo si{}; si.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    vkCreateSemaphore(device_, &si, nullptr, &acquireSemaphore_);
+    VkFenceCreateInfo fi{}; fi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    vkCreateFence(device_, &fi, nullptr, &acquireFence_);
 }
 
 bool VnDecoder::execute(const uint8_t* data, size_t size) {
@@ -123,6 +71,7 @@ void VnDecoder::dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdS
     switch (cmdType) {
     case VN_CMD_vkCreateRenderPass:       handleCreateRenderPass(reader); break;
     case VN_CMD_vkCreateShaderModule:     handleCreateShaderModule(reader); break;
+    case VN_CMD_vkCreateDescriptorSetLayout: handleCreateDescriptorSetLayout(reader); break;
     case VN_CMD_vkCreatePipelineLayout:   handleCreatePipelineLayout(reader); break;
     case VN_CMD_vkCreateGraphicsPipelines:handleCreateGraphicsPipeline(reader); break;
     case VN_CMD_vkCreateFramebuffer:      handleCreateFramebuffer(reader); break;
@@ -228,53 +177,58 @@ void VnDecoder::handleCreateShaderModule(VnStreamReader& r) {
     store(shaderModules_, moduleId, mod);
 }
 
+void VnDecoder::handleCreateDescriptorSetLayout(VnStreamReader& r) {
+    uint64_t deviceId = r.readU64();
+    uint64_t layoutId = r.readU64();
+    uint32_t bindingCount = r.readU32();
+
+    std::vector<VkDescriptorSetLayoutBinding> bindings(bindingCount);
+    for (uint32_t i = 0; i < bindingCount; i++) {
+        bindings[i] = {};
+        bindings[i].binding = r.readU32();
+        bindings[i].descriptorType = static_cast<VkDescriptorType>(r.readU32());
+        bindings[i].descriptorCount = r.readU32();
+        bindings[i].stageFlags = r.readU32();
+    }
+
+    VkDescriptorSetLayoutCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    info.bindingCount = bindingCount;
+    info.pBindings = bindings.data();
+
+    VkDescriptorSetLayout layout;
+    if (vkCreateDescriptorSetLayout(device_, &info, nullptr, &layout) != VK_SUCCESS) {
+        error_ = true;
+        return;
+    }
+    store(descriptorSetLayouts_, layoutId, layout);
+}
+
 void VnDecoder::handleCreatePipelineLayout(VnStreamReader& r) {
     uint64_t deviceId = r.readU64();
     uint64_t layoutId = r.readU64();
+    uint32_t setLayoutCount = r.readU32();
 
-    // DXVK shaders use push constants for internal state (output swizzle, alpha test, etc.)
-    // and descriptor sets for samplers/textures. Create a layout that covers these.
-    VkPushConstantRange pushRange{};
-    pushRange.stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
-    pushRange.offset = 0;
-    pushRange.size = 256; // max push constant size
-
-    // Create descriptor set layouts for DXVK's expected bindings:
-    // Set 0: sampler(s), Set 1: sampled images
-    VkDescriptorSetLayoutBinding bindings0[1]{};
-    bindings0[0].binding = 0;
-    bindings0[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-    bindings0[0].descriptorCount = 1;
-    bindings0[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-
-    VkDescriptorSetLayoutBinding bindings1[4]{};
-    for (int i = 0; i < 4; i++) {
-        bindings1[i].binding = i;
-        bindings1[i].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-        bindings1[i].descriptorCount = 1;
-        bindings1[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    std::vector<VkDescriptorSetLayout> setLayouts(setLayoutCount);
+    for (uint32_t i = 0; i < setLayoutCount; i++) {
+        uint64_t dsId = r.readU64();
+        setLayouts[i] = lookup(descriptorSetLayouts_, dsId);
     }
 
-    VkDescriptorSetLayoutCreateInfo dsLayout0Info{};
-    dsLayout0Info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    dsLayout0Info.bindingCount = 1;
-    dsLayout0Info.pBindings = bindings0;
-
-    VkDescriptorSetLayoutCreateInfo dsLayout1Info{};
-    dsLayout1Info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    dsLayout1Info.bindingCount = 4;
-    dsLayout1Info.pBindings = bindings1;
-
-    VkDescriptorSetLayout dsLayouts[2];
-    vkCreateDescriptorSetLayout(device_, &dsLayout0Info, nullptr, &dsLayouts[0]);
-    vkCreateDescriptorSetLayout(device_, &dsLayout1Info, nullptr, &dsLayouts[1]);
+    uint32_t pushRangeCount = r.readU32();
+    std::vector<VkPushConstantRange> pushRanges(pushRangeCount);
+    for (uint32_t i = 0; i < pushRangeCount; i++) {
+        pushRanges[i].stageFlags = r.readU32();
+        pushRanges[i].offset = r.readU32();
+        pushRanges[i].size = r.readU32();
+    }
 
     VkPipelineLayoutCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    info.pushConstantRangeCount = 1;
-    info.pPushConstantRanges = &pushRange;
-    info.setLayoutCount = 2;
-    info.pSetLayouts = dsLayouts;
+    info.setLayoutCount = setLayoutCount;
+    info.pSetLayouts = setLayouts.data();
+    info.pushConstantRangeCount = pushRangeCount;
+    info.pPushConstantRanges = pushRanges.data();
 
     VkPipelineLayout layout;
     if (vkCreatePipelineLayout(device_, &info, nullptr, &layout) != VK_SUCCESS) {
@@ -282,7 +236,6 @@ void VnDecoder::handleCreatePipelineLayout(VnStreamReader& r) {
         return;
     }
     store(pipelineLayouts_, layoutId, layout);
-    // Note: descriptor set layouts leak — acceptable for MVP
 }
 
 void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
@@ -299,20 +252,6 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
     VkShaderModule vertMod = lookup(shaderModules_, vertModuleId);
     VkShaderModule fragMod = lookup(shaderModules_, fragModuleId);
     bool dynamicRendering = (renderPassId == 0 && colorFmt != 0);
-
-    // DEBUG: replace DXVK shaders with builtin simple triangle shaders
-    if (dynamicRendering) {
-        VkShaderModuleCreateInfo smci{};
-        smci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-        smci.codeSize = sizeof(builtinVertSpv);
-        smci.pCode = builtinVertSpv;
-        VkShaderModule bv; vkCreateShaderModule(device_, &smci, nullptr, &bv);
-        smci.codeSize = sizeof(builtinFragSpv);
-        smci.pCode = builtinFragSpv;
-        VkShaderModule bf; vkCreateShaderModule(device_, &smci, nullptr, &bf);
-        vertMod = bv; fragMod = bf;
-        fprintf(stderr, "[Decoder] CreatePipeline: USING BUILTIN SHADERS\n");
-    }
 
     fprintf(stderr, "[Decoder] CreatePipeline: id=%u rp=%u vert→%p frag→%p %ux%u dynRender=%d fmt=%u\n",
             (unsigned)pipelineId, (unsigned)renderPassId,
@@ -413,8 +352,11 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
     cb.pAttachments = &cbAtt;
 
     // Dynamic rendering info (Vulkan 1.3)
+    // Use the actual swapchain format (ICD may report SRGB but Host GPU may only support UNORM)
     VkPipelineRenderingCreateInfo renderingInfo{};
     VkFormat colorFormat = static_cast<VkFormat>(colorFmt);
+    HostSwapchain* scFmt = getFirstSwapchain();
+    if (scFmt && dynamicRendering) colorFormat = scFmt->format;
 
     VkGraphicsPipelineCreateInfo pInfo{};
     pInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -427,18 +369,7 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
     pInfo.pMultisampleState = &ms;
     pInfo.pColorBlendState = &cb;
     pInfo.pDynamicState = (dynamicRendering || dynState.dynamicStateCount > 0) ? &dynState : nullptr;
-    // For builtin shaders, use a simple empty pipeline layout
-    VkPipelineLayout usedLayout = lookup(pipelineLayouts_, layoutId);
-    if (dynamicRendering) {
-        // Builtin shaders don't need push constants or descriptors
-        static VkPipelineLayout emptyLayout = VK_NULL_HANDLE;
-        if (!emptyLayout) {
-            VkPipelineLayoutCreateInfo pli{}; pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-            vkCreatePipelineLayout(device_, &pli, nullptr, &emptyLayout);
-        }
-        usedLayout = emptyLayout;
-    }
-    pInfo.layout = usedLayout;
+    pInfo.layout = lookup(pipelineLayouts_, layoutId);
 
     if (dynamicRendering) {
         renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
@@ -557,6 +488,9 @@ void VnDecoder::handleBeginCommandBuffer(VnStreamReader& r) {
     fflush(stderr);
     if (!cb) { error_ = true; return; }
 
+    // Must wait for GPU to finish any prior submission of this CB before resetting.
+    // Within a single batch, the same CB can be Submit'd then Begin'd again.
+    vkDeviceWaitIdle(device_);
     vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo info{};
     info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -900,10 +834,8 @@ void VnDecoder::handleBridgeCreateSwapchain(VnStreamReader& r) {
     std::vector<VkSurfaceFormatKHR> fmts(fmtCount);
     vkGetPhysicalDeviceSurfaceFormatsKHR(physDevice_, surface_, &fmtCount, fmts.data());
 
+    // Use the first supported surface format (don't force SRGB — Host GPU may not support it)
     VkSurfaceFormatKHR surfFmt = fmts[0];
-    for (auto& f : fmts) {
-        if (f.format == VK_FORMAT_B8G8R8A8_SRGB) { surfFmt = f; break; }
-    }
 
     HostSwapchain sc{};
     sc.format = surfFmt.format;
@@ -919,7 +851,7 @@ void VnDecoder::handleBridgeCreateSwapchain(VnStreamReader& r) {
     info.imageColorSpace = surfFmt.colorSpace;
     info.imageExtent = sc.extent;
     info.imageArrayLayers = 1;
-    info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     info.preTransform = caps.currentTransform;
     info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
@@ -956,7 +888,9 @@ void VnDecoder::handleBridgeCreateSwapchain(VnStreamReader& r) {
 
     // Acquire first image so rendering can start immediately
     vkAcquireNextImageKHR(device_, sc.swapchain, UINT64_MAX,
-                          VK_NULL_HANDLE, VK_NULL_HANDLE, &sc.currentImageIndex);
+                          VK_NULL_HANDLE, acquireFence_, &sc.currentImageIndex);
+    vkWaitForFences(device_, 1, &acquireFence_, VK_TRUE, UINT64_MAX);
+    vkResetFences(device_, 1, &acquireFence_);
 
     store(swapchains_, scId, sc);
 }
@@ -990,32 +924,42 @@ void VnDecoder::flushPendingPresents() {
         auto it = swapchains_.find(pp.scId);
         if (it == swapchains_.end()) continue;
 
-        VkSemaphore waitSem = lookup(semaphores_, pp.waitSemId);
-
-        // Wait for all GPU work to complete before presenting
+        // Wait for all GPU work to complete before presenting.
+        // Don't use ICD semaphores for present wait — they may not be properly
+        // signaled (ICD semaphore IDs don't map 1:1 to Host signal operations).
+        // vkDeviceWaitIdle guarantees all rendering is done.
         vkDeviceWaitIdle(device_);
 
         VkPresentInfoKHR info{};
         info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-        if (waitSem) {
-            info.waitSemaphoreCount = 1;
-            info.pWaitSemaphores = &waitSem;
-        }
         info.swapchainCount = 1;
         info.pSwapchains = &it->second.swapchain;
         info.pImageIndices = &it->second.currentImageIndex;
 
         uint32_t presentIdx = it->second.currentImageIndex;
 
-        // Debug: capture screenshot before present (no debug clear)
-        static int dbgPresentCount = 0;
-        dbgPresentCount++;
-        if (dbgPresentCount <= 3) {
-            captureScreenshot(
-                (std::string("S:/bld/vboxgpu/dbg_pre_present") + std::to_string(dbgPresentCount) + ".bmp").c_str());
+        // DEBUG: capture Vulkan image content AND WGC window content at frame 5
+        // to see if they match (diagnose present vs rendering mismatch)
+        // DEBUG: read pixels from the presenting image right before present
+        static int dbgFr = 0;
+        dbgFr++;
+        if (dbgFr == 5) {
+            uint32_t savedLast = lastPresentedImageIndex_;
+            lastPresentedImageIndex_ = presentIdx; // make captureScreenshot read the correct image
+            captureScreenshot("S:/bld/vboxgpu/dbg_presenting_img.bmp");
+            lastPresentedImageIndex_ = savedLast;
         }
 
         VkResult vr = vkQueuePresentKHR(graphicsQueue_, &info);
+
+        static int wgcFrame = 0;
+        wgcFrame++;
+        if (wgcFrame == 5) {
+            HWND wnd = FindWindowA("VBoxGPUBridgeServer", nullptr);
+            if (!wnd) wnd = FindWindowA(nullptr, "VBox GPU Bridge - Host Server");
+            if (wnd) captureWindowToBMP(wnd, "S:/bld/vboxgpu/wgc_capture.bmp");
+        }
+
         fprintf(stderr, "[Decoder] Present FLUSH: sc=%p imgIdx=%u result=%d\n",
                 (void*)it->second.swapchain, presentIdx, (int)vr);
         fflush(stderr);
@@ -1098,12 +1042,12 @@ void VnDecoder::flushPendingPresents() {
 #endif
         // Auto-acquire next image for the next frame
         uint32_t oldIdx = it->second.currentImageIndex;
-        VkSemaphore acqSem = VK_NULL_HANDLE;
-        for (auto& [sid, sem] : semaphores_) { acqSem = sem; break; }
         vkAcquireNextImageKHR(device_, it->second.swapchain, UINT64_MAX,
-                              acqSem, VK_NULL_HANDLE, &it->second.currentImageIndex);
-        fprintf(stderr, "[Decoder] AutoAcquire: %u -> %u (acqSem=%p)\n",
-                oldIdx, it->second.currentImageIndex, (void*)acqSem);
+                              VK_NULL_HANDLE, acquireFence_, &it->second.currentImageIndex);
+        vkWaitForFences(device_, 1, &acquireFence_, VK_TRUE, UINT64_MAX);
+        vkResetFences(device_, 1, &acquireFence_);
+        fprintf(stderr, "[Decoder] AutoAcquire: %u -> %u\n",
+                oldIdx, it->second.currentImageIndex);
     }
     pendingPresents_.clear();
 }
@@ -1115,8 +1059,11 @@ HostSwapchain* VnDecoder::getSwapchain(uint64_t id) {
 
 void VnDecoder::cleanup() {
     vkDeviceWaitIdle(device_);
+    if (acquireSemaphore_) vkDestroySemaphore(device_, acquireSemaphore_, nullptr);
+    if (acquireFence_) vkDestroyFence(device_, acquireFence_, nullptr);
     for (auto& [id, p] : pipelines_) vkDestroyPipeline(device_, p, nullptr);
     for (auto& [id, l] : pipelineLayouts_) vkDestroyPipelineLayout(device_, l, nullptr);
+    for (auto& [id, dsl] : descriptorSetLayouts_) vkDestroyDescriptorSetLayout(device_, dsl, nullptr);
     for (auto& [id, m] : shaderModules_) vkDestroyShaderModule(device_, m, nullptr);
     for (auto& [id, fb] : framebuffers_) vkDestroyFramebuffer(device_, fb, nullptr);
     for (auto& [id, rp] : renderPasses_) vkDestroyRenderPass(device_, rp, nullptr);

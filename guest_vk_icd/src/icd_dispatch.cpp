@@ -689,11 +689,18 @@ static VkResult VKAPI_CALL icd_vkCreateShaderModule(
 static void VKAPI_CALL icd_vkDestroyShaderModule(VkDevice, VkShaderModule, const VkAllocationCallbacks*) {}
 
 static VkResult VKAPI_CALL icd_vkCreatePipelineLayout(
-    VkDevice, const VkPipelineLayoutCreateInfo*, const VkAllocationCallbacks*, VkPipelineLayout* p)
+    VkDevice, const VkPipelineLayoutCreateInfo* pInfo, const VkAllocationCallbacks*, VkPipelineLayout* p)
 {
     uint64_t id = g_icd.handles.alloc();
     *p = (VkPipelineLayout)id;
-    g_icd.encoder.cmdCreatePipelineLayout(1, id);
+
+    std::vector<uint64_t> setLayoutIds(pInfo->setLayoutCount);
+    for (uint32_t i = 0; i < pInfo->setLayoutCount; i++)
+        setLayoutIds[i] = (uint64_t)pInfo->pSetLayouts[i];
+
+    g_icd.encoder.cmdCreatePipelineLayout(1, id,
+        pInfo->setLayoutCount, setLayoutIds.data(),
+        pInfo->pushConstantRangeCount, pInfo->pPushConstantRanges);
     return VK_SUCCESS;
 }
 
@@ -999,8 +1006,15 @@ static VkResult VKAPI_CALL icd_vkCreateSampler(VkDevice, const VkSamplerCreateIn
 }
 static void VKAPI_CALL icd_vkDestroySampler(VkDevice, VkSampler, const VkAllocationCallbacks*) {}
 
-static VkResult VKAPI_CALL icd_vkCreateDescriptorSetLayout(VkDevice, const VkDescriptorSetLayoutCreateInfo*, const VkAllocationCallbacks*, VkDescriptorSetLayout* p) {
-    *p = (VkDescriptorSetLayout)g_icd.handles.alloc(); return VK_SUCCESS;
+static VkResult VKAPI_CALL icd_vkCreateDescriptorSetLayout(
+    VkDevice, const VkDescriptorSetLayoutCreateInfo* pInfo,
+    const VkAllocationCallbacks*, VkDescriptorSetLayout* p)
+{
+    uint64_t id = g_icd.handles.alloc();
+    *p = (VkDescriptorSetLayout)id;
+    g_icd.encoder.cmdCreateDescriptorSetLayout(1, id,
+        pInfo->bindingCount, pInfo->pBindings);
+    return VK_SUCCESS;
 }
 static void VKAPI_CALL icd_vkDestroyDescriptorSetLayout(VkDevice, VkDescriptorSetLayout, const VkAllocationCallbacks*) {}
 

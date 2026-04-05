@@ -46,11 +46,40 @@ public:
         w_.endCommand(off);
     }
 
-    void cmdCreatePipelineLayout(uint64_t deviceId, uint64_t layoutId) {
+    void cmdCreateDescriptorSetLayout(uint64_t deviceId, uint64_t layoutId,
+                                       uint32_t bindingCount,
+                                       const VkDescriptorSetLayoutBinding* pBindings) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCreateDescriptorSetLayout);
+        w_.writeU64(deviceId);
+        w_.writeU64(layoutId);
+        w_.writeU32(bindingCount);
+        for (uint32_t i = 0; i < bindingCount; i++) {
+            w_.writeU32(pBindings[i].binding);
+            w_.writeU32(pBindings[i].descriptorType);
+            w_.writeU32(pBindings[i].descriptorCount);
+            w_.writeU32(pBindings[i].stageFlags);
+        }
+        w_.endCommand(off);
+    }
+
+    void cmdCreatePipelineLayout(uint64_t deviceId, uint64_t layoutId,
+                                  uint32_t setLayoutCount, const uint64_t* setLayoutIds,
+                                  uint32_t pushConstantRangeCount,
+                                  const VkPushConstantRange* pPushConstantRanges) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCreatePipelineLayout);
         w_.writeU64(deviceId);
         w_.writeU64(layoutId);
+        w_.writeU32(setLayoutCount);
+        for (uint32_t i = 0; i < setLayoutCount; i++)
+            w_.writeU64(setLayoutIds[i]);
+        w_.writeU32(pushConstantRangeCount);
+        for (uint32_t i = 0; i < pushConstantRangeCount; i++) {
+            w_.writeU32(pPushConstantRanges[i].stageFlags);
+            w_.writeU32(pPushConstantRanges[i].offset);
+            w_.writeU32(pPushConstantRanges[i].size);
+        }
         w_.endCommand(off);
     }
 

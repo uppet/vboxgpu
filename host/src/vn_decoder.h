@@ -63,6 +63,7 @@ private:
     // Command handlers
     void handleCreateRenderPass(VnStreamReader& r);
     void handleCreateShaderModule(VnStreamReader& r);
+    void handleCreateDescriptorSetLayout(VnStreamReader& r);
     void handleCreatePipelineLayout(VnStreamReader& r);
     void handleCreateGraphicsPipeline(VnStreamReader& r);
     void handleCreateFramebuffer(VnStreamReader& r);
@@ -107,6 +108,7 @@ private:
 
     std::unordered_map<uint64_t, VkRenderPass> renderPasses_;
     std::unordered_map<uint64_t, VkShaderModule> shaderModules_;
+    std::unordered_map<uint64_t, VkDescriptorSetLayout> descriptorSetLayouts_;
     std::unordered_map<uint64_t, VkPipelineLayout> pipelineLayouts_;
     std::unordered_map<uint64_t, VkPipeline> pipelines_;
     std::unordered_map<uint64_t, VkFramebuffer> framebuffers_;
@@ -117,6 +119,8 @@ private:
     std::unordered_map<uint64_t, VkImageView> imageViews_;
     std::unordered_map<uint64_t, HostSwapchain> swapchains_;
     bool activeRendering_ = false;
+    VkSemaphore acquireSemaphore_ = VK_NULL_HANDLE; // for swapchain acquire sync
+    VkFence acquireFence_ = VK_NULL_HANDLE;
     uint32_t lastPresentedImageIndex_ = 0; // for screenshot fidelity
 
     // Deferred present: collect during batch, execute after all QueueSubmits

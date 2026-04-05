@@ -4,4 +4,6 @@ CLAUDE.local.md
 .claude/
 *.for.agent.md
 *~
-
+third_party/
+tests/dx11_triangle/test_env/
+dumps/

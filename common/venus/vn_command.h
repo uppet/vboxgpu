@@ -36,6 +36,7 @@ enum VnCommandType : uint32_t {
     VN_CMD_vkDestroyImageView              = 53,
     VN_CMD_vkCreateShaderModule            = 54,
     VN_CMD_vkDestroyShaderModule           = 55,
+    VN_CMD_vkCreateDescriptorSetLayout     = 56,
     VN_CMD_vkCreatePipelineLayout          = 58,
     VN_CMD_vkDestroyPipelineLayout         = 59,
     VN_CMD_vkCreateGraphicsPipelines       = 61,

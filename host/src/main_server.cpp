@@ -2,6 +2,7 @@
 // Also supports --replay <dump.bin> to replay a recorded command stream with screenshot.
 
 #include "vn_decoder.h"
+#include "win_capture.h"
 #include "../../common/transport/tcp_transport.h"
 #include <cstdio>
 #include <vector>
@@ -204,6 +205,106 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // --- Quick test (DISABLED to avoid surface reuse issues): ---
+#if 0 can the swapchain display ANYTHING? ---
+    {
+        // Create a minimal swapchain on the Host surface
+        VkSurfaceCapabilitiesKHR caps;
+        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(vk.physicalDevice, vk.surface, &caps);
+        uint32_t fmtCount = 0;
+        vkGetPhysicalDeviceSurfaceFormatsKHR(vk.physicalDevice, vk.surface, &fmtCount, nullptr);
+        std::vector<VkSurfaceFormatKHR> fmts(fmtCount);
+        vkGetPhysicalDeviceSurfaceFormatsKHR(vk.physicalDevice, vk.surface, &fmtCount, fmts.data());
+
+        VkSwapchainCreateInfoKHR sci{};
+        sci.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+        sci.surface = vk.surface;
+        sci.minImageCount = 2;
+        sci.imageFormat = fmts[0].format;
+        sci.imageColorSpace = fmts[0].colorSpace;
+        sci.imageExtent = caps.currentExtent.width != UINT32_MAX ? caps.currentExtent : VkExtent2D{800,600};
+        sci.imageArrayLayers = 1;
+        sci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        sci.preTransform = caps.currentTransform;
+        sci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        sci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+        sci.clipped = VK_TRUE;
+
+        VkSwapchainKHR testSc;
+        VkResult scr = vkCreateSwapchainKHR(vk.device, &sci, nullptr, &testSc);
+        fprintf(stderr, "[SelfTest] Swapchain create: result=%d fmt=%u extent=%ux%u\n",
+                (int)scr, fmts[0].format, sci.imageExtent.width, sci.imageExtent.height);
+
+        if (scr == VK_SUCCESS) {
+            uint32_t imgCount = 0;
+            vkGetSwapchainImagesKHR(vk.device, testSc, &imgCount, nullptr);
+            std::vector<VkImage> imgs(imgCount);
+            vkGetSwapchainImagesKHR(vk.device, testSc, &imgCount, imgs.data());
+
+            // Present RED on each image a few times
+            VkCommandPool pool;
+            VkCommandPoolCreateInfo pci{}; pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+            pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+            pci.queueFamilyIndex = vk.graphicsFamily;
+            vkCreateCommandPool(vk.device, &pci, nullptr, &pool);
+
+            VkFence fence;
+            VkFenceCreateInfo fci{}; fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+            vkCreateFence(vk.device, &fci, nullptr, &fence);
+
+            for (int frame = 0; frame < 10; frame++) {
+                uint32_t idx;
+                vkAcquireNextImageKHR(vk.device, testSc, UINT64_MAX, VK_NULL_HANDLE, fence, &idx);
+                vkWaitForFences(vk.device, 1, &fence, VK_TRUE, UINT64_MAX);
+                vkResetFences(vk.device, 1, &fence);
+
+                VkCommandBuffer cb;
+                VkCommandBufferAllocateInfo ai{}; ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+                ai.commandPool = pool; ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount = 1;
+                vkAllocateCommandBuffers(vk.device, &ai, &cb);
+                VkCommandBufferBeginInfo bi{}; bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+                bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                vkBeginCommandBuffer(cb, &bi);
+
+                VkImageMemoryBarrier b{}; b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                b.image = imgs[idx]; b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+                vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,0,nullptr,0,nullptr,1,&b);
+
+                VkClearColorValue red = {{1,0,0,1}};
+                VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+                vkCmdClearColorImage(cb, imgs[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &red, 1, &range);
+
+                b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+                b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0,0,nullptr,0,nullptr,1,&b);
+
+                vkEndCommandBuffer(cb);
+                VkSubmitInfo si{}; si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO; si.commandBufferCount = 1; si.pCommandBuffers = &cb;
+                vkQueueSubmit(vk.graphicsQueue, 1, &si, VK_NULL_HANDLE);
+                vkQueueWaitIdle(vk.graphicsQueue);
+
+                VkPresentInfoKHR pi{}; pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+                pi.swapchainCount = 1; pi.pSwapchains = &testSc; pi.pImageIndices = &idx;
+                VkResult pr = vkQueuePresentKHR(vk.graphicsQueue, &pi);
+                if (frame == 0)
+                    fprintf(stderr, "[SelfTest] Present frame %d imgIdx=%u result=%d\n", frame, idx, (int)pr);
+
+                vkFreeCommandBuffers(vk.device, pool, 1, &cb);
+                MSG msg{}; while (PeekMessageA(&msg,nullptr,0,0,PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageA(&msg); }
+                Sleep(30);
+            }
+
+            // WGC capture after self-test
+            captureWindowToBMP(hwnd, "S:/bld/vboxgpu/selftest_capture.bmp");
+
+            vkDestroyFence(vk.device, fence, nullptr);
+            vkDestroyCommandPool(vk.device, pool, nullptr);
+            vkDestroySwapchainKHR(vk.device, testSc, nullptr);
+        }
+    }
+#endif
+
     VnDecoder decoder;
     decoder.init(vk.physicalDevice, vk.device, vk.graphicsQueue, vk.graphicsFamily, vk.surface);
 
@@ -257,6 +358,15 @@ int main(int argc, char* argv[]) {
         if (!decoder.execute(recvBuf.data(), bytesRead)) {
             fprintf(stderr, "[Host] Command stream execution failed.\n");
             break;
+        }
+
+        // Debug: capture window content once (after a few frames)
+        {
+            static int frameNum = 0;
+            frameNum++;
+            if (frameNum == 5) {
+                captureWindowToBMP(hwnd, "S:/bld/vboxgpu/wgc_capture.bmp");
+            }
         }
 
         // Find any swapchain (not hardcoded to ID 3)
