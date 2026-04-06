@@ -12,29 +12,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **阶段一 M1.2 进行中** — ICD 代理 + DXVK 集成。
 
-已完成：
-- ICD 代理框架，DXVK 完整初始化通过（Vulkan 1.3, Features2 填充）
-- Venus 命令流编解码 + TCP 传输
-- Host 端 Vulkan 1.3 Dynamic Rendering + Swapchain 管理
-- 端到端三角形渲染验证（内嵌 shader → 橙色三角形）
-- 命令流 dump/replay + BMP 截图调试工具
-- 延迟 Present 机制（修复多线程编码时序问题）
+已完成（M1.2 里程碑达成）：
+- DX11 三角形通过 DXVK → ICD → TCP → Host Vulkan 完整链路渲染并在窗口显示 ✓
+- ICD 代理框架（Vulkan 1.3, Features2, 60+ 扩展）
+- Venus 命令流编解码 + TCP 传输 + 延迟 Present
+- GPU 资源序列化：Image/Memory/ImageView/Sampler/DescriptorSet 全链路
+- Descriptor 路径：DescriptorUpdateTemplate → UpdateDescriptorSets + BindDescriptorSets2
+- Pipeline barrier 转发（vkCmdPipelineBarrier/Barrier2）
+- BeginRendering imageView 路由（swapchain vs 内部 render target）
+- 命令流反汇编工具 + Windows.Graphics.Capture 窗口截图
 
-已完成：
-- DescriptorSetLayout / PipelineLayout 序列化
-- 命令流反汇编工具 (scripts/disasm_cmdstream.py)
-- Windows.Graphics.Capture 窗口截图验证
-- Swapchain format/imageUsage 修复
-
-当前工作：
-- **GPU 资源序列化** — 详见 `docs/plan-gpu-resource-serialization.md`
-  DXVK 先渲染到内部 VkImage 再 blit 到 swapchain。
-  需要在 Host 上创建真实的 Image/Memory/ImageView/DescriptorSet，
-  让 blit shader 能采样到渲染结果。
+当前状态：
+- DX11 三角形能在 Host 窗口正确显示（用户已修改颜色值验证）
+- DXVK 原始 SPIR-V shader 渲染，非 builtin shader
 
 后续：
-- 清理 activeRendering_ 全局状态、CB reset-while-pending
-- 更多 DX11 测试用例
+- 清理调试代码和日志
+- 更多 DX11 测试用例（带纹理、vertex buffer）
+- Buffer 数据传输（MapMemory → Host GPU）
 
 ## 架构要点
 
