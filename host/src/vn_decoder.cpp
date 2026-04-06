@@ -87,6 +87,14 @@ void VnDecoder::dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdS
     case VN_CMD_vkCmdBindPipeline:        handleCmdBindPipeline(reader); break;
     case VN_CMD_vkCmdSetViewport:         handleCmdSetViewport(reader); break;
     case VN_CMD_vkCmdSetScissor:          handleCmdSetScissor(reader); break;
+    case VN_CMD_vkCmdSetCullMode:         handleCmdSetCullMode(reader); break;
+    case VN_CMD_vkCmdSetFrontFace:        handleCmdSetFrontFace(reader); break;
+    case VN_CMD_vkCmdBindVertexBuffers:   handleCmdBindVertexBuffers(reader); break;
+    case VN_CMD_vkCmdBindIndexBuffer:     handleCmdBindIndexBuffer(reader); break;
+    case VN_CMD_vkCmdDrawIndexed:         handleCmdDrawIndexed(reader); break;
+    case VN_CMD_vkCmdCopyBuffer:          handleCmdCopyBuffer(reader); break;
+    case VN_CMD_vkCmdCopyBufferToImage:   handleCmdCopyBufferToImage(reader); break;
+    case VN_CMD_vkCmdUpdateBuffer:        handleCmdUpdateBuffer(reader); break;
     case VN_CMD_vkCmdDraw:                handleCmdDraw(reader); break;
     case VN_CMD_vkCmdPushConstants:      handleCmdPushConstants(reader); break;
     case VN_CMD_vkCreateImage:           handleCreateImage(reader); break;
@@ -340,7 +348,11 @@ void VnDecoder::handleCreateImageView(VnStreamReader& r) {
     uint32_t baseLayer = r.readU32(), layers = r.readU32();
 
     VkImage img = lookup(images_, imageId);
-    if (!img) return;
+    if (!img) {
+        fprintf(stderr, "[Decoder] CreateImageView: SKIP id=%llu img=%llu NOT FOUND\n",
+                (unsigned long long)viewId, (unsigned long long)imageId);
+        return;
+    }
 
     VkImageViewCreateInfo ci{};
     ci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -353,6 +365,8 @@ void VnDecoder::handleCreateImageView(VnStreamReader& r) {
 
     VkImageView view;
     VkResult vr = vkCreateImageView(device_, &ci, nullptr, &view);
+    fprintf(stderr, "[Decoder] CreateImageView: id=%llu img=%llu fmt=%u type=%u result=%d\n",
+            (unsigned long long)viewId, (unsigned long long)imageId, format, viewType, (int)vr);
     if (vr != VK_SUCCESS) return;
     store(imageViews_, viewId, view);
 }
@@ -473,7 +487,13 @@ void VnDecoder::handleUpdateDescriptorSets(VnStreamReader& r) {
             allBufferInfos[i][j].buffer = lookup(buffers_, bufId);
             allBufferInfos[i][j].offset = bufOff;
             allBufferInfos[i][j].range = bufRange;
-
+            // Debug: log missing image views for SAMPLED_IMAGE descriptors
+            static int descImgLog = 0;
+            if (descImgLog < 5 && descType == 2 && ivId != 0 && !allImageInfos[i][j].imageView) {
+                fprintf(stderr, "[Decoder] UpdateDescSets: SAMPLED_IMAGE ivId=%llu NOT FOUND!\n",
+                        (unsigned long long)ivId);
+                descImgLog++;
+            }
         }
 
         VkDescriptorType dt = static_cast<VkDescriptorType>(descType);
@@ -718,6 +738,12 @@ void VnDecoder::handleCmdPipelineBarrier(VnStreamReader& r) {
         barriers[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         barriers[i].srcAccessMask = srcAccess;
         barriers[i].dstAccessMask = dstAccess;
+        static int barrierLog = 0;
+        if (barrierLog < 10) {
+            fprintf(stderr, "[Decoder] Barrier: img=%llu old=%u new=%u\n",
+                    (unsigned long long)imgId, oldLayout, newLayout);
+            barrierLog++;
+        }
         barriers[i].oldLayout = static_cast<VkImageLayout>(oldLayout);
         barriers[i].newLayout = static_cast<VkImageLayout>(newLayout);
         barriers[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -805,8 +831,42 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
         realH = scVP->extent.height;
     }
 
+    // Read vertex input state (appended after colorFmt in the command)
+    std::vector<VkVertexInputBindingDescription> vtxBindings;
+    std::vector<VkVertexInputAttributeDescription> vtxAttrs;
+    if (r.remaining() >= 4) {  // backward compat: old streams have no vertex input
+        uint32_t bindingCount = r.readU32();
+        vtxBindings.resize(bindingCount);
+        for (uint32_t i = 0; i < bindingCount; i++) {
+            vtxBindings[i].binding = r.readU32();
+            vtxBindings[i].stride = r.readU32();
+            vtxBindings[i].inputRate = static_cast<VkVertexInputRate>(r.readU32());
+        }
+        uint32_t attrCount = r.readU32();
+        vtxAttrs.resize(attrCount);
+        for (uint32_t i = 0; i < attrCount; i++) {
+            vtxAttrs[i].location = r.readU32();
+            vtxAttrs[i].binding = r.readU32();
+            vtxAttrs[i].format = static_cast<VkFormat>(r.readU32());
+            vtxAttrs[i].offset = r.readU32();
+        }
+    }
+
+    fprintf(stderr, "[Decoder] CreatePipeline vtxInput: %zu bindings, %zu attrs\n",
+            vtxBindings.size(), vtxAttrs.size());
+    for (size_t i = 0; i < vtxBindings.size(); i++)
+        fprintf(stderr, "  binding[%zu]: slot=%u stride=%u rate=%u\n", i,
+                vtxBindings[i].binding, vtxBindings[i].stride, vtxBindings[i].inputRate);
+    for (size_t i = 0; i < vtxAttrs.size(); i++)
+        fprintf(stderr, "  attr[%zu]: loc=%u bind=%u fmt=%u off=%u\n", i,
+                vtxAttrs[i].location, vtxAttrs[i].binding, vtxAttrs[i].format, vtxAttrs[i].offset);
+
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertexInput.vertexBindingDescriptionCount = (uint32_t)vtxBindings.size();
+    vertexInput.pVertexBindingDescriptions = vtxBindings.data();
+    vertexInput.vertexAttributeDescriptionCount = (uint32_t)vtxAttrs.size();
+    vertexInput.pVertexAttributeDescriptions = vtxAttrs.data();
 
     VkPipelineInputAssemblyStateCreateInfo inputAsm{};
     inputAsm.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -825,10 +885,14 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
 
     // Dynamic state: only for dynamic rendering (DXVK path).
     // Legacy render pass (guest_sim) uses static viewport/scissor.
-    VkDynamicState dynStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkDynamicState dynStates[] = {
+        VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
+        VK_DYNAMIC_STATE_CULL_MODE, VK_DYNAMIC_STATE_FRONT_FACE,
+        VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE,
+    };
     VkPipelineDynamicStateCreateInfo dynState{};
     dynState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-    dynState.dynamicStateCount = 2;
+    dynState.dynamicStateCount = 5;
     dynState.pDynamicStates = dynStates;
 
     if (dynamicRendering) {
@@ -861,11 +925,13 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
     cb.pAttachments = &cbAtt;
 
     // Dynamic rendering info (Vulkan 1.3)
-    // Use the actual swapchain format (ICD may report SRGB but Host GPU may only support UNORM)
     VkPipelineRenderingCreateInfo renderingInfo{};
     VkFormat colorFormat = static_cast<VkFormat>(colorFmt);
     HostSwapchain* scFmt = getFirstSwapchain();
-    if (scFmt && dynamicRendering) colorFormat = scFmt->format;
+    // Only override colorFormat for blit/present pipelines (0 vertex bindings)
+    // that target the swapchain. Draw pipelines with vertex input target internal
+    // images and must keep their original format.
+    if (scFmt && dynamicRendering && vtxBindings.empty()) colorFormat = scFmt->format;
 
     VkGraphicsPipelineCreateInfo pInfo{};
     pInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -1076,13 +1142,18 @@ void VnDecoder::handleCmdBeginRendering(VnStreamReader& r) {
     bool isSwapchain = false;
 
     if (imageViewId != 0) {
-        // DXVK specified an explicit imageView — use it (could be internal render target)
         targetView = lookup(imageViews_, imageViewId);
-        // Find the corresponding VkImage for the barrier
-        // We don't have a view→image map, so find the image from images_ that this view was created from
-        // For now, skip the barrier for non-swapchain images (DXVK handles layout transitions internally)
-    } else if (sc && !sc->imageViews.empty()) {
-        // Legacy: use swapchain image
+    }
+    // Only redirect to swapchain when the target is the swapchain itself
+    // (imageViewId=0, i.e. DXVK's present/blit pass targeting the swapchain backbuffer).
+    // When imageViewId != 0 and the view exists, it's an internal render target —
+    // let DXVK render to it so the subsequent blit pass can read from it.
+    if (imageViewId == 0 && sc && !sc->imageViews.empty()) {
+        targetView = sc->imageViews[sc->currentImageIndex];
+        targetImage = sc->images[sc->currentImageIndex];
+        isSwapchain = true;
+    } else if (!targetView && sc && !sc->imageViews.empty()) {
+        // Fallback: imageViewId was nonzero but lookup failed — redirect to swapchain
         targetView = sc->imageViews[sc->currentImageIndex];
         targetImage = sc->images[sc->currentImageIndex];
         isSwapchain = true;
@@ -1099,14 +1170,7 @@ void VnDecoder::handleCmdBeginRendering(VnStreamReader& r) {
     colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
     colorAttachment.imageView = targetView;
     colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    // Force CLEAR for swapchain passes — guest uses vkCmdClearColorImage (not forwarded yet)
-    // so we clear here with black instead
-    if (isSwapchain) {
-        colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        colorAttachment.clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
-    } else {
-        colorAttachment.loadOp = static_cast<VkAttachmentLoadOp>(loadOp);
-    }
+    colorAttachment.loadOp = static_cast<VkAttachmentLoadOp>(loadOp);
     colorAttachment.storeOp = static_cast<VkAttachmentStoreOp>(storeOp);
     colorAttachment.clearValue.color = {{cr, cg, cb_, ca}};
 
@@ -1233,6 +1297,124 @@ void VnDecoder::handleCmdSetScissor(VnStreamReader& r) {
     sc.offset.x = r.readI32(); sc.offset.y = r.readI32();
     sc.extent.width = r.readU32(); sc.extent.height = r.readU32();
     vkCmdSetScissor(lookup(commandBuffers_, cbId), 0, 1, &sc);
+}
+
+void VnDecoder::handleCmdSetCullMode(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint32_t cullMode = r.readU32();
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    if (cb) vkCmdSetCullMode(cb, static_cast<VkCullModeFlags>(cullMode));
+}
+
+void VnDecoder::handleCmdSetFrontFace(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint32_t frontFace = r.readU32();
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    if (cb) vkCmdSetFrontFace(cb, static_cast<VkFrontFace>(frontFace));
+}
+
+void VnDecoder::handleCmdBindVertexBuffers(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint32_t firstBinding = r.readU32(), bindingCount = r.readU32();
+    std::vector<VkBuffer> buffers(bindingCount);
+    std::vector<VkDeviceSize> offsets(bindingCount), sizes(bindingCount), strides(bindingCount);
+    bool hasStrides = false;
+    for (uint32_t i = 0; i < bindingCount; i++) {
+        uint64_t bufId = r.readU64();
+        buffers[i] = lookup(buffers_, bufId);
+        offsets[i] = r.readU64();
+        sizes[i] = r.readU64();
+        strides[i] = r.readU64();
+        if (strides[i] != 0) hasStrides = true;
+    }
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    if (!cb) return;
+    if (hasStrides) {
+        vkCmdBindVertexBuffers2(cb, firstBinding, bindingCount,
+            buffers.data(), offsets.data(), sizes.data(), strides.data());
+    } else {
+        vkCmdBindVertexBuffers(cb, firstBinding, bindingCount, buffers.data(), offsets.data());
+    }
+}
+
+void VnDecoder::handleCmdBindIndexBuffer(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint64_t bufId = r.readU64();
+    uint64_t offset = r.readU64();
+    uint32_t indexType = r.readU32();
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    VkBuffer buf = lookup(buffers_, bufId);
+    if (!cb || !buf) return;
+    vkCmdBindIndexBuffer(cb, buf, offset, static_cast<VkIndexType>(indexType));
+}
+
+void VnDecoder::handleCmdDrawIndexed(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint32_t indexCount = r.readU32(), instanceCount = r.readU32();
+    uint32_t firstIndex = r.readU32();
+    int32_t vertexOffset = r.readI32();
+    uint32_t firstInstance = r.readU32();
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    if (!cb || !activeRendering_) return;
+    vkCmdDrawIndexed(cb, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+}
+
+void VnDecoder::handleCmdCopyBuffer(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint64_t srcId = r.readU64(), dstId = r.readU64();
+    uint32_t regionCount = r.readU32();
+    std::vector<VkBufferCopy> regions(regionCount);
+    for (uint32_t i = 0; i < regionCount; i++) {
+        regions[i].srcOffset = r.readU64();
+        regions[i].dstOffset = r.readU64();
+        regions[i].size = r.readU64();
+    }
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    VkBuffer src = lookup(buffers_, srcId), dst = lookup(buffers_, dstId);
+    if (!cb || !src || !dst) return;
+    vkCmdCopyBuffer(cb, src, dst, regionCount, regions.data());
+}
+
+void VnDecoder::handleCmdCopyBufferToImage(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint64_t srcBufId = r.readU64(), dstImgId = r.readU64();
+    uint32_t dstLayout = r.readU32();
+    uint32_t regionCount = r.readU32();
+    std::vector<VkBufferImageCopy> regions(regionCount);
+    for (uint32_t i = 0; i < regionCount; i++) {
+        regions[i].bufferOffset = r.readU32();
+        regions[i].bufferRowLength = r.readU32();
+        regions[i].bufferImageHeight = r.readU32();
+        regions[i].imageSubresource.aspectMask = r.readU32();
+        regions[i].imageSubresource.mipLevel = r.readU32();
+        regions[i].imageSubresource.baseArrayLayer = r.readU32();
+        regions[i].imageSubresource.layerCount = r.readU32();
+        regions[i].imageOffset.x = r.readI32();
+        regions[i].imageOffset.y = r.readI32();
+        regions[i].imageOffset.z = r.readI32();
+        regions[i].imageExtent.width = r.readU32();
+        regions[i].imageExtent.height = r.readU32();
+        regions[i].imageExtent.depth = r.readU32();
+    }
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    VkBuffer srcBuf = lookup(buffers_, srcBufId);
+    VkImage dstImg = lookup(images_, dstImgId);
+    if (!cb || !srcBuf || !dstImg) return;
+    vkCmdCopyBufferToImage(cb, srcBuf, dstImg, static_cast<VkImageLayout>(dstLayout),
+                           regionCount, regions.data());
+}
+
+void VnDecoder::handleCmdUpdateBuffer(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint64_t bufId = r.readU64();
+    uint64_t offset = r.readU64();
+    uint32_t dataSize = r.readU32();
+    std::vector<uint8_t> data(dataSize);
+    r.readBytes(data.data(), dataSize);
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    VkBuffer buf = lookup(buffers_, bufId);
+    if (!cb || !buf) return;
+    vkCmdUpdateBuffer(cb, buf, offset, dataSize, data.data());
 }
 
 void VnDecoder::handleCmdDraw(VnStreamReader& r) {

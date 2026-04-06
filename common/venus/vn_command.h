@@ -75,6 +75,14 @@ enum VnCommandType : uint32_t {
     VN_CMD_vkCmdPipelineBarrier2          = 0x1008,  // image memory barriers only
     VN_CMD_vkCmdClearAttachments          = 0x1009,
     VN_CMD_vkCmdClearColorImage           = 0x100A,
+    VN_CMD_vkCmdSetCullMode               = 0x100B,
+    VN_CMD_vkCmdSetFrontFace              = 0x100C,
+    VN_CMD_vkCmdBindVertexBuffers         = 0x100D,
+    VN_CMD_vkCmdBindIndexBuffer           = 0x100E,
+    VN_CMD_vkCmdDrawIndexed               = 0x100F,
+    VN_CMD_vkCmdCopyBuffer                = 0x1010,
+    VN_CMD_vkCmdCopyBufferToImage         = 0x1011,
+    VN_CMD_vkCmdUpdateBuffer              = 0x1012,
 
     // Extension: swapchain (handled specially by host)
     VN_CMD_BRIDGE_CreateSwapchain          = 0x10000,

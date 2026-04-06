@@ -87,11 +87,28 @@ public:
         w_.endCommand(off);
     }
 
+    // Vertex input binding/attribute info for pipeline creation
+    struct VertexBinding { uint32_t binding, stride, inputRate; };
+    struct VertexAttribute { uint32_t location, binding, format, offset; };
+
+    // Legacy overload (no vertex input) for guest_sim / host_cmd compatibility
     void cmdCreateGraphicsPipeline(uint64_t deviceId, uint64_t pipelineId,
                                    uint64_t renderPassId, uint64_t layoutId,
                                    uint64_t vertModuleId, uint64_t fragModuleId,
                                    uint32_t viewportWidth, uint32_t viewportHeight,
-                                   uint32_t colorAttachmentFormat = 0) {
+                                   uint32_t colorAttachmentFormat) {
+        cmdCreateGraphicsPipeline(deviceId, pipelineId, renderPassId, layoutId,
+            vertModuleId, fragModuleId, viewportWidth, viewportHeight,
+            colorAttachmentFormat, 0, nullptr, 0, nullptr);
+    }
+
+    void cmdCreateGraphicsPipeline(uint64_t deviceId, uint64_t pipelineId,
+                                   uint64_t renderPassId, uint64_t layoutId,
+                                   uint64_t vertModuleId, uint64_t fragModuleId,
+                                   uint32_t viewportWidth, uint32_t viewportHeight,
+                                   uint32_t colorAttachmentFormat,
+                                   uint32_t bindingCount, const VertexBinding* bindings,
+                                   uint32_t attributeCount, const VertexAttribute* attributes) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCreateGraphicsPipelines);
         w_.writeU64(deviceId);
@@ -102,7 +119,21 @@ public:
         w_.writeU64(fragModuleId);
         w_.writeU32(viewportWidth);
         w_.writeU32(viewportHeight);
-        w_.writeU32(colorAttachmentFormat); // 0 = use renderPass, nonzero = dynamic rendering format
+        w_.writeU32(colorAttachmentFormat);
+        // Vertex input state (appended after legacy fields)
+        w_.writeU32(bindingCount);
+        for (uint32_t i = 0; i < bindingCount; i++) {
+            w_.writeU32(bindings[i].binding);
+            w_.writeU32(bindings[i].stride);
+            w_.writeU32(bindings[i].inputRate);
+        }
+        w_.writeU32(attributeCount);
+        for (uint32_t i = 0; i < attributeCount; i++) {
+            w_.writeU32(attributes[i].location);
+            w_.writeU32(attributes[i].binding);
+            w_.writeU32(attributes[i].format);
+            w_.writeU32(attributes[i].offset);
+        }
         w_.endCommand(off);
     }
 
@@ -504,6 +535,22 @@ public:
         w_.endCommand(off);
     }
 
+    void cmdSetCullMode(uint64_t cmdBufferId, uint32_t cullMode) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdSetCullMode);
+        w_.writeU64(cmdBufferId);
+        w_.writeU32(cullMode);
+        w_.endCommand(off);
+    }
+
+    void cmdSetFrontFace(uint64_t cmdBufferId, uint32_t frontFace) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdSetFrontFace);
+        w_.writeU64(cmdBufferId);
+        w_.writeU32(frontFace);
+        w_.endCommand(off);
+    }
+
     void cmdDraw(uint64_t cmdBufferId,
                  uint32_t vertexCount, uint32_t instanceCount,
                  uint32_t firstVertex, uint32_t firstInstance) {
@@ -514,6 +561,91 @@ public:
         w_.writeU32(instanceCount);
         w_.writeU32(firstVertex);
         w_.writeU32(firstInstance);
+        w_.endCommand(off);
+    }
+
+    void cmdDrawIndexed(uint64_t cmdBufferId,
+                        uint32_t indexCount, uint32_t instanceCount,
+                        uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdDrawIndexed);
+        w_.writeU64(cmdBufferId);
+        w_.writeU32(indexCount); w_.writeU32(instanceCount);
+        w_.writeU32(firstIndex); w_.writeI32(vertexOffset); w_.writeU32(firstInstance);
+        w_.endCommand(off);
+    }
+
+    void cmdBindVertexBuffers(uint64_t cmdBufferId, uint32_t firstBinding,
+                              uint32_t bindingCount, const uint64_t* bufferIds,
+                              const uint64_t* offsets, const uint64_t* sizes,
+                              const uint64_t* strides) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdBindVertexBuffers);
+        w_.writeU64(cmdBufferId);
+        w_.writeU32(firstBinding); w_.writeU32(bindingCount);
+        for (uint32_t i = 0; i < bindingCount; i++) {
+            w_.writeU64(bufferIds[i]); w_.writeU64(offsets[i]);
+            w_.writeU64(sizes ? sizes[i] : ~(uint64_t)0); // VK_WHOLE_SIZE when NULL
+            w_.writeU64(strides ? strides[i] : 0);
+        }
+        w_.endCommand(off);
+    }
+
+    void cmdBindIndexBuffer(uint64_t cmdBufferId, uint64_t bufferId,
+                            uint64_t offset, uint32_t indexType) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdBindIndexBuffer);
+        w_.writeU64(cmdBufferId);
+        w_.writeU64(bufferId); w_.writeU64(offset); w_.writeU32(indexType);
+        w_.endCommand(off);
+    }
+
+    void cmdCopyBuffer(uint64_t cmdBufferId, uint64_t srcBuf, uint64_t dstBuf,
+                       uint32_t regionCount, const uint64_t* srcOffsets,
+                       const uint64_t* dstOffsets, const uint64_t* sizes) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdCopyBuffer);
+        w_.writeU64(cmdBufferId);
+        w_.writeU64(srcBuf); w_.writeU64(dstBuf);
+        w_.writeU32(regionCount);
+        for (uint32_t i = 0; i < regionCount; i++) {
+            w_.writeU64(srcOffsets[i]); w_.writeU64(dstOffsets[i]); w_.writeU64(sizes[i]);
+        }
+        w_.endCommand(off);
+    }
+
+    void cmdCopyBufferToImage(uint64_t cmdBufferId, uint64_t srcBuf, uint64_t dstImg,
+                              uint32_t dstLayout, uint32_t regionCount,
+                              const uint32_t* bufOffsets, const uint32_t* bufRowLengths,
+                              const uint32_t* bufImgHeights,
+                              const uint32_t* imgAspects, const uint32_t* imgMipLevels,
+                              const uint32_t* imgBaseLayers, const uint32_t* imgLayerCounts,
+                              const int32_t* imgOffX, const int32_t* imgOffY, const int32_t* imgOffZ,
+                              const uint32_t* imgExtW, const uint32_t* imgExtH, const uint32_t* imgExtD) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdCopyBufferToImage);
+        w_.writeU64(cmdBufferId);
+        w_.writeU64(srcBuf); w_.writeU64(dstImg); w_.writeU32(dstLayout);
+        w_.writeU32(regionCount);
+        for (uint32_t i = 0; i < regionCount; i++) {
+            w_.writeU32(bufOffsets[i]); w_.writeU32(bufRowLengths[i]); w_.writeU32(bufImgHeights[i]);
+            w_.writeU32(imgAspects[i]); w_.writeU32(imgMipLevels[i]);
+            w_.writeU32(imgBaseLayers[i]); w_.writeU32(imgLayerCounts[i]);
+            w_.writeI32(imgOffX[i]); w_.writeI32(imgOffY[i]); w_.writeI32(imgOffZ[i]);
+            w_.writeU32(imgExtW[i]); w_.writeU32(imgExtH[i]); w_.writeU32(imgExtD[i]);
+        }
+        w_.endCommand(off);
+    }
+
+    void cmdUpdateBuffer(uint64_t cmdBufferId, uint64_t bufferId,
+                         uint64_t offset, uint32_t dataSize, const void* pData) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdUpdateBuffer);
+        w_.writeU64(cmdBufferId);
+        w_.writeU64(bufferId);
+        w_.writeU64(offset);
+        w_.writeU32(dataSize);
+        w_.writeBytes(pData, dataSize);
         w_.endCommand(off);
     }
 

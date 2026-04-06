@@ -95,6 +95,14 @@ private:
     void handleUpdateDescriptorSets(VnStreamReader& r);
     void handleCmdBindDescriptorSets(VnStreamReader& r);
     void handleCmdPushDescriptorSet(VnStreamReader& r);
+    void handleCmdSetCullMode(VnStreamReader& r);
+    void handleCmdSetFrontFace(VnStreamReader& r);
+    void handleCmdBindVertexBuffers(VnStreamReader& r);
+    void handleCmdBindIndexBuffer(VnStreamReader& r);
+    void handleCmdDrawIndexed(VnStreamReader& r);
+    void handleCmdCopyBuffer(VnStreamReader& r);
+    void handleCmdCopyBufferToImage(VnStreamReader& r);
+    void handleCmdUpdateBuffer(VnStreamReader& r);
     void handleCmdPipelineBarrier(VnStreamReader& r);
     void handleCreateBuffer(VnStreamReader& r);
     void handleBindBufferMemory(VnStreamReader& r);

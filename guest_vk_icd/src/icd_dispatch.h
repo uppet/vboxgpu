@@ -78,6 +78,9 @@ struct IcdState {
     struct MemoryShadow { void* ptr; VkDeviceSize size; };
     std::unordered_map<uint64_t, MemoryShadow> memoryShadows;
 
+    // ImageView → Image mapping (to detect swapchain targets in BeginRendering)
+    std::unordered_map<uint64_t, uint64_t> imageViewToImage;
+
     // Buffer size tracking: buffer handle → actual size
     std::unordered_map<uint64_t, VkDeviceSize> bufferSizes;
 

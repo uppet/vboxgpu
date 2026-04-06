@@ -52,9 +52,12 @@ static uint64_t toId(void* handle) {
     return reinterpret_cast<DispatchableHandle*>(handle)->id;
 }
 
+// Vulkan loader requires this magic value as the first dword of dispatchable handles (Debug builds assert on it)
+#define ICD_LOADER_MAGIC 0x01CDC0DE
+
 static void* makeDispatchable(uint64_t id) {
     auto* h = new DispatchableHandle();
-    h->loaderDisp = nullptr;
+    *reinterpret_cast<uintptr_t*>(h) = ICD_LOADER_MAGIC;
     h->id = id;
     return h;
 }
@@ -65,6 +68,8 @@ static uint64_t idToNd(uint64_t id) { return id; }
 
 // Forward declaration
 static PFN_vkVoidFunction lookupFunc(const char* pName);
+static uint32_t VKAPI_CALL icd_vkGetImageViewHandleNVX(VkDevice, const void*);
+static VkResult VKAPI_CALL icd_vkGetImageViewAddressNVX(VkDevice, VkImageView, void*);
 
 // --- ICD State ---
 
@@ -397,23 +402,44 @@ static VkResult VKAPI_CALL icd_vkEnumerateInstanceExtensionProperties(
 }
 
 static void VKAPI_CALL icd_vkGetPhysicalDeviceFormatProperties(
-    VkPhysicalDevice, VkFormat, VkFormatProperties* p)
+    VkPhysicalDevice, VkFormat format, VkFormatProperties* p)
 {
-    // Report full support for all formats (simplification for MVP)
-    p->linearTilingFeatures = 0;
-    p->optimalTilingFeatures = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
-                               VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
-                               VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT |
-                               VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
-                               VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
-    p->bufferFeatures = VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT |
-                        VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT;
+    // Report broad format support — depth/stencil formats get appropriate bits
+    bool isDS = (format >= VK_FORMAT_D16_UNORM && format <= VK_FORMAT_D32_SFLOAT_S8_UINT);
+    VkFormatFeatureFlags optBits =
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+        VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+        VK_FORMAT_FEATURE_TRANSFER_DST_BIT |
+        VK_FORMAT_FEATURE_BLIT_SRC_BIT |
+        (isDS ? VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT
+              : (VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT |
+                 VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+                 VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT |
+                 VK_FORMAT_FEATURE_BLIT_DST_BIT));
+    p->linearTilingFeatures = isDS ? 0 : optBits;
+    p->optimalTilingFeatures = optBits;
+    p->bufferFeatures = isDS ? 0 :
+        (VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT | VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT);
 }
 
 static void VKAPI_CALL icd_vkGetPhysicalDeviceFormatProperties2(
     VkPhysicalDevice pd, VkFormat format, VkFormatProperties2* p)
 {
     icd_vkGetPhysicalDeviceFormatProperties(pd, format, &p->formatProperties);
+    // Fill VkFormatProperties3 in pNext (Vulkan 1.3) — DXVK uses this for format feature checks
+    auto* base = reinterpret_cast<VkBaseOutStructure*>(p->pNext);
+    while (base) {
+        if (base->sType == VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3) {
+            // VkFormatProperties3: sType, pNext, linearTilingFeatures, optimalTilingFeatures, bufferFeatures (all VkFormatFeatureFlags2 = uint64)
+            auto* fp3 = reinterpret_cast<VkFormatProperties3*>(base);
+            fp3->linearTilingFeatures = (VkFormatFeatureFlags2)p->formatProperties.linearTilingFeatures;
+            fp3->optimalTilingFeatures = (VkFormatFeatureFlags2)p->formatProperties.optimalTilingFeatures;
+            fp3->bufferFeatures = (VkFormatFeatureFlags2)p->formatProperties.bufferFeatures;
+            break;
+        }
+        base = base->pNext;
+    }
 }
 
 // --- Surface ---
@@ -543,7 +569,11 @@ static void VKAPI_CALL icd_vkCmdBeginRendering(VkCommandBuffer cb, const VkRende
     if (pInfo && pInfo->colorAttachmentCount > 0 && pInfo->pColorAttachments)
         imageViewId = (uint64_t)pInfo->pColorAttachments[0].imageView;
 
-    fprintf(stderr, "[ICD] BeginRendering: imageView=%llu\n", (unsigned long long)imageViewId);
+    // Check if this imageView references a swapchain image (sentinel 0xFFF00000+i)
+    // If so, send imageViewId=0 to tell host to use swapchain target
+    auto ivIt = g_icd.imageViewToImage.find(imageViewId);
+    if (ivIt != g_icd.imageViewToImage.end() && (ivIt->second & 0xFFF00000) == 0xFFF00000)
+        imageViewId = 0;
     g_icd.encoder.cmdBeginRendering(toId(cb),
         pInfo ? pInfo->renderArea.offset.x : 0,
         pInfo ? pInfo->renderArea.offset.y : 0,
@@ -554,11 +584,21 @@ static void VKAPI_CALL icd_vkCmdBeginRendering(VkCommandBuffer cb, const VkRende
 static void VKAPI_CALL icd_vkCmdEndRendering(VkCommandBuffer cb) {
     g_icd.encoder.cmdEndRendering(toId(cb));
 }
-static void VKAPI_CALL icd_vkCmdSetCullMode(VkCommandBuffer, VkCullModeFlags) {}
-static void VKAPI_CALL icd_vkCmdSetFrontFace(VkCommandBuffer, VkFrontFace) {}
+static void VKAPI_CALL icd_vkCmdSetCullMode(VkCommandBuffer cb, VkCullModeFlags mode) {
+    g_icd.encoder.cmdSetCullMode(toId(cb), mode);
+}
+static void VKAPI_CALL icd_vkCmdSetFrontFace(VkCommandBuffer cb, VkFrontFace face) {
+    g_icd.encoder.cmdSetFrontFace(toId(cb), face);
+}
 static void VKAPI_CALL icd_vkCmdSetPrimitiveTopology(VkCommandBuffer, VkPrimitiveTopology) {}
-static void VKAPI_CALL icd_vkCmdSetViewportWithCount(VkCommandBuffer, uint32_t, const VkViewport*) {}
-static void VKAPI_CALL icd_vkCmdSetScissorWithCount(VkCommandBuffer, uint32_t, const VkRect2D*) {}
+static void VKAPI_CALL icd_vkCmdSetViewportWithCount(VkCommandBuffer cb, uint32_t count, const VkViewport* vps) {
+    if (count > 0 && vps)
+        g_icd.encoder.cmdSetViewport(toId(cb), vps[0].x, vps[0].y, vps[0].width, vps[0].height, vps[0].minDepth, vps[0].maxDepth);
+}
+static void VKAPI_CALL icd_vkCmdSetScissorWithCount(VkCommandBuffer cb, uint32_t count, const VkRect2D* rects) {
+    if (count > 0 && rects)
+        g_icd.encoder.cmdSetScissor(toId(cb), rects[0].offset.x, rects[0].offset.y, rects[0].extent.width, rects[0].extent.height);
+}
 static void VKAPI_CALL icd_vkCmdSetDepthTestEnable(VkCommandBuffer, VkBool32) {}
 static void VKAPI_CALL icd_vkCmdSetDepthWriteEnable(VkCommandBuffer, VkBool32) {}
 static void VKAPI_CALL icd_vkCmdSetDepthCompareOp(VkCommandBuffer, VkCompareOp) {}
@@ -568,7 +608,18 @@ static void VKAPI_CALL icd_vkCmdSetStencilOp(VkCommandBuffer, VkStencilFaceFlags
 static void VKAPI_CALL icd_vkCmdSetRasterizerDiscardEnable(VkCommandBuffer, VkBool32) {}
 static void VKAPI_CALL icd_vkCmdSetDepthBiasEnable(VkCommandBuffer, VkBool32) {}
 static void VKAPI_CALL icd_vkCmdSetPrimitiveRestartEnable(VkCommandBuffer, VkBool32) {}
-static void VKAPI_CALL icd_vkCmdBindVertexBuffers2(VkCommandBuffer, uint32_t, uint32_t, const VkBuffer*, const VkDeviceSize*, const VkDeviceSize*, const VkDeviceSize*) {}
+static void VKAPI_CALL icd_vkCmdBindVertexBuffers2(VkCommandBuffer cb, uint32_t firstBinding, uint32_t bindingCount,
+    const VkBuffer* pBuffers, const VkDeviceSize* pOffsets, const VkDeviceSize* pSizes, const VkDeviceSize* pStrides) {
+    std::vector<uint64_t> ids(bindingCount), offs(bindingCount), szs(bindingCount), strs(bindingCount);
+    for (uint32_t i = 0; i < bindingCount; i++) {
+        ids[i] = (uint64_t)pBuffers[i];
+        offs[i] = pOffsets[i];
+        szs[i] = pSizes ? pSizes[i] : VK_WHOLE_SIZE;
+        strs[i] = pStrides ? pStrides[i] : 0;
+    }
+    g_icd.encoder.cmdBindVertexBuffers(toId(cb), firstBinding, bindingCount,
+        ids.data(), offs.data(), szs.data(), strs.data());
+}
 static void VKAPI_CALL icd_vkCmdSetDepthBounds(VkCommandBuffer, float, float) {}
 static void VKAPI_CALL icd_vkCmdDrawIndirect(VkCommandBuffer, VkBuffer, VkDeviceSize, uint32_t, uint32_t) {}
 static void VKAPI_CALL icd_vkCmdDrawIndexedIndirect(VkCommandBuffer, VkBuffer, VkDeviceSize, uint32_t, uint32_t) {}
@@ -883,6 +934,7 @@ static VkResult VKAPI_CALL icd_vkCreateImageView(
 {
     uint64_t id = g_icd.handles.alloc();
     *p = (VkImageView)id;
+    g_icd.imageViewToImage[id] = (uint64_t)pInfo->image;
     g_icd.encoder.cmdCreateImageView(1, id, (uint64_t)pInfo->image,
         pInfo->viewType, pInfo->format,
         pInfo->components.r, pInfo->components.g, pInfo->components.b, pInfo->components.a,
@@ -1035,9 +1087,26 @@ static VkResult VKAPI_CALL icd_vkCreateGraphicsPipelines(
             if (!colorFmt) colorFmt = VK_FORMAT_B8G8R8A8_SRGB; // fallback
         }
 
+        // Extract vertex input state
+        std::vector<VnEncoder::VertexBinding> vtxBindings;
+        std::vector<VnEncoder::VertexAttribute> vtxAttrs;
+        if (pInfos[i].pVertexInputState) {
+            auto* vis = pInfos[i].pVertexInputState;
+            for (uint32_t b = 0; b < vis->vertexBindingDescriptionCount; b++) {
+                auto& vb = vis->pVertexBindingDescriptions[b];
+                vtxBindings.push_back({vb.binding, vb.stride, (uint32_t)vb.inputRate});
+            }
+            for (uint32_t a = 0; a < vis->vertexAttributeDescriptionCount; a++) {
+                auto& va = vis->pVertexAttributeDescriptions[a];
+                vtxAttrs.push_back({va.location, va.binding, (uint32_t)va.format, va.offset});
+            }
+        }
+
         g_icd.encoder.cmdCreateGraphicsPipeline(1, id,
             (uint64_t)pInfos[i].renderPass, (uint64_t)pInfos[i].layout,
-            vertMod, fragMod, w, h, colorFmt);
+            vertMod, fragMod, w, h, colorFmt,
+            (uint32_t)vtxBindings.size(), vtxBindings.data(),
+            (uint32_t)vtxAttrs.size(), vtxAttrs.data());
     }
     return VK_SUCCESS;
 }
@@ -1410,15 +1479,107 @@ static void VKAPI_CALL icd_vkCmdBindDescriptorSets(VkCommandBuffer cb, VkPipelin
     g_icd.encoder.cmdBindDescriptorSets(toId(cb), bindPoint, (uint64_t)layout,
         firstSet, setCount, setIds.data(), dynOffCount, pDynOff);
 }
-static void VKAPI_CALL icd_vkCmdBindVertexBuffers(VkCommandBuffer, uint32_t, uint32_t, const VkBuffer*, const VkDeviceSize*) {}
-static void VKAPI_CALL icd_vkCmdBindIndexBuffer(VkCommandBuffer, VkBuffer, VkDeviceSize, VkIndexType) {}
+static void VKAPI_CALL icd_vkCmdBindVertexBuffers(VkCommandBuffer cb, uint32_t firstBinding, uint32_t bindingCount,
+    const VkBuffer* pBuffers, const VkDeviceSize* pOffsets) {
+    std::vector<uint64_t> ids(bindingCount), offs(bindingCount);
+    for (uint32_t i = 0; i < bindingCount; i++) { ids[i] = (uint64_t)pBuffers[i]; offs[i] = pOffsets[i]; }
+    g_icd.encoder.cmdBindVertexBuffers(toId(cb), firstBinding, bindingCount,
+        ids.data(), offs.data(), nullptr, nullptr);
+}
+static void VKAPI_CALL icd_vkCmdBindIndexBuffer(VkCommandBuffer cb, VkBuffer buf, VkDeviceSize offset, VkIndexType indexType) {
+    g_icd.encoder.cmdBindIndexBuffer(toId(cb), (uint64_t)buf, offset, indexType);
+}
 static void VKAPI_CALL icd_vkCmdDrawIndexed(VkCommandBuffer cb, uint32_t indexCount, uint32_t instanceCount,
     uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) {
-    g_icd.encoder.cmdDraw(toId(cb), indexCount, instanceCount, firstIndex, firstInstance);
+    g_icd.encoder.cmdDrawIndexed(toId(cb), indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 }
-static void VKAPI_CALL icd_vkCmdCopyBuffer(VkCommandBuffer, VkBuffer, VkBuffer, uint32_t, const VkBufferCopy*) {}
+static void VKAPI_CALL icd_vkCmdCopyBuffer(VkCommandBuffer cb, VkBuffer src, VkBuffer dst, uint32_t regionCount, const VkBufferCopy* pRegions) {
+    // Flush source buffer memory for each region (staging buffer data → host)
+    for (uint32_t i = 0; i < regionCount; i++)
+        g_icd.flushBufferRange((uint64_t)src, pRegions[i].srcOffset, pRegions[i].size);
+    std::vector<uint64_t> srcOffs(regionCount), dstOffs(regionCount), sizes(regionCount);
+    for (uint32_t i = 0; i < regionCount; i++) {
+        srcOffs[i] = pRegions[i].srcOffset; dstOffs[i] = pRegions[i].dstOffset; sizes[i] = pRegions[i].size;
+    }
+    g_icd.encoder.cmdCopyBuffer(toId(cb), (uint64_t)src, (uint64_t)dst, regionCount,
+        srcOffs.data(), dstOffs.data(), sizes.data());
+}
+// Vulkan 1.3 vkCmdCopyBuffer2 — wraps to cmdCopyBuffer
+static void VKAPI_CALL icd_vkCmdCopyBuffer2(VkCommandBuffer cb, const void* pCopyInfo) {
+    struct CopyBufferInfo2 {
+        VkStructureType sType; const void* pNext;
+        VkBuffer srcBuffer, dstBuffer;
+        uint32_t regionCount;
+        const VkBufferCopy2* pRegions;
+    };
+    auto* info = static_cast<const CopyBufferInfo2*>(pCopyInfo);
+    // Flush source buffer memory for each region
+    for (uint32_t i = 0; i < info->regionCount; i++)
+        g_icd.flushBufferRange((uint64_t)info->srcBuffer, info->pRegions[i].srcOffset, info->pRegions[i].size);
+    std::vector<uint64_t> srcOffs(info->regionCount), dstOffs(info->regionCount), sizes(info->regionCount);
+    for (uint32_t i = 0; i < info->regionCount; i++) {
+        srcOffs[i] = info->pRegions[i].srcOffset;
+        dstOffs[i] = info->pRegions[i].dstOffset;
+        sizes[i] = info->pRegions[i].size;
+    }
+    g_icd.encoder.cmdCopyBuffer(toId(cb), (uint64_t)info->srcBuffer, (uint64_t)info->dstBuffer,
+        info->regionCount, srcOffs.data(), dstOffs.data(), sizes.data());
+}
+// Vulkan 1.3 vkCmdCopyBufferToImage2 — wraps to cmdCopyBufferToImage
+static void VKAPI_CALL icd_vkCmdCopyBufferToImage2(VkCommandBuffer cb, const void* pCopyInfo) {
+    struct CopyBufToImgInfo2 {
+        VkStructureType sType; const void* pNext;
+        VkBuffer srcBuffer; VkImage dstImage; VkImageLayout dstImageLayout;
+        uint32_t regionCount;
+        const VkBufferImageCopy2* pRegions;
+    };
+    auto* info = static_cast<const CopyBufToImgInfo2*>(pCopyInfo);
+    // Flush source buffer memory for each region
+    for (uint32_t i = 0; i < info->regionCount; i++) {
+        VkDeviceSize size = (VkDeviceSize)info->pRegions[i].imageExtent.width *
+                            info->pRegions[i].imageExtent.height * info->pRegions[i].imageExtent.depth * 4;
+        g_icd.flushBufferRange((uint64_t)info->srcBuffer, info->pRegions[i].bufferOffset, size);
+    }
+    std::vector<uint32_t> bOff(info->regionCount), bRL(info->regionCount), bIH(info->regionCount);
+    std::vector<uint32_t> iAsp(info->regionCount), iMip(info->regionCount), iBL(info->regionCount), iLC(info->regionCount);
+    std::vector<int32_t> iOX(info->regionCount), iOY(info->regionCount), iOZ(info->regionCount);
+    std::vector<uint32_t> iEW(info->regionCount), iEH(info->regionCount), iED(info->regionCount);
+    for (uint32_t i = 0; i < info->regionCount; i++) {
+        bOff[i] = (uint32_t)info->pRegions[i].bufferOffset; bRL[i] = info->pRegions[i].bufferRowLength; bIH[i] = info->pRegions[i].bufferImageHeight;
+        iAsp[i] = info->pRegions[i].imageSubresource.aspectMask; iMip[i] = info->pRegions[i].imageSubresource.mipLevel;
+        iBL[i] = info->pRegions[i].imageSubresource.baseArrayLayer; iLC[i] = info->pRegions[i].imageSubresource.layerCount;
+        iOX[i] = info->pRegions[i].imageOffset.x; iOY[i] = info->pRegions[i].imageOffset.y; iOZ[i] = info->pRegions[i].imageOffset.z;
+        iEW[i] = info->pRegions[i].imageExtent.width; iEH[i] = info->pRegions[i].imageExtent.height; iED[i] = info->pRegions[i].imageExtent.depth;
+    }
+    g_icd.encoder.cmdCopyBufferToImage(toId(cb), (uint64_t)info->srcBuffer, (uint64_t)info->dstImage,
+        info->dstImageLayout, info->regionCount,
+        bOff.data(), bRL.data(), bIH.data(), iAsp.data(), iMip.data(), iBL.data(), iLC.data(),
+        iOX.data(), iOY.data(), iOZ.data(), iEW.data(), iEH.data(), iED.data());
+}
 static void VKAPI_CALL icd_vkCmdCopyImage(VkCommandBuffer, VkImage, VkImageLayout, VkImage, VkImageLayout, uint32_t, const VkImageCopy*) {}
-static void VKAPI_CALL icd_vkCmdCopyBufferToImage(VkCommandBuffer, VkBuffer, VkImage, VkImageLayout, uint32_t, const VkBufferImageCopy*) {}
+static void VKAPI_CALL icd_vkCmdCopyBufferToImage(VkCommandBuffer cb, VkBuffer buf, VkImage img, VkImageLayout layout,
+    uint32_t regionCount, const VkBufferImageCopy* pRegions) {
+    // Flush source buffer memory for each region
+    for (uint32_t i = 0; i < regionCount; i++) {
+        VkDeviceSize size = (VkDeviceSize)pRegions[i].imageExtent.width * pRegions[i].imageExtent.height *
+                            pRegions[i].imageExtent.depth * 4; // assume 4 bpp
+        g_icd.flushBufferRange((uint64_t)buf, pRegions[i].bufferOffset, size);
+    }
+    std::vector<uint32_t> bOff(regionCount), bRL(regionCount), bIH(regionCount);
+    std::vector<uint32_t> iAsp(regionCount), iMip(regionCount), iBL(regionCount), iLC(regionCount);
+    std::vector<int32_t> iOX(regionCount), iOY(regionCount), iOZ(regionCount);
+    std::vector<uint32_t> iEW(regionCount), iEH(regionCount), iED(regionCount);
+    for (uint32_t i = 0; i < regionCount; i++) {
+        bOff[i] = (uint32_t)pRegions[i].bufferOffset; bRL[i] = pRegions[i].bufferRowLength; bIH[i] = pRegions[i].bufferImageHeight;
+        iAsp[i] = pRegions[i].imageSubresource.aspectMask; iMip[i] = pRegions[i].imageSubresource.mipLevel;
+        iBL[i] = pRegions[i].imageSubresource.baseArrayLayer; iLC[i] = pRegions[i].imageSubresource.layerCount;
+        iOX[i] = pRegions[i].imageOffset.x; iOY[i] = pRegions[i].imageOffset.y; iOZ[i] = pRegions[i].imageOffset.z;
+        iEW[i] = pRegions[i].imageExtent.width; iEH[i] = pRegions[i].imageExtent.height; iED[i] = pRegions[i].imageExtent.depth;
+    }
+    g_icd.encoder.cmdCopyBufferToImage(toId(cb), (uint64_t)buf, (uint64_t)img, layout, regionCount,
+        bOff.data(), bRL.data(), bIH.data(), iAsp.data(), iMip.data(), iBL.data(), iLC.data(),
+        iOX.data(), iOY.data(), iOZ.data(), iEW.data(), iEH.data(), iED.data());
+}
 static void VKAPI_CALL icd_vkCmdCopyImageToBuffer(VkCommandBuffer, VkImage, VkImageLayout, VkBuffer, uint32_t, const VkBufferImageCopy*) {}
 static void VKAPI_CALL icd_vkCmdPipelineBarrier(VkCommandBuffer cb, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage,
     VkDependencyFlags, uint32_t, const VkMemoryBarrier*, uint32_t, const VkBufferMemoryBarrier*,
@@ -1473,7 +1634,9 @@ static void VKAPI_CALL icd_vkCmdPushConstants(VkCommandBuffer cb, VkPipelineLayo
 }
 static void VKAPI_CALL icd_vkCmdDispatch(VkCommandBuffer, uint32_t, uint32_t, uint32_t) {}
 static void VKAPI_CALL icd_vkCmdFillBuffer(VkCommandBuffer, VkBuffer, VkDeviceSize, VkDeviceSize, uint32_t) {}
-static void VKAPI_CALL icd_vkCmdUpdateBuffer(VkCommandBuffer, VkBuffer, VkDeviceSize, VkDeviceSize, const void*) {}
+static void VKAPI_CALL icd_vkCmdUpdateBuffer(VkCommandBuffer cb, VkBuffer buf, VkDeviceSize offset, VkDeviceSize dataSize, const void* pData) {
+    g_icd.encoder.cmdUpdateBuffer(toId(cb), (uint64_t)buf, offset, (uint32_t)dataSize, pData);
+}
 static void VKAPI_CALL icd_vkCmdResolveImage(VkCommandBuffer, VkImage, VkImageLayout, VkImage, VkImageLayout, uint32_t, const VkImageResolve*) {}
 static void VKAPI_CALL icd_vkCmdSetEvent(VkCommandBuffer, VkEvent, VkPipelineStageFlags) {}
 static void VKAPI_CALL icd_vkCmdResetEvent(VkCommandBuffer, VkEvent, VkPipelineStageFlags) {}
@@ -1666,6 +1829,9 @@ static const FuncEntry g_funcTable[] = {
     ENTRY(vkCreateImage),
     ENTRY(vkDestroyImage),
     ENTRY(vkCreateImageView),
+    {"vkGetImageViewHandleNVX", (PFN_vkVoidFunction)icd_vkGetImageViewHandleNVX},
+    {"vkGetImageViewHandle64NVX", (PFN_vkVoidFunction)icd_vkGetImageViewHandleNVX},
+    {"vkGetImageViewAddressNVX", (PFN_vkVoidFunction)icd_vkGetImageViewAddressNVX},
     ENTRY(vkDestroyImageView),
 
     // Shader / Pipeline
@@ -1722,8 +1888,12 @@ static const FuncEntry g_funcTable[] = {
     ENTRY(vkCmdBindVertexBuffers),
     ENTRY(vkCmdBindIndexBuffer),
     ENTRY(vkCmdCopyBuffer),
+    {"vkCmdCopyBuffer2", (PFN_vkVoidFunction)icd_vkCmdCopyBuffer2},
+    {"vkCmdCopyBuffer2KHR", (PFN_vkVoidFunction)icd_vkCmdCopyBuffer2},
     ENTRY(vkCmdCopyImage),
     ENTRY(vkCmdCopyBufferToImage),
+    {"vkCmdCopyBufferToImage2", (PFN_vkVoidFunction)icd_vkCmdCopyBufferToImage2},
+    {"vkCmdCopyBufferToImage2KHR", (PFN_vkVoidFunction)icd_vkCmdCopyBufferToImage2},
     ENTRY(vkCmdCopyImageToBuffer),
     ENTRY(vkCmdPipelineBarrier),
     ENTRY(vkCmdPipelineBarrier2),
@@ -1830,6 +2000,27 @@ static const FuncEntry g_funcTable[] = {
 #undef ENTRY
 
 // Generic stub — log when called so we know which unimplemented function DXVK invokes
+// VK_NVX_image_view_handle: DXVK uses this to get ImageView handles for descriptor binding.
+// We return the ICD-assigned imageView ID as the handle. Also triggers vkCreateImageView
+// forwarding that DXVK would otherwise bypass.
+static uint32_t VKAPI_CALL icd_vkGetImageViewHandleNVX(VkDevice, const void* pInfo) {
+    // VkImageViewHandleInfoNVX: sType, pNext, imageView, descriptorType, sampler
+    struct ImageViewHandleInfoNVX {
+        VkStructureType sType; const void* pNext;
+        VkImageView imageView; VkDescriptorType descriptorType; VkSampler sampler;
+    };
+    auto* info = static_cast<const ImageViewHandleInfoNVX*>(pInfo);
+    return (uint32_t)(uint64_t)info->imageView; // return the ICD handle ID
+}
+static VkResult VKAPI_CALL icd_vkGetImageViewAddressNVX(VkDevice, VkImageView view, void* pProps) {
+    // VkImageViewAddressPropertiesNVX: sType, pNext, deviceAddress, size
+    struct ImageViewAddrProps { VkStructureType sType; void* pNext; VkDeviceAddress addr; VkDeviceSize size; };
+    auto* props = static_cast<ImageViewAddrProps*>(pProps);
+    props->addr = (uint64_t)view;
+    props->size = 0;
+    return VK_SUCCESS;
+}
+
 static VkResult VKAPI_CALL icd_generic_stub() {
     fprintf(stderr, "[ICD] !!! generic_stub called !!!\n");
     return VK_SUCCESS;
