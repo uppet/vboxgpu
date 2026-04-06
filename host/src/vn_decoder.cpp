@@ -99,6 +99,7 @@ void VnDecoder::dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdS
     case VN_CMD_vkUpdateDescriptorSets:  handleUpdateDescriptorSets(reader); break;
     case VN_CMD_vkCmdBindDescriptorSets: handleCmdBindDescriptorSets(reader); break;
     case VN_CMD_vkCmdPushDescriptorSet:  handleCmdPushDescriptorSet(reader); break;
+    case VN_CMD_vkCmdPipelineBarrier2:   handleCmdPipelineBarrier(reader); break;
     case VN_CMD_vkCreateSemaphore:        handleCreateSemaphore(reader); break;
     case VN_CMD_vkCreateFence:            handleCreateFence(reader); break;
     case VN_CMD_vkQueueSubmit:            handleQueueSubmit(reader); break;
@@ -551,6 +552,52 @@ void VnDecoder::handleCmdPushDescriptorSet(VnStreamReader& r) {
                 set, writeCount, writes.data());
         fprintf(stderr, "[Decoder] PushDescriptorSet: cb=%p set=%u writes=%u\n",
                 (void*)cb, set, writeCount);
+    }
+}
+
+void VnDecoder::handleCmdPipelineBarrier(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint32_t srcStage = r.readU32(), dstStage = r.readU32();
+    uint32_t imageBarrierCount = r.readU32();
+
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+
+    std::vector<VkImageMemoryBarrier> barriers(imageBarrierCount);
+    for (uint32_t i = 0; i < imageBarrierCount; i++) {
+        uint64_t imgId = r.readU64();
+        uint32_t oldLayout = r.readU32(), newLayout = r.readU32();
+        uint32_t srcAccess = r.readU32(), dstAccess = r.readU32();
+
+        barriers[i] = {};
+        barriers[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barriers[i].srcAccessMask = srcAccess;
+        barriers[i].dstAccessMask = dstAccess;
+        barriers[i].oldLayout = static_cast<VkImageLayout>(oldLayout);
+        barriers[i].newLayout = static_cast<VkImageLayout>(newLayout);
+        barriers[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barriers[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barriers[i].image = lookup(images_, imgId);
+        barriers[i].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS };
+
+        // If image not found in our map, it might be a swapchain image — skip
+        if (!barriers[i].image) {
+            HostSwapchain* sc = getFirstSwapchain();
+            // Swapchain image IDs are 0xFFF00000+i sentinel values — don't barrier them here
+            continue;
+        }
+    }
+
+    if (!cb) return;
+
+    // Filter out barriers with null images
+    std::vector<VkImageMemoryBarrier> validBarriers;
+    for (auto& b : barriers)
+        if (b.image) validBarriers.push_back(b);
+
+    if (!validBarriers.empty()) {
+        vkCmdPipelineBarrier(cb, srcStage, dstStage, 0,
+            0, nullptr, 0, nullptr,
+            (uint32_t)validBarriers.size(), validBarriers.data());
     }
 }
 

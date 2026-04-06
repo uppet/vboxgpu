@@ -72,6 +72,7 @@ enum VnCommandType : uint32_t {
     VN_CMD_vkUpdateDescriptorSets          = 0x1005,
     VN_CMD_vkCmdBindDescriptorSets         = 0x1006,
     VN_CMD_vkCmdPushDescriptorSet         = 0x1007,
+    VN_CMD_vkCmdPipelineBarrier2          = 0x1008,  // image memory barriers only
 
     // Extension: swapchain (handled specially by host)
     VN_CMD_BRIDGE_CreateSwapchain          = 0x10000,

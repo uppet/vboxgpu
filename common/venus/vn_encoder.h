@@ -278,6 +278,24 @@ public:
         w_.endCommand(off);
     }
 
+    void cmdPipelineBarrier(uint64_t cbId,
+                            uint32_t srcStage, uint32_t dstStage,
+                            uint32_t imageBarrierCount,
+                            const uint64_t* images, const uint32_t* oldLayouts, const uint32_t* newLayouts,
+                            const uint32_t* srcAccess, const uint32_t* dstAccess) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdPipelineBarrier2);
+        w_.writeU64(cbId);
+        w_.writeU32(srcStage); w_.writeU32(dstStage);
+        w_.writeU32(imageBarrierCount);
+        for (uint32_t i = 0; i < imageBarrierCount; i++) {
+            w_.writeU64(images[i]);
+            w_.writeU32(oldLayouts[i]); w_.writeU32(newLayouts[i]);
+            w_.writeU32(srcAccess[i]); w_.writeU32(dstAccess[i]);
+        }
+        w_.endCommand(off);
+    }
+
     void cmdCreateFramebuffer(uint64_t deviceId, uint64_t framebufferId,
                               uint64_t renderPassId, uint64_t imageViewId,
                               uint32_t width, uint32_t height) {

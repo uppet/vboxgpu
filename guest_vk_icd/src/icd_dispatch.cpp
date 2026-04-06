@@ -1302,9 +1302,45 @@ static void VKAPI_CALL icd_vkCmdCopyBuffer(VkCommandBuffer, VkBuffer, VkBuffer, 
 static void VKAPI_CALL icd_vkCmdCopyImage(VkCommandBuffer, VkImage, VkImageLayout, VkImage, VkImageLayout, uint32_t, const VkImageCopy*) {}
 static void VKAPI_CALL icd_vkCmdCopyBufferToImage(VkCommandBuffer, VkBuffer, VkImage, VkImageLayout, uint32_t, const VkBufferImageCopy*) {}
 static void VKAPI_CALL icd_vkCmdCopyImageToBuffer(VkCommandBuffer, VkImage, VkImageLayout, VkBuffer, uint32_t, const VkBufferImageCopy*) {}
-static void VKAPI_CALL icd_vkCmdPipelineBarrier(VkCommandBuffer, VkPipelineStageFlags, VkPipelineStageFlags, VkDependencyFlags,
-    uint32_t, const VkMemoryBarrier*, uint32_t, const VkBufferMemoryBarrier*, uint32_t, const VkImageMemoryBarrier*) {}
-static void VKAPI_CALL icd_vkCmdPipelineBarrier2(VkCommandBuffer, const VkDependencyInfo*) {}
+static void VKAPI_CALL icd_vkCmdPipelineBarrier(VkCommandBuffer cb, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage,
+    VkDependencyFlags, uint32_t, const VkMemoryBarrier*, uint32_t, const VkBufferMemoryBarrier*,
+    uint32_t imageBarrierCount, const VkImageMemoryBarrier* pImageBarriers) {
+    if (imageBarrierCount == 0) return;
+    std::vector<uint64_t> images(imageBarrierCount);
+    std::vector<uint32_t> oldLayouts(imageBarrierCount), newLayouts(imageBarrierCount);
+    std::vector<uint32_t> srcAccess(imageBarrierCount), dstAccess(imageBarrierCount);
+    for (uint32_t i = 0; i < imageBarrierCount; i++) {
+        images[i] = (uint64_t)pImageBarriers[i].image;
+        oldLayouts[i] = pImageBarriers[i].oldLayout;
+        newLayouts[i] = pImageBarriers[i].newLayout;
+        srcAccess[i] = pImageBarriers[i].srcAccessMask;
+        dstAccess[i] = pImageBarriers[i].dstAccessMask;
+    }
+    g_icd.encoder.cmdPipelineBarrier(toId(cb), srcStage, dstStage,
+        imageBarrierCount, images.data(), oldLayouts.data(), newLayouts.data(),
+        srcAccess.data(), dstAccess.data());
+}
+static void VKAPI_CALL icd_vkCmdPipelineBarrier2(VkCommandBuffer cb, const VkDependencyInfo* pInfo) {
+    if (!pInfo || pInfo->imageMemoryBarrierCount == 0) return;
+    std::vector<uint64_t> images(pInfo->imageMemoryBarrierCount);
+    std::vector<uint32_t> oldLayouts(pInfo->imageMemoryBarrierCount), newLayouts(pInfo->imageMemoryBarrierCount);
+    std::vector<uint32_t> srcAccess(pInfo->imageMemoryBarrierCount), dstAccess(pInfo->imageMemoryBarrierCount);
+    // VkImageMemoryBarrier2 uses VkPipelineStageFlags2 — take from first barrier for simplicity
+    uint32_t srcStage = 0, dstStage = 0;
+    for (uint32_t i = 0; i < pInfo->imageMemoryBarrierCount; i++) {
+        const auto& b = pInfo->pImageMemoryBarriers[i];
+        images[i] = (uint64_t)b.image;
+        oldLayouts[i] = b.oldLayout;
+        newLayouts[i] = b.newLayout;
+        srcAccess[i] = (uint32_t)b.srcAccessMask;
+        dstAccess[i] = (uint32_t)b.dstAccessMask;
+        srcStage |= (uint32_t)b.srcStageMask;
+        dstStage |= (uint32_t)b.dstStageMask;
+    }
+    g_icd.encoder.cmdPipelineBarrier(toId(cb), srcStage, dstStage,
+        pInfo->imageMemoryBarrierCount, images.data(), oldLayouts.data(), newLayouts.data(),
+        srcAccess.data(), dstAccess.data());
+}
 static void VKAPI_CALL icd_vkCmdClearColorImage(VkCommandBuffer, VkImage, VkImageLayout, const VkClearColorValue*, uint32_t, const VkImageSubresourceRange*) {}
 static void VKAPI_CALL icd_vkCmdClearAttachments(VkCommandBuffer, uint32_t, const VkClearAttachment*, uint32_t, const VkClearRect*) {}
 static void VKAPI_CALL icd_vkCmdSetStencilReference(VkCommandBuffer, VkStencilFaceFlags, uint32_t) {}
