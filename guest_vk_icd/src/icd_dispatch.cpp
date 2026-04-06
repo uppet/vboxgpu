@@ -614,10 +614,20 @@ static void VKAPI_CALL icd_vkUpdateDescriptorSetWithTemplate(VkDevice,
         }
     }
 
+    // Log each descriptor binding for debugging
+    for (size_t i = 0; i < writes.size(); i++) {
+        fprintf(stderr, "[ICD] DescWrite[%zu]: binding=%u type=%u count=%u",
+                i, writes[i].dstBinding, writes[i].descriptorType, writes[i].descriptorCount);
+        if (writes[i].pImageInfo && writes[i].descriptorCount > 0) {
+            fprintf(stderr, " img[0]=(sam=%llu view=%llu layout=%u)",
+                    (unsigned long long)(uint64_t)writes[i].pImageInfo[0].sampler,
+                    (unsigned long long)(uint64_t)writes[i].pImageInfo[0].imageView,
+                    writes[i].pImageInfo[0].imageLayout);
+        }
+        fprintf(stderr, "\n");
+    }
     // Encode as regular UpdateDescriptorSets
     g_icd.encoder.cmdUpdateDescriptorSets(1, (uint32_t)writes.size(), writes.data());
-    fprintf(stderr, "[ICD] UpdateDescriptorSetWithTemplate: set=%llu tmpl=%llu writes=%zu\n",
-            (unsigned long long)(uint64_t)dstSet, (unsigned long long)tmplId, writes.size());
 }
 
 // vkCmdBindDescriptorSets2 (Vulkan 1.4 / VK_KHR_maintenance6)
