@@ -134,6 +134,7 @@ private:
     std::unordered_map<uint64_t, VkImageView> imageViews_;
     std::unordered_map<uint64_t, HostSwapchain> swapchains_;
     bool activeRendering_ = false;
+    bool activeRenderingIsSwapchain_ = false; // true if current render pass targets swapchain
     VkSemaphore acquireSemaphore_ = VK_NULL_HANDLE; // for swapchain acquire sync
     VkFence acquireFence_ = VK_NULL_HANDLE;
     uint32_t lastPresentedImageIndex_ = 0; // for screenshot fidelity

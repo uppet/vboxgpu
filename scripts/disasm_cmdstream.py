@@ -144,8 +144,10 @@ def disasm_payload(cmd, data, off, size, spirv_dis=False, spirv_dir=None):
             cb = rd64(); ax = rd32(); ay = rd32(); aw = rd32(); ah = rd32()
             lo = rd32(); so = rd32()
             cr,cg,cb_,ca = rdf(),rdf(),rdf(),rdf()
+            ivId = rd64() if (p + 8 <= end) else 0  # imageViewId (new field)
             load_names = {0:"LOAD", 1:"CLEAR", 2:"DONT_CARE"}
-            return f"cb=0x{cb:x} area=({ax},{ay},{aw}x{ah}) load={load_names.get(lo,str(lo))} store={so} clear=({cr:.1f},{cg:.1f},{cb_:.1f},{ca:.1f})"
+            target = "swapchain" if ivId == 0 else f"view={ivId}"
+            return f"cb=0x{cb:x} area=({ax},{ay},{aw}x{ah}) load={load_names.get(lo,str(lo))} [{target}] clear=({cr:.1f},{cg:.1f},{cb_:.1f},{ca:.1f})"
         elif cmd == 0x1001:  # CmdEndRendering
             return f"cb=0x{rd64():x}"
         elif cmd == 18:  # QueueSubmit

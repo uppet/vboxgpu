@@ -355,7 +355,8 @@ public:
                            uint32_t renderAreaX, uint32_t renderAreaY,
                            uint32_t renderAreaW, uint32_t renderAreaH,
                            uint32_t loadOp, uint32_t storeOp,
-                           float clearR, float clearG, float clearB, float clearA) {
+                           float clearR, float clearG, float clearB, float clearA,
+                           uint64_t imageViewId = 0) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdBeginRendering);
         w_.writeU64(cmdBufferId);
@@ -369,6 +370,7 @@ public:
         w_.writeF32(clearG);
         w_.writeF32(clearB);
         w_.writeF32(clearA);
+        w_.writeU64(imageViewId); // 0 = use swapchain (legacy), nonzero = specific view
         w_.endCommand(off);
     }
 

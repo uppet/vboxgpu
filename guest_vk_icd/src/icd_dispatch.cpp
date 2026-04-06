@@ -509,12 +509,18 @@ static void VKAPI_CALL icd_vkCmdBeginRendering(VkCommandBuffer cb, const VkRende
         cb_ = pInfo->pColorAttachments[0].clearValue.color.float32[2];
         ca = pInfo->pColorAttachments[0].clearValue.color.float32[3];
     }
+    // Extract the imageView from the first color attachment
+    uint64_t imageViewId = 0;
+    if (pInfo && pInfo->colorAttachmentCount > 0 && pInfo->pColorAttachments)
+        imageViewId = (uint64_t)pInfo->pColorAttachments[0].imageView;
+
+    fprintf(stderr, "[ICD] BeginRendering: imageView=%llu\n", (unsigned long long)imageViewId);
     g_icd.encoder.cmdBeginRendering(toId(cb),
         pInfo ? pInfo->renderArea.offset.x : 0,
         pInfo ? pInfo->renderArea.offset.y : 0,
         pInfo ? pInfo->renderArea.extent.width : 800,
         pInfo ? pInfo->renderArea.extent.height : 600,
-        loadOp, storeOp, cr, cg, cb_, ca);
+        loadOp, storeOp, cr, cg, cb_, ca, imageViewId);
 }
 static void VKAPI_CALL icd_vkCmdEndRendering(VkCommandBuffer cb) {
     g_icd.encoder.cmdEndRendering(toId(cb));

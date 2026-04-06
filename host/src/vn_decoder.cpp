@@ -870,34 +870,52 @@ void VnDecoder::handleCmdBeginRendering(VnStreamReader& r) {
     uint32_t loadOp = r.readU32();
     uint32_t storeOp = r.readU32();
     float cr = r.readF32(), cg = r.readF32(), cb_ = r.readF32(), ca = r.readF32();
+    uint64_t imageViewId = r.readU64(); // 0 = swapchain, nonzero = specific view
 
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     if (!cb) return;
 
-    // Use the current swapchain image view (set by AcquireNextImage)
     HostSwapchain* sc = nullptr;
     for (auto& [id, s] : swapchains_) { sc = &s; break; }
-    if (!sc || sc->imageViews.empty()) {
-        fprintf(stderr, "[Decoder] BeginRendering SKIP: no swapchain yet (cbId=%llu)\n",
-                (unsigned long long)cbId);
+
+    VkImageView targetView = VK_NULL_HANDLE;
+    VkImage targetImage = VK_NULL_HANDLE;
+    bool isSwapchain = false;
+
+    if (imageViewId != 0) {
+        // DXVK specified an explicit imageView — use it (could be internal render target)
+        targetView = lookup(imageViews_, imageViewId);
+        // Find the corresponding VkImage for the barrier
+        // We don't have a view→image map, so find the image from images_ that this view was created from
+        // For now, skip the barrier for non-swapchain images (DXVK handles layout transitions internally)
+    } else if (sc && !sc->imageViews.empty()) {
+        // Legacy: use swapchain image
+        targetView = sc->imageViews[sc->currentImageIndex];
+        targetImage = sc->images[sc->currentImageIndex];
+        isSwapchain = true;
+    }
+
+    if (!targetView) {
         activeRendering_ = false;
         return;
     }
     activeRendering_ = true;
-
-    VkImageView currentView = sc->imageViews[sc->currentImageIndex];
+    activeRenderingIsSwapchain_ = isSwapchain;
 
     VkRenderingAttachmentInfo colorAttachment{};
     colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    colorAttachment.imageView = currentView;
+    colorAttachment.imageView = targetView;
     colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     colorAttachment.loadOp = static_cast<VkAttachmentLoadOp>(loadOp);
     colorAttachment.storeOp = static_cast<VkAttachmentStoreOp>(storeOp);
     colorAttachment.clearValue.color = {{cr, cg, cb_, ca}};
 
-    // Clamp render area to actual swapchain extent (DXVK may send 16384x16384)
-    uint32_t clampedW = std::min(areaW, sc->extent.width);
-    uint32_t clampedH = std::min(areaH, sc->extent.height);
+    // Clamp render area
+    uint32_t clampedW = areaW, clampedH = areaH;
+    if (sc) {
+        clampedW = std::min(areaW, sc->extent.width);
+        clampedH = std::min(areaH, sc->extent.height);
+    }
 
     VkRenderingInfo renderingInfo{};
     renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
@@ -906,29 +924,32 @@ void VnDecoder::handleCmdBeginRendering(VnStreamReader& r) {
     renderingInfo.colorAttachmentCount = 1;
     renderingInfo.pColorAttachments = &colorAttachment;
 
-    // Transition swapchain image to COLOR_ATTACHMENT_OPTIMAL
-    VkImageMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = sc->images[sc->currentImageIndex];
-    barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-    barrier.srcAccessMask = 0;
-    barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    vkCmdPipelineBarrier(cb,
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        0, 0, nullptr, 0, nullptr, 1, &barrier);
+    // Transition image to COLOR_ATTACHMENT_OPTIMAL (only for swapchain — non-swapchain images
+    // are transitioned by the rendering commands themselves)
+    if (isSwapchain && targetImage) {
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = targetImage;
+        barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        barrier.srcAccessMask = 0;
+        barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        vkCmdPipelineBarrier(cb,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &barrier);
+    }
 
-    fprintf(stderr, "[Decoder] BeginRendering: cb=%p imgIdx=%u view=%p area=%u,%u,%ux%u (clamped %ux%u) load=%u clear=%.1f,%.1f,%.1f,%.1f\n",
-            (void*)cb, sc->currentImageIndex, (void*)currentView, areaX, areaY, areaW, areaH, clampedW, clampedH, loadOp, cr, cg, cb_, ca);
+    fprintf(stderr, "[Decoder] BeginRendering: cb=%p view=%p (ivId=%llu %s) area=%u,%u,%ux%u load=%u\n",
+            (void*)cb, (void*)targetView, (unsigned long long)imageViewId,
+            isSwapchain ? "swapchain" : "internal", areaX, areaY, clampedW, clampedH, loadOp);
     fflush(stderr);
     vkCmdBeginRendering(cb, &renderingInfo);
 
-    // Set viewport/scissor to actual swapchain extent.
-    // Pipeline uses dynamic viewport/scissor because DXVK sends garbage values.
+    // Set viewport/scissor
     VkViewport vp{0.0f, 0.0f, (float)clampedW, (float)clampedH, 0.0f, 1.0f};
     VkRect2D sc2{{0, 0}, {clampedW, clampedH}};
     vkCmdSetViewport(cb, 0, 1, &vp);
@@ -950,25 +971,28 @@ void VnDecoder::handleCmdEndRendering(VnStreamReader& r) {
     fflush(stderr);
     vkCmdEndRendering(cb);
 
-    // Transition swapchain image to PRESENT_SRC
-    HostSwapchain* sc = nullptr;
-    for (auto& [id, s] : swapchains_) { sc = &s; break; }
-    if (!sc) return;
-
-    VkImageMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = sc->images[sc->currentImageIndex];
-    barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-    barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    barrier.dstAccessMask = 0;
-    vkCmdPipelineBarrier(cb,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-        0, 0, nullptr, 0, nullptr, 1, &barrier);
+    // Only transition to PRESENT_SRC if this was a swapchain render pass
+    if (activeRenderingIsSwapchain_) {
+        HostSwapchain* sc = nullptr;
+        for (auto& [id, s] : swapchains_) { sc = &s; break; }
+        if (sc) {
+            VkImageMemoryBarrier barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = sc->images[sc->currentImageIndex];
+            barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            barrier.dstAccessMask = 0;
+            vkCmdPipelineBarrier(cb,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                0, 0, nullptr, 0, nullptr, 1, &barrier);
+        }
+    }
+    // Non-swapchain images: DXVK manages layout transitions via pipeline barriers
 }
 
 void VnDecoder::handleCmdBindPipeline(VnStreamReader& r) {
