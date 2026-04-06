@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "d3dcompiler.lib")
@@ -37,16 +38,37 @@ static const char* g_vsSource = R"(
 float4 main(uint vid : SV_VertexID) : SV_Position {
     float2 pos[3] = {
         float2( 0.0, -0.5),
-        float2( 0.5,  0.5),
-        float2(-0.5,  0.5)
+        float2(-0.5,  0.5),
+        float2( 0.5,  0.5)
     };
     return float4(pos[vid], 0.0, 1.0);
 }
 )";
 
 static const char* g_psSource = R"(
+cbuffer TimeBuffer : register(b0) {
+    float time;
+    float3 pad;
+};
+
+float3 hsv2rgb(float h, float s, float v) {
+    float c = v * s;
+    float x = c * (1.0 - abs(fmod(h / 60.0, 2.0) - 1.0));
+    float m = v - c;
+    float3 rgb;
+    if (h < 60.0)       rgb = float3(c, x, 0);
+    else if (h < 120.0) rgb = float3(x, c, 0);
+    else if (h < 180.0) rgb = float3(0, c, x);
+    else if (h < 240.0) rgb = float3(0, x, c);
+    else if (h < 300.0) rgb = float3(x, 0, c);
+    else                 rgb = float3(c, 0, x);
+    return rgb + m;
+}
+
 float4 main() : SV_Target {
-    return float4(1.0, 0.5, 0.5, 1.0);
+    float hue = fmod(time * 60.0, 360.0);
+    float3 color = hsv2rgb(hue, 1.0, 1.0);
+    return float4(color, 1.0);
 }
 )";
 
@@ -149,6 +171,21 @@ int main(int argc, char* argv[]) {
     ctx->VSSetShader(vs, nullptr, 0);
     ctx->PSSetShader(ps, nullptr, 0);
 
+    // Create constant buffer for time
+    struct alignas(16) TimeData { float time; float pad[3]; };
+    D3D11_BUFFER_DESC cbd{};
+    cbd.ByteWidth = sizeof(TimeData);
+    cbd.Usage = D3D11_USAGE_DYNAMIC;
+    cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    ID3D11Buffer* timeCB = nullptr;
+    device->CreateBuffer(&cbd, nullptr, &timeCB);
+    ctx->PSSetConstantBuffers(0, 1, &timeCB);
+
+    LARGE_INTEGER freq, startTime;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&startTime);
+
     // Set topology
     ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
@@ -164,6 +201,16 @@ int main(int argc, char* argv[]) {
         }
         if (!g_running) break;
 
+        // Update time constant buffer
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        float elapsed = (float)(now.QuadPart - startTime.QuadPart) / (float)freq.QuadPart;
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        ctx->Map(timeCB, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+        TimeData* td = (TimeData*)mapped.pData;
+        td->time = elapsed;
+        ctx->Unmap(timeCB, 0);
+
         float clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
         ctx->ClearRenderTargetView(rtv, clearColor);
         ctx->Draw(3, 0);
@@ -175,6 +222,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Cleanup
+    timeCB->Release();
     vs->Release();
     ps->Release();
     rtv->Release();

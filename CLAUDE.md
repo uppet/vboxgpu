@@ -10,26 +10,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目状态
 
-**阶段一 M1.2 进行中** — ICD 代理 + DXVK 集成。
+**阶段一 M1.3 进行中** — Buffer 数据传输 + 动画三角形。
 
-已完成（M1.2 里程碑达成）：
-- DX11 三角形通过 DXVK → ICD → TCP → Host Vulkan 完整链路渲染并在窗口显示 ✓
+已完成：
+- M1.2：DX11 静态三角形通过 DXVK → ICD → TCP → Host Vulkan 完整链路渲染 ✓
+- M1.3：变色动画三角形（cbuffer 传 time 值 + HSV 色环 shader）✓
 - ICD 代理框架（Vulkan 1.3, Features2, 60+ 扩展）
 - Venus 命令流编解码 + TCP 传输 + 延迟 Present
-- GPU 资源序列化：Image/Memory/ImageView/Sampler/DescriptorSet 全链路
+- GPU 资源序列化：Image/Memory/ImageView/Sampler/DescriptorSet/Buffer 全链路
+- Shadow memory persistent mapping（per-memory shadow buffer）
+- Buffer 数据传输：MapMemory → shadow → WriteMemory → Host GPU
+- Uniform buffer descriptor 绑定（UpdateDescriptorSets + BindDescriptorSets）
 - Descriptor 路径：DescriptorUpdateTemplate → UpdateDescriptorSets + BindDescriptorSets2
 - Pipeline barrier 转发（vkCmdPipelineBarrier/Barrier2）
+- ClearAttachments 转发
 - BeginRendering imageView 路由（swapchain vs 内部 render target）
-- 命令流反汇编工具 + Windows.Graphics.Capture 窗口截图
+- 命令流反汇编工具 + Host 内置 captureScreenshot
 
 当前状态：
-- DX11 三角形能在 Host 窗口正确显示（用户已修改颜色值验证）
-- DXVK 原始 SPIR-V shader 渲染，非 builtin shader
+- 变色三角形在 Host 窗口正确动画显示（host 截图验证 frame5=橙红 frame150=蓝紫）
+- DXVK 原始 SPIR-V shader 渲染，uniform buffer 数据正确传输
 
 后续：
-- 清理调试代码和日志
+- Viewport 动态状态转发（Y 轴翻转修复）
+- CullMode 转发
 - 更多 DX11 测试用例（带纹理、vertex buffer）
-- Buffer 数据传输（MapMemory → Host GPU）
 
 ## 架构要点
 

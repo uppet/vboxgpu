@@ -141,6 +141,35 @@ public:
         w_.endCommand(off);
     }
 
+    void cmdCreateBuffer(uint64_t deviceId, uint64_t bufferId,
+                         uint64_t size, uint32_t usage) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCreateBuffer);
+        w_.writeU64(deviceId); w_.writeU64(bufferId);
+        w_.writeU64(size); w_.writeU32(usage);
+        w_.endCommand(off);
+    }
+
+    void cmdBindBufferMemory(uint64_t deviceId, uint64_t bufferId,
+                             uint64_t memoryId, uint64_t memoryOffset) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkBindBufferMemory);
+        w_.writeU64(deviceId); w_.writeU64(bufferId);
+        w_.writeU64(memoryId); w_.writeU64(memoryOffset);
+        w_.endCommand(off);
+    }
+
+    void cmdWriteMemory(uint64_t memoryId, uint64_t offset,
+                        uint32_t size, const void* data) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_BRIDGE_WriteMemory);
+        w_.writeU64(memoryId);
+        w_.writeU64(offset);
+        w_.writeU32(size);
+        w_.writeBytes(data, size);
+        w_.endCommand(off);
+    }
+
     void cmdCreateImageView(uint64_t deviceId, uint64_t viewId, uint64_t imageId,
                             uint32_t viewType, uint32_t format,
                             uint32_t compR, uint32_t compG, uint32_t compB, uint32_t compA,
@@ -258,6 +287,9 @@ public:
                                const uint64_t* samplerIds,     // per descriptor
                                const uint64_t* imageViewIds,
                                const uint32_t* imageLayouts,
+                               const uint64_t* bufferIds,      // per descriptor (0 if image)
+                               const uint64_t* bufferOffsets,
+                               const uint64_t* bufferRanges,
                                uint32_t totalDescriptors) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdPushDescriptorSet);
@@ -272,6 +304,9 @@ public:
                 w_.writeU64(samplerIds[descIdx]);
                 w_.writeU64(imageViewIds[descIdx]);
                 w_.writeU32(imageLayouts[descIdx]);
+                w_.writeU64(bufferIds[descIdx]);
+                w_.writeU64(bufferOffsets[descIdx]);
+                w_.writeU64(bufferRanges[descIdx]);
                 descIdx++;
             }
         }
@@ -398,6 +433,47 @@ public:
         w_.writeU64(cmdBufferId);
         w_.endCommand(off);
     }
+
+#ifdef VK_VERSION_1_0 // Requires VkClearAttachment, VkClearRect
+    void cmdClearAttachments(uint64_t cmdBufferId,
+                             uint32_t attachmentCount, const VkClearAttachment* pAttachments,
+                             uint32_t rectCount, const VkClearRect* pRects) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdClearAttachments);
+        w_.writeU64(cmdBufferId);
+        w_.writeU32(attachmentCount);
+        for (uint32_t i = 0; i < attachmentCount; i++) {
+            w_.writeU32(pAttachments[i].aspectMask);
+            w_.writeU32(pAttachments[i].colorAttachment);
+            w_.writeF32(pAttachments[i].clearValue.color.float32[0]);
+            w_.writeF32(pAttachments[i].clearValue.color.float32[1]);
+            w_.writeF32(pAttachments[i].clearValue.color.float32[2]);
+            w_.writeF32(pAttachments[i].clearValue.color.float32[3]);
+        }
+        w_.writeU32(rectCount);
+        for (uint32_t i = 0; i < rectCount; i++) {
+            w_.writeU32(pRects[i].rect.offset.x);
+            w_.writeU32(pRects[i].rect.offset.y);
+            w_.writeU32(pRects[i].rect.extent.width);
+            w_.writeU32(pRects[i].rect.extent.height);
+            w_.writeU32(pRects[i].baseArrayLayer);
+            w_.writeU32(pRects[i].layerCount);
+        }
+        w_.endCommand(off);
+    }
+
+    void cmdClearColorImage(uint64_t cmdBufferId, uint64_t imageId,
+                            uint32_t imageLayout,
+                            float r, float g, float b, float a) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdClearColorImage);
+        w_.writeU64(cmdBufferId);
+        w_.writeU64(imageId);
+        w_.writeU32(imageLayout);
+        w_.writeF32(r); w_.writeF32(g); w_.writeF32(b); w_.writeF32(a);
+        w_.endCommand(off);
+    }
+#endif // VK_VERSION_1_0
 
     void cmdBindPipeline(uint64_t cmdBufferId, uint64_t pipelineId) {
         ENC_GUARD;

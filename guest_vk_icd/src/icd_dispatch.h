@@ -63,6 +63,34 @@ struct IcdState {
     };
     std::unordered_map<uint64_t, DescriptorTemplateInfo> descriptorTemplates;
 
+    // Mapped memory tracking: guest shadow memory for host-visible regions
+    struct MappedRegion {
+        uint64_t memoryId;
+        VkDeviceSize offset;
+        VkDeviceSize size;
+        void* ptr;
+        bool dirty;  // set true after unmap or explicit flush
+    };
+    std::vector<MappedRegion> mappedRegions;
+    std::mutex mappedMutex;
+
+    // Shadow memory per VkDeviceMemory: memory_id → {ptr, size}
+    struct MemoryShadow { void* ptr; VkDeviceSize size; };
+    std::unordered_map<uint64_t, MemoryShadow> memoryShadows;
+
+    // Buffer size tracking: buffer handle → actual size
+    std::unordered_map<uint64_t, VkDeviceSize> bufferSizes;
+
+    // Buffer → memory binding: buffer_id → (memory_id, memory_offset)
+    struct BufferBinding { uint64_t memoryId; VkDeviceSize memoryOffset; };
+    std::unordered_map<uint64_t, BufferBinding> bufferBindings;
+
+    // Flush all small mapped memory data to encoder (call before QueueSubmit)
+    void flushMappedMemory();
+
+    // Flush specific buffer data based on its memory binding
+    void flushBufferRange(uint64_t bufferId, VkDeviceSize offset, VkDeviceSize range);
+
     // Command encoder for current batch (MUST lock mutex before use — DXVK is multithreaded)
     VnEncoder encoder;
     std::mutex encoderMutex;

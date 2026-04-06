@@ -145,6 +145,7 @@ static int replayMode(const char* dumpPath) {
 
 int main(int argc, char* argv[]) {
     SetUnhandledExceptionFilter(hostCrashHandler);
+    setvbuf(stderr, NULL, _IONBF, 0);  // Force unbuffered stderr
 
     // Check --replay mode first
     for (int i = 1; i < argc; i++) {
@@ -322,7 +323,7 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, "[Host] Connection established. Processing command streams.\n");
 
     // --- Receive and process command streams ---
-    constexpr size_t BUF_SIZE = 4 * 1024 * 1024; // 4 MB max per message
+    constexpr size_t BUF_SIZE = 64 * 1024 * 1024; // 64 MB max per message
     std::vector<uint8_t> recvBuf(BUF_SIZE);
 
     while (g_running) {

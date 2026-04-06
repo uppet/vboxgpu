@@ -105,6 +105,11 @@ void VnDecoder::dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdS
     case VN_CMD_vkQueueSubmit:            handleQueueSubmit(reader); break;
     case VN_CMD_vkWaitForFences:          handleWaitForFences(reader); break;
     case VN_CMD_vkResetFences:            handleResetFences(reader); break;
+    case VN_CMD_vkCreateBuffer:           handleCreateBuffer(reader); break;
+    case VN_CMD_vkBindBufferMemory:       handleBindBufferMemory(reader); break;
+    case VN_CMD_vkCmdClearAttachments:    handleCmdClearAttachments(reader); break;
+    case VN_CMD_vkCmdClearColorImage:     handleCmdClearColorImage(reader); break;
+    case VN_CMD_BRIDGE_WriteMemory:       handleWriteMemory(reader); break;
     case VN_CMD_BRIDGE_CreateSwapchain:   handleBridgeCreateSwapchain(reader); break;
     case VN_CMD_BRIDGE_AcquireNextImage:  handleBridgeAcquireNextImage(reader); break;
     case VN_CMD_BRIDGE_QueuePresent:      handleBridgeQueuePresent(reader); break;
@@ -203,24 +208,18 @@ void VnDecoder::handleCreateDescriptorSetLayout(VnStreamReader& r) {
         bindings[i].stageFlags = r.readU32();
     }
 
-    // Create two versions: one without push flag (for regular pipeline layouts)
-    // and one with push flag (for push descriptor). Store the push version.
-    // This is needed because DXVK uses push descriptors on Host.
+    // DXVK uses regular descriptor sets (UpdateDescriptorSets + BindDescriptorSets),
+    // NOT push descriptors. PUSH_DESCRIPTOR_BIT layouts cannot be used with
+    // vkAllocateDescriptorSets per Vulkan spec — this was causing GPU to read zeros.
     VkDescriptorSetLayoutCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     info.bindingCount = bindingCount;
     info.pBindings = bindings.data();
+    info.flags = 0;
 
-    // Try with push descriptor flag first
-    info.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
     VkDescriptorSetLayout layout;
     VkResult vr = vkCreateDescriptorSetLayout(device_, &info, nullptr, &layout);
-    if (vr != VK_SUCCESS) {
-        // Fallback without push flag
-        info.flags = 0;
-        vr = vkCreateDescriptorSetLayout(device_, &info, nullptr, &layout);
-        if (vr != VK_SUCCESS) { error_ = true; return; }
-    }
+    if (vr != VK_SUCCESS) { error_ = true; return; }
     store(descriptorSetLayouts_, layoutId, layout);
 }
 
@@ -442,6 +441,13 @@ void VnDecoder::handleAllocateDescriptorSets(VnStreamReader& r) {
         store(descriptorSets_, setIds[i], sets[i]);
 }
 
+static bool isBufferDescriptorType(VkDescriptorType type) {
+    return type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
+           type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ||
+           type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
+           type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+}
+
 void VnDecoder::handleUpdateDescriptorSets(VnStreamReader& r) {
     uint64_t deviceId = r.readU64();
     uint32_t writeCount = r.readU32();
@@ -464,17 +470,25 @@ void VnDecoder::handleUpdateDescriptorSets(VnStreamReader& r) {
             allImageInfos[i][j].sampler = lookup(samplers_, samId);
             allImageInfos[i][j].imageView = lookup(imageViews_, ivId);
             allImageInfos[i][j].imageLayout = static_cast<VkImageLayout>(imgLayout);
-            // Buffer info not used yet but read to advance stream
+            allBufferInfos[i][j].buffer = lookup(buffers_, bufId);
+            allBufferInfos[i][j].offset = bufOff;
+            allBufferInfos[i][j].range = bufRange;
+
         }
 
+        VkDescriptorType dt = static_cast<VkDescriptorType>(descType);
         writes[i] = {};
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = lookup(descriptorSets_, dstSetId);
         writes[i].dstBinding = dstBinding;
         writes[i].dstArrayElement = dstArrayElem;
         writes[i].descriptorCount = descCount;
-        writes[i].descriptorType = static_cast<VkDescriptorType>(descType);
-        writes[i].pImageInfo = allImageInfos[i].data();
+        writes[i].descriptorType = dt;
+        if (isBufferDescriptorType(dt)) {
+            writes[i].pBufferInfo = allBufferInfos[i].data();
+        } else {
+            writes[i].pImageInfo = allImageInfos[i].data();
+        }
     }
 
     vkUpdateDescriptorSets(device_, writeCount, writes.data(), 0, nullptr);
@@ -515,6 +529,7 @@ void VnDecoder::handleCmdPushDescriptorSet(VnStreamReader& r) {
 
     std::vector<VkWriteDescriptorSet> writes(writeCount);
     std::vector<std::vector<VkDescriptorImageInfo>> allImageInfos(writeCount);
+    std::vector<std::vector<VkDescriptorBufferInfo>> allBufferInfos(writeCount);
 
     for (uint32_t i = 0; i < writeCount; i++) {
         uint32_t binding = r.readU32();
@@ -522,21 +537,33 @@ void VnDecoder::handleCmdPushDescriptorSet(VnStreamReader& r) {
         uint32_t descType = r.readU32();
 
         allImageInfos[i].resize(descCount);
+        allBufferInfos[i].resize(descCount);
         for (uint32_t j = 0; j < descCount; j++) {
             uint64_t samId = r.readU64();
             uint64_t ivId = r.readU64();
             uint32_t imgLayout = r.readU32();
+            uint64_t bufId = r.readU64();
+            uint64_t bufOff = r.readU64();
+            uint64_t bufRange = r.readU64();
             allImageInfos[i][j].sampler = lookup(samplers_, samId);
             allImageInfos[i][j].imageView = lookup(imageViews_, ivId);
             allImageInfos[i][j].imageLayout = static_cast<VkImageLayout>(imgLayout);
+            allBufferInfos[i][j].buffer = lookup(buffers_, bufId);
+            allBufferInfos[i][j].offset = bufOff;
+            allBufferInfos[i][j].range = bufRange;
         }
 
+        VkDescriptorType dt = static_cast<VkDescriptorType>(descType);
         writes[i] = {};
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstBinding = binding;
         writes[i].descriptorCount = descCount;
-        writes[i].descriptorType = static_cast<VkDescriptorType>(descType);
-        writes[i].pImageInfo = allImageInfos[i].data();
+        writes[i].descriptorType = dt;
+        if (isBufferDescriptorType(dt)) {
+            writes[i].pBufferInfo = allBufferInfos[i].data();
+        } else {
+            writes[i].pImageInfo = allImageInfos[i].data();
+        }
     }
 
     if (!cb || !layout) return;
@@ -550,9 +577,128 @@ void VnDecoder::handleCmdPushDescriptorSet(VnStreamReader& r) {
     if (pfnPush) {
         pfnPush(cb, static_cast<VkPipelineBindPoint>(bindPoint), layout,
                 set, writeCount, writes.data());
-        fprintf(stderr, "[Decoder] PushDescriptorSet: cb=%p set=%u writes=%u\n",
-                (void*)cb, set, writeCount);
     }
+}
+
+void VnDecoder::handleCreateBuffer(VnStreamReader& r) {
+    uint64_t deviceId = r.readU64();
+    uint64_t bufferId = r.readU64();
+    uint64_t size = r.readU64();
+    uint32_t usage = r.readU32();
+
+    // Strip SHADER_DEVICE_ADDRESS — host uses descriptors, not BDA;
+    // this flag may cause memory-type incompatibility with HOST_VISIBLE memory
+    usage &= ~(uint32_t)VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+
+    VkBufferCreateInfo ci{};
+    ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    ci.size = size;
+    ci.usage = usage;
+    ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VkBuffer buffer;
+    VkResult vr = vkCreateBuffer(device_, &ci, nullptr, &buffer);
+    fprintf(stderr, "[Decoder] CreateBuffer: id=%llu size=%llu usage=0x%x result=%d\n",
+            (unsigned long long)bufferId, (unsigned long long)size, usage, (int)vr);
+    if (vr != VK_SUCCESS) return;
+    store(buffers_, bufferId, buffer);
+}
+
+void VnDecoder::handleBindBufferMemory(VnStreamReader& r) {
+    uint64_t deviceId = r.readU64();
+    uint64_t bufferId = r.readU64();
+    uint64_t memoryId = r.readU64();
+    uint64_t offset = r.readU64();
+
+    VkBuffer buf = lookup(buffers_, bufferId);
+    VkDeviceMemory mem = lookup(deviceMemories_, memoryId);
+    if (!buf || !mem) return;
+    // Check memory requirements
+    VkMemoryRequirements reqs;
+    vkGetBufferMemoryRequirements(device_, buf, &reqs);
+    VkResult vr = vkBindBufferMemory(device_, buf, mem, offset);
+    static int bindLog = 0;
+    if (bindLog < 10) {
+        fprintf(stderr, "[Decoder] BindBufferMemory: buf=%llu mem=%llu off=%llu result=%d "
+                "reqs(size=%llu align=%llu typeBits=0x%x)\n",
+                (unsigned long long)bufferId, (unsigned long long)memoryId,
+                (unsigned long long)offset, (int)vr,
+                (unsigned long long)reqs.size, (unsigned long long)reqs.alignment,
+                reqs.memoryTypeBits);
+        bindLog++;
+    }
+}
+
+void VnDecoder::handleCmdClearAttachments(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint32_t attachCount = r.readU32();
+    std::vector<VkClearAttachment> attachments(attachCount);
+    for (uint32_t i = 0; i < attachCount; i++) {
+        attachments[i].aspectMask = r.readU32();
+        attachments[i].colorAttachment = r.readU32();
+        attachments[i].clearValue.color.float32[0] = r.readF32();
+        attachments[i].clearValue.color.float32[1] = r.readF32();
+        attachments[i].clearValue.color.float32[2] = r.readF32();
+        attachments[i].clearValue.color.float32[3] = r.readF32();
+    }
+    uint32_t rectCount = r.readU32();
+    std::vector<VkClearRect> rects(rectCount);
+    for (uint32_t i = 0; i < rectCount; i++) {
+        rects[i].rect.offset.x = (int32_t)r.readU32();
+        rects[i].rect.offset.y = (int32_t)r.readU32();
+        rects[i].rect.extent.width = r.readU32();
+        rects[i].rect.extent.height = r.readU32();
+        rects[i].baseArrayLayer = r.readU32();
+        rects[i].layerCount = r.readU32();
+    }
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    if (!cb) return;
+    vkCmdClearAttachments(cb, attachCount, attachments.data(), rectCount, rects.data());
+    fprintf(stderr, "[Decoder] ClearAttachments: cb=%p attachments=%u rects=%u\n",
+            (void*)cb, attachCount, rectCount);
+}
+
+void VnDecoder::handleCmdClearColorImage(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint64_t imgId = r.readU64();
+    uint32_t layout = r.readU32();
+    float cr = r.readF32(), cg = r.readF32(), cb_ = r.readF32(), ca = r.readF32();
+
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    VkImage img = lookup(images_, imgId);
+    if (!cb || !img) return;
+
+    VkClearColorValue clearColor = {{cr, cg, cb_, ca}};
+    VkImageSubresourceRange range{};
+    range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    range.levelCount = 1;
+    range.layerCount = 1;
+    vkCmdClearColorImage(cb, img, static_cast<VkImageLayout>(layout), &clearColor, 1, &range);
+    fprintf(stderr, "[Decoder] ClearColorImage: img=%p color=(%.2f,%.2f,%.2f,%.2f)\n",
+            (void*)img, cr, cg, cb_, ca);
+}
+
+void VnDecoder::handleWriteMemory(VnStreamReader& r) {
+    uint64_t memId = r.readU64();
+    uint64_t offset = r.readU64();
+    uint32_t size = r.readU32();
+
+    VkDeviceMemory mem = lookup(deviceMemories_, memId);
+    if (!mem) {
+        r.skip(size);
+        return;
+    }
+    void* mapped = nullptr;
+    VkResult vr = vkMapMemory(device_, mem, offset, size, 0, &mapped);
+    if (vr != VK_SUCCESS) {
+        r.skip(size);
+        fprintf(stderr, "[Decoder] WriteMemory: MapMemory failed for mem=%llu result=%d\n",
+                (unsigned long long)memId, (int)vr);
+        return;
+    }
+    r.readBytes(mapped, size);
+    vkUnmapMemory(device_, mem);
+    fprintf(stderr, "[Decoder] WriteMemory: mem=%llu off=%llu size=%u\n", (unsigned long long)memId, (unsigned long long)offset, size);
 }
 
 void VnDecoder::handleCmdPipelineBarrier(VnStreamReader& r) {
@@ -953,7 +1099,14 @@ void VnDecoder::handleCmdBeginRendering(VnStreamReader& r) {
     colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
     colorAttachment.imageView = targetView;
     colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    colorAttachment.loadOp = static_cast<VkAttachmentLoadOp>(loadOp);
+    // Force CLEAR for swapchain passes — guest uses vkCmdClearColorImage (not forwarded yet)
+    // so we clear here with black instead
+    if (isSwapchain) {
+        colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        colorAttachment.clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+    } else {
+        colorAttachment.loadOp = static_cast<VkAttachmentLoadOp>(loadOp);
+    }
     colorAttachment.storeOp = static_cast<VkAttachmentStoreOp>(storeOp);
     colorAttachment.clearValue.color = {{cr, cg, cb_, ca}};
 
@@ -1070,6 +1223,7 @@ void VnDecoder::handleCmdSetViewport(VnStreamReader& r) {
     vp.x = r.readF32(); vp.y = r.readF32();
     vp.width = r.readF32(); vp.height = r.readF32();
     vp.minDepth = r.readF32(); vp.maxDepth = r.readF32();
+    fprintf(stderr, "[Decoder] SetViewport: x=%.1f y=%.1f w=%.1f h=%.1f\n", vp.x, vp.y, vp.width, vp.height);
     vkCmdSetViewport(lookup(commandBuffers_, cbId), 0, 1, &vp);
 }
 
@@ -1109,8 +1263,6 @@ void VnDecoder::handleCmdPushConstants(VnStreamReader& r) {
     VkPipelineLayout layout = lookup(pipelineLayouts_, layoutId);
     if (!cb || !layout) return;
     vkCmdPushConstants(cb, layout, stageFlags, offset, size, data.data());
-    fprintf(stderr, "[Decoder] PushConstants: cb=%p stage=0x%x offset=%u size=%u\n",
-            (void*)cb, stageFlags, offset, size);
 }
 
 // --- Sync ---
@@ -1325,47 +1477,18 @@ void VnDecoder::flushPendingPresents() {
 
         uint32_t presentIdx = it->second.currentImageIndex;
 
-        // captureScreenshot at frame 5 + WGC at frame 5 to reproduce the earlier "success"
+        // Capture screenshots at specific frames for animation debugging
         static int dbgFr2 = 0;
         dbgFr2++;
-        if (dbgFr2 == 5) {
+        if (dbgFr2 == 5 || dbgFr2 == 150 || dbgFr2 == 300) {
             uint32_t savedLPI = lastPresentedImageIndex_;
             lastPresentedImageIndex_ = presentIdx;
-            captureScreenshot("S:/bld/vboxgpu/dbg_frame5.bmp");
+            char path[256];
+            snprintf(path, sizeof(path), "S:/bld/vboxgpu/dbg_frame%d.bmp", dbgFr2);
+            captureScreenshot(path);
             lastPresentedImageIndex_ = savedLPI;
+            fprintf(stderr, "[Decoder] Screenshot saved: %s (presentIdx=%u)\n", path, presentIdx);
         }
-#if 0
-        {
-            VkCommandBuffer tcb;
-            VkCommandBufferAllocateInfo ca{}; ca.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-            ca.commandPool = commandPools_.begin()->second; ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ca.commandBufferCount = 1;
-            vkAllocateCommandBuffers(device_, &ca, &tcb);
-            VkCommandBufferBeginInfo cbi{}; cbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-            cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-            vkBeginCommandBuffer(tcb, &cbi);
-            VkImageMemoryBarrier b{}; b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-            b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-            b.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-            b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-            b.image = it->second.images[presentIdx];
-            b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-            vkCmdPipelineBarrier(tcb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
-            b.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-            b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
-            b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-            b.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-            vkCmdPipelineBarrier(tcb, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
-            vkEndCommandBuffer(tcb);
-            VkSubmitInfo si{}; si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO; si.commandBufferCount = 1; si.pCommandBuffers = &tcb;
-            vkQueueSubmit(graphicsQueue_, 1, &si, VK_NULL_HANDLE);
-            vkQueueWaitIdle(graphicsQueue_);
-            vkFreeCommandBuffers(device_, ca.commandPool, 1, &tcb);
-        }
-#endif
-
         VkResult vr = vkQueuePresentKHR(graphicsQueue_, &info);
 
         // WGC disabled — was causing crashes after push descriptor changes
@@ -1375,81 +1498,6 @@ void VnDecoder::flushPendingPresents() {
         fflush(stderr);
 
         lastPresentedImageIndex_ = presentIdx;
-#if 0 // Debug capture moved before present
-        // Debug: capture every swapchain image after first few presents
-        static int presentCount = 0;
-        presentCount++;
-        if (presentCount <= 3) {
-            for (uint32_t imgI = 0; imgI < (uint32_t)it->second.images.size(); imgI++) {
-                char path[256];
-                snprintf(path, sizeof(path), "S:/bld/vboxgpu/dbg_present%d_img%u.bmp", presentCount, imgI);
-                // Need to capture this specific image
-                VkImage srcImg = it->second.images[imgI];
-                fprintf(stderr, "[Debug] Capturing image %u after present %d\n", imgI, presentCount);
-                // Quick inline capture
-                {
-                    uint32_t w = it->second.extent.width, h = it->second.extent.height;
-                    VkDeviceSize bufSz = VkDeviceSize(w) * h * 4;
-                    VkBuffer sBuf; VkDeviceMemory sMem;
-                    VkBufferCreateInfo bi{}; bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-                    bi.size = bufSz; bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-                    vkCreateBuffer(device_, &bi, nullptr, &sBuf);
-                    VkMemoryRequirements mreq; vkGetBufferMemoryRequirements(device_, sBuf, &mreq);
-                    VkPhysicalDeviceMemoryProperties mp; vkGetPhysicalDeviceMemoryProperties(physDevice_, &mp);
-                    uint32_t mt = 0;
-                    for (uint32_t mi = 0; mi < mp.memoryTypeCount; mi++)
-                        if ((mreq.memoryTypeBits & (1u<<mi)) && (mp.memoryTypes[mi].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) { mt = mi; break; }
-                    VkMemoryAllocateInfo ai{}; ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-                    ai.allocationSize = mreq.size; ai.memoryTypeIndex = mt;
-                    vkAllocateMemory(device_, &ai, nullptr, &sMem);
-                    vkBindBufferMemory(device_, sBuf, sMem, 0);
-                    VkCommandBuffer tcb;
-                    VkCommandBufferAllocateInfo ca{}; ca.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-                    ca.commandPool = commandPools_.begin()->second; ca.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ca.commandBufferCount = 1;
-                    vkAllocateCommandBuffers(device_, &ca, &tcb);
-                    VkCommandBufferBeginInfo cbi{}; cbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-                    cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-                    vkBeginCommandBuffer(tcb, &cbi);
-                    VkImageMemoryBarrier b1{}; b1.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-                    b1.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-                    b1.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-                    b1.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR; b1.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-                    b1.image = srcImg; b1.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
-                    vkCmdPipelineBarrier(tcb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,0,nullptr,0,nullptr,1,&b1);
-                    VkBufferImageCopy cp{}; cp.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}; cp.imageExtent = {w,h,1};
-                    vkCmdCopyImageToBuffer(tcb, srcImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, sBuf, 1, &cp);
-                    vkEndCommandBuffer(tcb);
-                    VkSubmitInfo si{}; si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO; si.commandBufferCount = 1; si.pCommandBuffers = &tcb;
-                    vkQueueSubmit(graphicsQueue_, 1, &si, VK_NULL_HANDLE);
-                    vkQueueWaitIdle(graphicsQueue_);
-                    vkFreeCommandBuffers(device_, ca.commandPool, 1, &tcb);
-                    void* data = nullptr; vkMapMemory(device_, sMem, 0, bufSz, 0, &data);
-                    if (data) {
-                        // Check first few pixels
-                        auto* px = (uint8_t*)data;
-                        uint32_t nonzero = 0;
-                        for (uint32_t pi = 0; pi < w*h*4; pi++) if (px[pi]) nonzero++;
-                        fprintf(stderr, "[Debug] img%u: nonzero bytes=%u/%u px[0]=%u,%u,%u,%u center=%u,%u,%u,%u\n",
-                            imgI, nonzero, w*h*4,
-                            px[0],px[1],px[2],px[3],
-                            px[(h/2*w+w/2)*4],px[(h/2*w+w/2)*4+1],px[(h/2*w+w/2)*4+2],px[(h/2*w+w/2)*4+3]);
-                        // Write BMP
-                        FILE* ff = fopen(path, "wb");
-                        if (ff) {
-                            uint32_t rs = w*4, pds = rs*h, fs = 54+pds;
-                            uint8_t fh[14]={}; fh[0]='B'; fh[1]='M'; *(uint32_t*)(fh+2)=fs; *(uint32_t*)(fh+10)=54; fwrite(fh,1,14,ff);
-                            uint8_t dh[40]={}; *(uint32_t*)dh=40; *(int32_t*)(dh+4)=w; *(int32_t*)(dh+8)=-(int32_t)h;
-                            *(uint16_t*)(dh+12)=1; *(uint16_t*)(dh+14)=32; fwrite(dh,1,40,ff);
-                            fwrite(px,1,w*h*4,ff); fclose(ff);
-                        }
-                        vkUnmapMemory(device_, sMem);
-                    }
-                    vkDestroyBuffer(device_, sBuf, nullptr); vkFreeMemory(device_, sMem, nullptr);
-                }
-            }
-        }
-
-#endif
         // Auto-acquire next image for the next frame
         uint32_t oldIdx = it->second.currentImageIndex;
         vkAcquireNextImageKHR(device_, it->second.swapchain, UINT64_MAX,

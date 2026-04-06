@@ -96,6 +96,11 @@ private:
     void handleCmdBindDescriptorSets(VnStreamReader& r);
     void handleCmdPushDescriptorSet(VnStreamReader& r);
     void handleCmdPipelineBarrier(VnStreamReader& r);
+    void handleCreateBuffer(VnStreamReader& r);
+    void handleBindBufferMemory(VnStreamReader& r);
+    void handleCmdClearAttachments(VnStreamReader& r);
+    void handleCmdClearColorImage(VnStreamReader& r);
+    void handleWriteMemory(VnStreamReader& r);
     void handleBridgeCreateSwapchain(VnStreamReader& r);
     void handleBridgeAcquireNextImage(VnStreamReader& r);
     void handleBridgeQueuePresent(VnStreamReader& r);
@@ -119,6 +124,7 @@ private:
 
     std::unordered_map<uint64_t, VkRenderPass> renderPasses_;
     std::unordered_map<uint64_t, VkShaderModule> shaderModules_;
+    std::unordered_map<uint64_t, VkBuffer> buffers_;
     std::unordered_map<uint64_t, VkImage> images_;
     std::unordered_map<uint64_t, VkDeviceMemory> deviceMemories_;
     std::unordered_map<uint64_t, VkSampler> samplers_;

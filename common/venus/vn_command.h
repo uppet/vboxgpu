@@ -73,11 +73,14 @@ enum VnCommandType : uint32_t {
     VN_CMD_vkCmdBindDescriptorSets         = 0x1006,
     VN_CMD_vkCmdPushDescriptorSet         = 0x1007,
     VN_CMD_vkCmdPipelineBarrier2          = 0x1008,  // image memory barriers only
+    VN_CMD_vkCmdClearAttachments          = 0x1009,
+    VN_CMD_vkCmdClearColorImage           = 0x100A,
 
     // Extension: swapchain (handled specially by host)
     VN_CMD_BRIDGE_CreateSwapchain          = 0x10000,
     VN_CMD_BRIDGE_AcquireNextImage         = 0x10001,
     VN_CMD_BRIDGE_QueuePresent             = 0x10002,
+    VN_CMD_BRIDGE_WriteMemory              = 0x10003,  // upload host-visible memory data
     VN_CMD_BRIDGE_EndOfStream              = 0x1FFFF,
 };
 
