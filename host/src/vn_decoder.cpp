@@ -2,6 +2,7 @@
 #include "win_capture.h"
 #include <fstream>
 #include <algorithm>
+#include <unordered_set>
 
 void VnDecoder::init(VkPhysicalDevice physDevice, VkDevice device,
                      VkQueue graphicsQueue, uint32_t graphicsFamily,
@@ -1296,14 +1297,7 @@ void VnDecoder::flushPendingPresents() {
 
         VkResult vr = vkQueuePresentKHR(graphicsQueue_, &info);
 
-        // WGC window capture at frame 5 (no Vulkan-side captureScreenshot to avoid layout side effects)
-        static int wgcFrame = 0;
-        wgcFrame++;
-        if (wgcFrame == 5) {
-            HWND wnd = FindWindowA("VBoxGPUBridgeServer", nullptr);
-            if (!wnd) wnd = FindWindowA(nullptr, "VBox GPU Bridge - Host Server");
-            if (wnd) captureWindowToBMP(wnd, "S:/bld/vboxgpu/wgc_capture.bmp");
-        }
+        // WGC disabled — was causing crashes after push descriptor changes
 
         fprintf(stderr, "[Decoder] Present FLUSH: sc=%p imgIdx=%u result=%d\n",
                 (void*)it->second.swapchain, presentIdx, (int)vr);
@@ -1403,6 +1397,7 @@ HostSwapchain* VnDecoder::getSwapchain(uint64_t id) {
 }
 
 void VnDecoder::cleanup() {
+    fprintf(stderr, "[Decoder] cleanup() starting\n"); fflush(stderr);
     vkDeviceWaitIdle(device_);
     if (acquireSemaphore_) vkDestroySemaphore(device_, acquireSemaphore_, nullptr);
     if (acquireFence_) vkDestroyFence(device_, acquireFence_, nullptr);
@@ -1411,7 +1406,12 @@ void VnDecoder::cleanup() {
     for (auto& [id, dsl] : descriptorSetLayouts_) vkDestroyDescriptorSetLayout(device_, dsl, nullptr);
     for (auto& [id, pool] : descriptorPools_) vkDestroyDescriptorPool(device_, pool, nullptr);
     for (auto& [id, s] : samplers_) vkDestroySampler(device_, s, nullptr);
-    for (auto& [id, iv] : imageViews_) vkDestroyImageView(device_, iv, nullptr);
+    // Collect swapchain image view handles to avoid double-destroy
+    std::unordered_set<VkImageView> scViews;
+    for (auto& [id, sc] : swapchains_)
+        for (auto iv : sc.imageViews) scViews.insert(iv);
+    for (auto& [id, iv] : imageViews_)
+        if (scViews.find(iv) == scViews.end()) vkDestroyImageView(device_, iv, nullptr);
     for (auto& [id, img] : images_) vkDestroyImage(device_, img, nullptr);
     for (auto& [id, mem] : deviceMemories_) vkFreeMemory(device_, mem, nullptr);
     for (auto& [id, m] : shaderModules_) vkDestroyShaderModule(device_, m, nullptr);

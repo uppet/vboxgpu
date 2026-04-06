@@ -165,7 +165,7 @@ void IcdState::initDefaults() {
         "VK_EXT_mesh_shader",
         "VK_EXT_hdr_metadata",
         "VK_EXT_full_screen_exclusive",
-        "VK_EXT_descriptor_buffer",
+        // "VK_EXT_descriptor_buffer", // disabled — forces DXVK to use push descriptors instead
         "VK_AMD_shader_fragment_mask",
         "VK_KHR_shader_float_controls2",
         "VK_KHR_shader_subgroup_uniform_control_flow",

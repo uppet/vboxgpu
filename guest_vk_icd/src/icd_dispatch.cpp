@@ -614,6 +614,37 @@ static void VKAPI_CALL icd_vkUpdateDescriptorSetWithTemplate(VkDevice,
             (unsigned long long)(uint64_t)dstSet, (unsigned long long)tmplId, writes.size());
 }
 
+// vkCmdBindDescriptorSets2 (Vulkan 1.4 / VK_KHR_maintenance6)
+// Wraps to the standard vkCmdBindDescriptorSets
+static void VKAPI_CALL icd_vkCmdBindDescriptorSets2KHR(
+    VkCommandBuffer cb, const void* pBindInfo /* VkBindDescriptorSetsInfoKHR* */)
+{
+    // VkBindDescriptorSetsInfoKHR layout:
+    // sType, pNext, stageFlags, layout, firstSet, descriptorSetCount, pDescriptorSets,
+    // dynamicOffsetCount, pDynamicOffsets
+    struct BindInfo {
+        VkStructureType sType;
+        const void* pNext;
+        VkShaderStageFlags stageFlags;
+        VkPipelineLayout layout;
+        uint32_t firstSet;
+        uint32_t descriptorSetCount;
+        const VkDescriptorSet* pDescriptorSets;
+        uint32_t dynamicOffsetCount;
+        const uint32_t* pDynamicOffsets;
+    };
+    const auto* info = static_cast<const BindInfo*>(pBindInfo);
+
+    std::vector<uint64_t> setIds(info->descriptorSetCount);
+    for (uint32_t i = 0; i < info->descriptorSetCount; i++)
+        setIds[i] = (uint64_t)info->pDescriptorSets[i];
+
+    g_icd.encoder.cmdBindDescriptorSets(toId(cb),
+        VK_PIPELINE_BIND_POINT_GRAPHICS, (uint64_t)info->layout,
+        info->firstSet, info->descriptorSetCount, setIds.data(),
+        info->dynamicOffsetCount, info->pDynamicOffsets);
+}
+
 // Push descriptor set (VK_KHR_push_descriptor)
 static void VKAPI_CALL icd_vkCmdPushDescriptorSetKHR(
     VkCommandBuffer cb, VkPipelineBindPoint bindPoint,
@@ -1568,6 +1599,9 @@ static const FuncEntry g_funcTable[] = {
     ENTRY(vkCreateDescriptorUpdateTemplate),
     ENTRY(vkDestroyDescriptorUpdateTemplate),
     ENTRY(vkUpdateDescriptorSetWithTemplate),
+    // Bind descriptor sets v2 (Vulkan 1.4 / VK_KHR_maintenance6)
+    {"vkCmdBindDescriptorSets2KHR", (PFN_vkVoidFunction)icd_vkCmdBindDescriptorSets2KHR},
+    {"vkCmdBindDescriptorSets2", (PFN_vkVoidFunction)icd_vkCmdBindDescriptorSets2KHR},
     // Push descriptors — DXVK uses this instead of alloc+update+bind
     {"vkCmdPushDescriptorSetKHR", (PFN_vkVoidFunction)icd_vkCmdPushDescriptorSetKHR},
     {"vkCmdPushDescriptorSet", (PFN_vkVoidFunction)icd_vkCmdPushDescriptorSetKHR},
