@@ -944,7 +944,7 @@ static VkResult VKAPI_CALL icd_vkCreateImageView(
     return VK_SUCCESS;
 }
 
-static void VKAPI_CALL icd_vkDestroyImageView(VkDevice, VkImageView, const VkAllocationCallbacks*) {}
+static void VKAPI_CALL icd_vkDestroyImageView(VkDevice, VkImageView v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyImageView(1, (uint64_t)v); }
 
 static VkResult VKAPI_CALL icd_vkCreateRenderPass(
     VkDevice, const VkRenderPassCreateInfo* pInfo, const VkAllocationCallbacks*, VkRenderPass* p)
@@ -985,7 +985,7 @@ static VkResult VKAPI_CALL icd_vkCreateRenderPass2(VkDevice d, const VkRenderPas
     return VK_SUCCESS;
 }
 
-static void VKAPI_CALL icd_vkDestroyRenderPass(VkDevice, VkRenderPass, const VkAllocationCallbacks*) {}
+static void VKAPI_CALL icd_vkDestroyRenderPass(VkDevice, VkRenderPass v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyRenderPass(1, (uint64_t)v); }
 
 static VkResult VKAPI_CALL icd_vkCreateShaderModule(
     VkDevice, const VkShaderModuleCreateInfo* pInfo, const VkAllocationCallbacks*, VkShaderModule* p)
@@ -997,7 +997,7 @@ static VkResult VKAPI_CALL icd_vkCreateShaderModule(
     return VK_SUCCESS;
 }
 
-static void VKAPI_CALL icd_vkDestroyShaderModule(VkDevice, VkShaderModule, const VkAllocationCallbacks*) {}
+static void VKAPI_CALL icd_vkDestroyShaderModule(VkDevice, VkShaderModule v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyShaderModule(1, (uint64_t)v); }
 
 static VkResult VKAPI_CALL icd_vkCreatePipelineLayout(
     VkDevice, const VkPipelineLayoutCreateInfo* pInfo, const VkAllocationCallbacks*, VkPipelineLayout* p)
@@ -1022,7 +1022,7 @@ static VkResult VKAPI_CALL icd_vkCreatePipelineLayout(
     return VK_SUCCESS;
 }
 
-static void VKAPI_CALL icd_vkDestroyPipelineLayout(VkDevice, VkPipelineLayout, const VkAllocationCallbacks*) {}
+static void VKAPI_CALL icd_vkDestroyPipelineLayout(VkDevice, VkPipelineLayout v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyPipelineLayout(1, (uint64_t)v); }
 
 // Helper: find VkShaderModuleCreateInfo in pNext chain (used when shader_module_identifier is active)
 static const VkShaderModuleCreateInfo* findShaderModuleCreateInfo(const void* pNext) {
@@ -1111,7 +1111,7 @@ static VkResult VKAPI_CALL icd_vkCreateGraphicsPipelines(
     return VK_SUCCESS;
 }
 
-static void VKAPI_CALL icd_vkDestroyPipeline(VkDevice, VkPipeline, const VkAllocationCallbacks*) {}
+static void VKAPI_CALL icd_vkDestroyPipeline(VkDevice, VkPipeline v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyPipeline(1, (uint64_t)v); }
 
 static VkResult VKAPI_CALL icd_vkCreateFramebuffer(
     VkDevice, const VkFramebufferCreateInfo* pInfo, const VkAllocationCallbacks*, VkFramebuffer* p)
@@ -1124,7 +1124,7 @@ static VkResult VKAPI_CALL icd_vkCreateFramebuffer(
     return VK_SUCCESS;
 }
 
-static void VKAPI_CALL icd_vkDestroyFramebuffer(VkDevice, VkFramebuffer, const VkAllocationCallbacks*) {}
+static void VKAPI_CALL icd_vkDestroyFramebuffer(VkDevice, VkFramebuffer v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyFramebuffer(1, (uint64_t)v); }
 
 static VkResult VKAPI_CALL icd_vkCreateCommandPool(
     VkDevice, const VkCommandPoolCreateInfo* pInfo, const VkAllocationCallbacks*, VkCommandPool* p)
@@ -1135,7 +1135,7 @@ static VkResult VKAPI_CALL icd_vkCreateCommandPool(
     return VK_SUCCESS;
 }
 
-static void VKAPI_CALL icd_vkDestroyCommandPool(VkDevice, VkCommandPool, const VkAllocationCallbacks*) {}
+static void VKAPI_CALL icd_vkDestroyCommandPool(VkDevice, VkCommandPool v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyCommandPool(1, (uint64_t)v); }
 static VkResult VKAPI_CALL icd_vkResetCommandPool(VkDevice, VkCommandPool, VkCommandPoolResetFlags) { return VK_SUCCESS; }
 
 static VkResult VKAPI_CALL icd_vkAllocateCommandBuffers(
@@ -1231,7 +1231,7 @@ static VkResult VKAPI_CALL icd_vkCreateSemaphore(VkDevice, const VkSemaphoreCrea
     return VK_SUCCESS;
 }
 
-static void VKAPI_CALL icd_vkDestroySemaphore(VkDevice, VkSemaphore, const VkAllocationCallbacks*) {}
+static void VKAPI_CALL icd_vkDestroySemaphore(VkDevice, VkSemaphore v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroySemaphore(1, (uint64_t)v); }
 
 static VkResult VKAPI_CALL icd_vkCreateFence(VkDevice, const VkFenceCreateInfo* pInfo, const VkAllocationCallbacks*, VkFence* p) {
     uint64_t id = g_icd.handles.alloc();
@@ -1240,13 +1240,18 @@ static VkResult VKAPI_CALL icd_vkCreateFence(VkDevice, const VkFenceCreateInfo* 
     return VK_SUCCESS;
 }
 
-static void VKAPI_CALL icd_vkDestroyFence(VkDevice, VkFence, const VkAllocationCallbacks*) {}
-static VkResult VKAPI_CALL icd_vkWaitForFences(VkDevice, uint32_t, const VkFence* p, VkBool32, uint64_t) {
-    if (p) g_icd.encoder.cmdWaitForFences(1, (uint64_t)p[0]);
+static void VKAPI_CALL icd_vkDestroyFence(VkDevice, VkFence v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyFence(1, (uint64_t)v); }
+static VkResult VKAPI_CALL icd_vkWaitForFences(VkDevice, uint32_t count, const VkFence* p, VkBool32 waitAll, uint64_t timeout) {
+    if (count > 0 && p) {
+        // Cast VkFence array to uint64_t array (both are 8 bytes, same representation)
+        g_icd.encoder.cmdWaitForFences(1, count, reinterpret_cast<const uint64_t*>(p), waitAll, timeout);
+    }
     return VK_SUCCESS;
 }
-static VkResult VKAPI_CALL icd_vkResetFences(VkDevice, uint32_t, const VkFence* p) {
-    if (p) g_icd.encoder.cmdResetFences(1, (uint64_t)p[0]);
+static VkResult VKAPI_CALL icd_vkResetFences(VkDevice, uint32_t count, const VkFence* p) {
+    if (count > 0 && p) {
+        g_icd.encoder.cmdResetFences(1, count, reinterpret_cast<const uint64_t*>(p));
+    }
     return VK_SUCCESS;
 }
 static VkResult VKAPI_CALL icd_vkGetFenceStatus(VkDevice, VkFence) { return VK_SUCCESS; }
@@ -1319,6 +1324,7 @@ static void VKAPI_CALL icd_vkFreeMemory(VkDevice, VkDeviceMemory mem, const VkAl
         std::remove_if(g_icd.mappedRegions.begin(), g_icd.mappedRegions.end(),
                         [id](const IcdState::MappedRegion& r) { return r.memoryId == id; }),
         g_icd.mappedRegions.end());
+    g_icd.encoder.cmdFreeMemory(1, (uint64_t)mem);
 }
 static VkResult VKAPI_CALL icd_vkMapMemory(VkDevice, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size, VkMemoryMapFlags, void** ppData) {
     uint64_t memId = (uint64_t)memory;
@@ -1387,7 +1393,7 @@ static VkResult VKAPI_CALL icd_vkCreateBuffer(VkDevice, const VkBufferCreateInfo
     g_icd.encoder.cmdCreateBuffer(1, id, pInfo->size, pInfo->usage);
     return VK_SUCCESS;
 }
-static void VKAPI_CALL icd_vkDestroyBuffer(VkDevice, VkBuffer, const VkAllocationCallbacks*) {}
+static void VKAPI_CALL icd_vkDestroyBuffer(VkDevice, VkBuffer v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyBuffer(1, (uint64_t)v); }
 static VkResult VKAPI_CALL icd_vkCreateImage(VkDevice, const VkImageCreateInfo* pInfo, const VkAllocationCallbacks*, VkImage* p) {
     uint64_t id = g_icd.handles.alloc();
     *p = (VkImage)id;
@@ -1398,7 +1404,7 @@ static VkResult VKAPI_CALL icd_vkCreateImage(VkDevice, const VkImageCreateInfo* 
         pInfo->tiling, pInfo->usage);
     return VK_SUCCESS;
 }
-static void VKAPI_CALL icd_vkDestroyImage(VkDevice, VkImage, const VkAllocationCallbacks*) {}
+static void VKAPI_CALL icd_vkDestroyImage(VkDevice, VkImage v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyImage(1, (uint64_t)v); }
 
 // --- Sampler / Descriptor ---
 
@@ -1408,7 +1414,7 @@ static VkResult VKAPI_CALL icd_vkCreateSampler(VkDevice, const VkSamplerCreateIn
     g_icd.encoder.cmdCreateSampler(1, id, pInfo);
     return VK_SUCCESS;
 }
-static void VKAPI_CALL icd_vkDestroySampler(VkDevice, VkSampler, const VkAllocationCallbacks*) {}
+static void VKAPI_CALL icd_vkDestroySampler(VkDevice, VkSampler v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroySampler(1, (uint64_t)v); }
 
 static VkResult VKAPI_CALL icd_vkCreateDescriptorSetLayout(
     VkDevice, const VkDescriptorSetLayoutCreateInfo* pInfo,
@@ -1420,7 +1426,7 @@ static VkResult VKAPI_CALL icd_vkCreateDescriptorSetLayout(
         pInfo->bindingCount, pInfo->pBindings);
     return VK_SUCCESS;
 }
-static void VKAPI_CALL icd_vkDestroyDescriptorSetLayout(VkDevice, VkDescriptorSetLayout, const VkAllocationCallbacks*) {}
+static void VKAPI_CALL icd_vkDestroyDescriptorSetLayout(VkDevice, VkDescriptorSetLayout v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyDescriptorSetLayout(1, (uint64_t)v); }
 
 static VkResult VKAPI_CALL icd_vkCreateDescriptorPool(VkDevice, const VkDescriptorPoolCreateInfo* pInfo, const VkAllocationCallbacks*, VkDescriptorPool* p) {
     uint64_t id = g_icd.handles.alloc();
@@ -1429,7 +1435,7 @@ static VkResult VKAPI_CALL icd_vkCreateDescriptorPool(VkDevice, const VkDescript
         pInfo->poolSizeCount, pInfo->pPoolSizes);
     return VK_SUCCESS;
 }
-static void VKAPI_CALL icd_vkDestroyDescriptorPool(VkDevice, VkDescriptorPool, const VkAllocationCallbacks*) {}
+static void VKAPI_CALL icd_vkDestroyDescriptorPool(VkDevice, VkDescriptorPool v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyDescriptorPool(1, (uint64_t)v); }
 static VkResult VKAPI_CALL icd_vkResetDescriptorPool(VkDevice, VkDescriptorPool, VkDescriptorPoolResetFlags) { return VK_SUCCESS; }
 
 static VkResult VKAPI_CALL icd_vkAllocateDescriptorSets(VkDevice, const VkDescriptorSetAllocateInfo* pInfo, VkDescriptorSet* p) {

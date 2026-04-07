@@ -109,6 +109,23 @@ private:
     void handleCmdClearAttachments(VnStreamReader& r);
     void handleCmdClearColorImage(VnStreamReader& r);
     void handleWriteMemory(VnStreamReader& r);
+    // Destroy / Free handlers
+    void handleDestroyBuffer(VnStreamReader& r);
+    void handleDestroyImage(VnStreamReader& r);
+    void handleDestroyImageView(VnStreamReader& r);
+    void handleDestroyShaderModule(VnStreamReader& r);
+    void handleDestroyPipeline(VnStreamReader& r);
+    void handleDestroyPipelineLayout(VnStreamReader& r);
+    void handleDestroyRenderPass(VnStreamReader& r);
+    void handleDestroyFramebuffer(VnStreamReader& r);
+    void handleDestroyCommandPool(VnStreamReader& r);
+    void handleDestroySampler(VnStreamReader& r);
+    void handleDestroyDescriptorPool(VnStreamReader& r);
+    void handleDestroyDescriptorSetLayout(VnStreamReader& r);
+    void handleDestroyFence(VnStreamReader& r);
+    void handleDestroySemaphore(VnStreamReader& r);
+    void handleFreeMemory(VnStreamReader& r);
+
     void handleBridgeCreateSwapchain(VnStreamReader& r);
     void handleBridgeAcquireNextImage(VnStreamReader& r);
     void handleBridgeQueuePresent(VnStreamReader& r);

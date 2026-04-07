@@ -117,6 +117,22 @@ void VnDecoder::dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdS
     case VN_CMD_vkBindBufferMemory:       handleBindBufferMemory(reader); break;
     case VN_CMD_vkCmdClearAttachments:    handleCmdClearAttachments(reader); break;
     case VN_CMD_vkCmdClearColorImage:     handleCmdClearColorImage(reader); break;
+    // Destroy / Free
+    case VN_CMD_vkDestroyBuffer:          handleDestroyBuffer(reader); break;
+    case VN_CMD_vkDestroyImage:           handleDestroyImage(reader); break;
+    case VN_CMD_vkDestroyImageView:       handleDestroyImageView(reader); break;
+    case VN_CMD_vkDestroyShaderModule:    handleDestroyShaderModule(reader); break;
+    case VN_CMD_vkDestroyPipeline:        handleDestroyPipeline(reader); break;
+    case VN_CMD_vkDestroyPipelineLayout:  handleDestroyPipelineLayout(reader); break;
+    case VN_CMD_vkDestroyRenderPass:      handleDestroyRenderPass(reader); break;
+    case VN_CMD_vkDestroyFramebuffer:     handleDestroyFramebuffer(reader); break;
+    case VN_CMD_vkDestroyCommandPool:     handleDestroyCommandPool(reader); break;
+    case VN_CMD_vkDestroySampler:         handleDestroySampler(reader); break;
+    case VN_CMD_vkDestroyDescriptorPool:  handleDestroyDescriptorPool(reader); break;
+    case VN_CMD_vkDestroyDescriptorSetLayout: handleDestroyDescriptorSetLayout(reader); break;
+    case VN_CMD_vkDestroyFence:           handleDestroyFence(reader); break;
+    case VN_CMD_vkDestroySemaphore:       handleDestroySemaphore(reader); break;
+    case VN_CMD_vkFreeMemory:             handleFreeMemory(reader); break;
     case VN_CMD_BRIDGE_WriteMemory:       handleWriteMemory(reader); break;
     case VN_CMD_BRIDGE_CreateSwapchain:   handleBridgeCreateSwapchain(reader); break;
     case VN_CMD_BRIDGE_AcquireNextImage:  handleBridgeAcquireNextImage(reader); break;
@@ -697,6 +713,49 @@ void VnDecoder::handleCmdClearColorImage(VnStreamReader& r) {
     fprintf(stderr, "[Decoder] ClearColorImage: img=%p color=(%.2f,%.2f,%.2f,%.2f)\n",
             (void*)img, cr, cg, cb_, ca);
 }
+
+// ── Destroy / Free handlers ──────────────────────────────────────────────────
+// All follow the same pattern: read [device:u64][object:u64], destroy, erase from map.
+
+#define IMPL_DESTROY(HandlerName, VkType, vkDestroyFn, mapName) \
+void VnDecoder::HandlerName(VnStreamReader& r) { \
+    uint64_t deviceId = r.readU64(); \
+    uint64_t objId = r.readU64(); \
+    (void)deviceId; \
+    VkType obj = lookup(mapName, objId); \
+    if (obj) { \
+        vkDestroyFn(device_, obj, nullptr); \
+        mapName.erase(objId); \
+    } \
+}
+
+IMPL_DESTROY(handleDestroyBuffer,              VkBuffer,              vkDestroyBuffer,              buffers_)
+IMPL_DESTROY(handleDestroyImage,               VkImage,               vkDestroyImage,               images_)
+IMPL_DESTROY(handleDestroyImageView,           VkImageView,           vkDestroyImageView,           imageViews_)
+IMPL_DESTROY(handleDestroyShaderModule,        VkShaderModule,        vkDestroyShaderModule,        shaderModules_)
+IMPL_DESTROY(handleDestroyPipeline,            VkPipeline,            vkDestroyPipeline,            pipelines_)
+IMPL_DESTROY(handleDestroyPipelineLayout,      VkPipelineLayout,      vkDestroyPipelineLayout,      pipelineLayouts_)
+IMPL_DESTROY(handleDestroyRenderPass,          VkRenderPass,          vkDestroyRenderPass,          renderPasses_)
+IMPL_DESTROY(handleDestroyFramebuffer,         VkFramebuffer,         vkDestroyFramebuffer,         framebuffers_)
+IMPL_DESTROY(handleDestroyCommandPool,         VkCommandPool,         vkDestroyCommandPool,         commandPools_)
+IMPL_DESTROY(handleDestroySampler,             VkSampler,             vkDestroySampler,             samplers_)
+IMPL_DESTROY(handleDestroyDescriptorPool,      VkDescriptorPool,      vkDestroyDescriptorPool,      descriptorPools_)
+IMPL_DESTROY(handleDestroyDescriptorSetLayout, VkDescriptorSetLayout, vkDestroyDescriptorSetLayout, descriptorSetLayouts_)
+IMPL_DESTROY(handleDestroyFence,               VkFence,               vkDestroyFence,               fences_)
+IMPL_DESTROY(handleDestroySemaphore,           VkSemaphore,           vkDestroySemaphore,           semaphores_)
+
+void VnDecoder::handleFreeMemory(VnStreamReader& r) {
+    uint64_t deviceId = r.readU64();
+    uint64_t memId = r.readU64();
+    (void)deviceId;
+    VkDeviceMemory mem = lookup(deviceMemories_, memId);
+    if (mem) {
+        vkFreeMemory(device_, mem, nullptr);
+        deviceMemories_.erase(memId);
+    }
+}
+
+#undef IMPL_DESTROY
 
 void VnDecoder::handleWriteMemory(VnStreamReader& r) {
     uint64_t memId = r.readU64();
@@ -1523,18 +1582,30 @@ void VnDecoder::handleQueueSubmit(VnStreamReader& r) {
 
 void VnDecoder::handleWaitForFences(VnStreamReader& r) {
     uint64_t deviceId = r.readU64();
-    uint64_t fenceId = r.readU64();
-    VkFence fence = lookup(fences_, fenceId);
-    if (fence)
-        vkWaitForFences(device_, 1, &fence, VK_TRUE, 100000000ULL); // 100ms timeout
+    uint32_t fenceCount = r.readU32();
+    std::vector<VkFence> fences(fenceCount);
+    for (uint32_t i = 0; i < fenceCount; i++)
+        fences[i] = lookup(fences_, r.readU64());
+    uint32_t waitAll = r.readU32();
+    uint64_t timeout = r.readU64();
+    (void)deviceId;
+    // Remove null fences (unknown IDs)
+    fences.erase(std::remove(fences.begin(), fences.end(), VK_NULL_HANDLE), fences.end());
+    if (!fences.empty())
+        vkWaitForFences(device_, (uint32_t)fences.size(), fences.data(),
+                        waitAll ? VK_TRUE : VK_FALSE, timeout);
 }
 
 void VnDecoder::handleResetFences(VnStreamReader& r) {
     uint64_t deviceId = r.readU64();
-    uint64_t fenceId = r.readU64();
-    VkFence fence = lookup(fences_, fenceId);
-    if (fence)
-        vkResetFences(device_, 1, &fence);
+    uint32_t fenceCount = r.readU32();
+    std::vector<VkFence> fences(fenceCount);
+    for (uint32_t i = 0; i < fenceCount; i++)
+        fences[i] = lookup(fences_, r.readU64());
+    (void)deviceId;
+    fences.erase(std::remove(fences.begin(), fences.end(), VK_NULL_HANDLE), fences.end());
+    if (!fences.empty())
+        vkResetFences(device_, (uint32_t)fences.size(), fences.data());
 }
 
 // --- Bridge-specific: swapchain ---

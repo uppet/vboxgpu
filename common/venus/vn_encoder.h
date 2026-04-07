@@ -299,11 +299,9 @@ public:
                                 uint32_t dynamicOffsetCount, const uint32_t* dynamicOffsets) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdBindDescriptorSets);
-        w_.writeU64(cbId); w_.writeU32(bindPoint); w_.writeU64(layoutId);
-        w_.writeU32(firstSet); w_.writeU32(setCount);
-        for (uint32_t i = 0; i < setCount; i++) w_.writeU64(setIds[i]);
-        w_.writeU32(dynamicOffsetCount);
-        for (uint32_t i = 0; i < dynamicOffsetCount; i++) w_.writeU32(dynamicOffsets[i]);
+        vn_encode_vkCmdBindDescriptorSets(&w_, cbId, bindPoint, layoutId,
+                                          firstSet, setCount, setIds,
+                                          dynamicOffsetCount, dynamicOffsets);
         w_.endCommand(off);
     }
 
@@ -665,6 +663,34 @@ public:
         w_.endCommand(off);
     }
 
+    // --- Destroy / Free (codegen-generated wire format) ---
+
+    #define DESTROY_CMD(Name, CmdId) \
+        void cmd##Name(uint64_t deviceId, uint64_t objectId) { \
+            ENC_GUARD; \
+            auto off = w_.beginCommand(CmdId); \
+            vn_encode_vk##Name(&w_, deviceId, objectId); \
+            w_.endCommand(off); \
+        }
+
+    DESTROY_CMD(DestroyBuffer,              VN_CMD_vkDestroyBuffer)
+    DESTROY_CMD(DestroyImage,               VN_CMD_vkDestroyImage)
+    DESTROY_CMD(DestroyImageView,           VN_CMD_vkDestroyImageView)
+    DESTROY_CMD(DestroyShaderModule,        VN_CMD_vkDestroyShaderModule)
+    DESTROY_CMD(DestroyPipeline,            VN_CMD_vkDestroyPipeline)
+    DESTROY_CMD(DestroyPipelineLayout,      VN_CMD_vkDestroyPipelineLayout)
+    DESTROY_CMD(DestroyRenderPass,          VN_CMD_vkDestroyRenderPass)
+    DESTROY_CMD(DestroyFramebuffer,         VN_CMD_vkDestroyFramebuffer)
+    DESTROY_CMD(DestroyCommandPool,         VN_CMD_vkDestroyCommandPool)
+    DESTROY_CMD(DestroySampler,             VN_CMD_vkDestroySampler)
+    DESTROY_CMD(DestroyDescriptorPool,      VN_CMD_vkDestroyDescriptorPool)
+    DESTROY_CMD(DestroyDescriptorSetLayout, VN_CMD_vkDestroyDescriptorSetLayout)
+    DESTROY_CMD(DestroyFence,               VN_CMD_vkDestroyFence)
+    DESTROY_CMD(DestroySemaphore,           VN_CMD_vkDestroySemaphore)
+    DESTROY_CMD(FreeMemory,                 VN_CMD_vkFreeMemory)
+
+    #undef DESTROY_CMD
+
     // --- Swapchain (bridge-specific) ---
 
     void cmdBridgeCreateSwapchain(uint64_t deviceId, uint64_t swapchainId,
@@ -711,19 +737,18 @@ public:
         w_.endCommand(off);
     }
 
-    void cmdWaitForFences(uint64_t deviceId, uint64_t fenceId) {
+    void cmdWaitForFences(uint64_t deviceId, uint32_t fenceCount,
+                          const uint64_t* pFences, uint32_t waitAll, uint64_t timeout) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkWaitForFences);
-        w_.writeU64(deviceId);
-        w_.writeU64(fenceId);
+        vn_encode_vkWaitForFences(&w_, deviceId, fenceCount, pFences, waitAll, timeout);
         w_.endCommand(off);
     }
 
-    void cmdResetFences(uint64_t deviceId, uint64_t fenceId) {
+    void cmdResetFences(uint64_t deviceId, uint32_t fenceCount, const uint64_t* pFences) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkResetFences);
-        w_.writeU64(deviceId);
-        w_.writeU64(fenceId);
+        vn_encode_vkResetFences(&w_, deviceId, fenceCount, pFences);
         w_.endCommand(off);
     }
 

@@ -94,8 +94,8 @@ static std::vector<uint8_t> buildFrameStream(uint64_t fbId) {
     VnEncoder enc;
 
     enc.cmdBridgeAcquireNextImage(H_SWAPCHAIN, H_SEM_IMAGE);
-    enc.cmdWaitForFences(H_DEVICE, H_FENCE);
-    enc.cmdResetFences(H_DEVICE, H_FENCE);
+    { uint64_t f = H_FENCE; enc.cmdWaitForFences(H_DEVICE, 1, &f, 1, UINT64_MAX); }
+    { uint64_t f = H_FENCE; enc.cmdResetFences(H_DEVICE, 1, &f); }
 
     enc.cmdBeginCommandBuffer(H_CMD_BUF);
     enc.cmdBeginRenderPass(H_CMD_BUF, H_RENDER_PASS, fbId,
