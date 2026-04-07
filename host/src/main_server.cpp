@@ -322,66 +322,65 @@ int main(int argc, char* argv[]) {
 
     fprintf(stderr, "[Host] Connection established. Processing command streams.\n");
 
-    // --- Receive and process command streams ---
-    constexpr size_t BUF_SIZE = 64 * 1024 * 1024; // 64 MB max per message
-    std::vector<uint8_t> recvBuf(BUF_SIZE);
+    // --- Worker thread: recv → decode → execute → send response ---
+    // Runs on a separate thread so the main thread can pump window messages
+    // without being blocked by vkWaitForFences or other long Vulkan operations.
+    std::thread workerThread([&]() {
+        constexpr size_t BUF_SIZE = 64 * 1024 * 1024; // 64 MB max per message
+        std::vector<uint8_t> recvBuf(BUF_SIZE);
 
-    while (g_running) {
-        // Pump window messages
-        MSG msg{};
-        while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
-            TranslateMessage(&msg);
-            DispatchMessageA(&msg);
-        }
-        if (!g_running) break;
-
-        // Check if data is available (non-blocking) before blocking recv
-        if (!server.hasData(50)) continue; // 50ms poll, then pump messages again
-
-        // Receive a command stream message
-        size_t bytesRead = 0;
-        if (!server.recv(recvBuf.data(), BUF_SIZE, bytesRead)) {
-            fprintf(stderr, "[Host] Client disconnected.\n");
-            break;
-        }
-
-        fprintf(stderr, "[Host] Received %zu bytes\n", bytesRead);
-
-        // Dump to file if recording
-        if (dumpFile) {
-            uint32_t sz = static_cast<uint32_t>(bytesRead);
-            fwrite(&sz, sizeof(sz), 1, dumpFile);
-            fwrite(recvBuf.data(), 1, bytesRead, dumpFile);
-            fflush(dumpFile);
-        }
-
-        // Execute the command stream
-        if (!decoder.execute(recvBuf.data(), bytesRead)) {
-            fprintf(stderr, "[Host] Command stream execution failed.\n");
-            break;
-        }
-
-        // Debug: capture window content once (after a few frames)
-        {
-            static int frameNum = 0;
-            frameNum++;
-            if (frameNum == 5) {
-                captureWindowToBMP(hwnd, "S:/bld/vboxgpu/wgc_capture.bmp");
+        while (g_running) {
+            // Receive a command stream message (blocking)
+            size_t bytesRead = 0;
+            if (!server.recv(recvBuf.data(), BUF_SIZE, bytesRead)) {
+                fprintf(stderr, "[Host] Client disconnected.\n");
+                g_running = false;
+                PostMessageA(hwnd, WM_CLOSE, 0, 0); // wake main thread
+                break;
             }
-        }
 
-        // Find any swapchain (not hardcoded to ID 3)
-        uint32_t imageIndex = 0;
-        auto* sc = decoder.getFirstSwapchain();
-        if (sc) imageIndex = sc->currentImageIndex;
-        server.send(reinterpret_cast<const uint8_t*>(&imageIndex), sizeof(imageIndex));
+            fprintf(stderr, "[Host] Received %zu bytes\n", bytesRead);
+
+            // Dump to file if recording
+            if (dumpFile) {
+                uint32_t sz = static_cast<uint32_t>(bytesRead);
+                fwrite(&sz, sizeof(sz), 1, dumpFile);
+                fwrite(recvBuf.data(), 1, bytesRead, dumpFile);
+                fflush(dumpFile);
+            }
+
+            // Execute the command stream
+            if (!decoder.execute(recvBuf.data(), bytesRead)) {
+                fprintf(stderr, "[Host] Command stream execution failed.\n");
+                g_running = false;
+                PostMessageA(hwnd, WM_CLOSE, 0, 0);
+                break;
+            }
+
+            // Send imageIndex response to guest
+            uint32_t imageIndex = 0;
+            auto* sc = decoder.getFirstSwapchain();
+            if (sc) imageIndex = sc->currentImageIndex;
+            server.send(reinterpret_cast<const uint8_t*>(&imageIndex), sizeof(imageIndex));
+        }
+    });
+
+    // --- Main thread: window message loop ---
+    while (g_running) {
+        MSG msg{};
+        BOOL ret = GetMessageA(&msg, nullptr, 0, 0);
+        if (ret == 0 || ret == -1) break; // WM_QUIT or error
+        TranslateMessage(&msg);
+        DispatchMessageA(&msg);
     }
 
     // --- Cleanup ---
+    g_running = false;
+    server.close(); // unblock recv() in worker thread
+    if (workerThread.joinable()) workerThread.join();
     if (dumpFile) fclose(dumpFile);
     decoder.cleanup();
     cleanupVulkan(vk);
-    server.close();
     DestroyWindow(hwnd);
     UnregisterClassA(wc.lpszClassName, hInstance);
     fprintf(stderr, "[Host] Shutdown complete.\n");

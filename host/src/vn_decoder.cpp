@@ -1591,15 +1591,9 @@ void VnDecoder::handleWaitForFences(VnStreamReader& r) {
     (void)deviceId;
     // Remove null fences (unknown IDs)
     fences.erase(std::remove(fences.begin(), fences.end(), VK_NULL_HANDLE), fences.end());
-    if (!fences.empty()) {
-        // Cap timeout to avoid blocking the host main thread indefinitely.
-        // The host decoder runs synchronously on the main thread which also
-        // processes window messages — a long block causes "Not Responding".
-        constexpr uint64_t MAX_TIMEOUT_NS = 100000000ULL; // 100ms
-        uint64_t cappedTimeout = (timeout > MAX_TIMEOUT_NS) ? MAX_TIMEOUT_NS : timeout;
+    if (!fences.empty())
         vkWaitForFences(device_, (uint32_t)fences.size(), fences.data(),
-                        waitAll ? VK_TRUE : VK_FALSE, cappedTimeout);
-    }
+                        waitAll ? VK_TRUE : VK_FALSE, timeout);
 }
 
 void VnDecoder::handleResetFences(VnStreamReader& r) {
