@@ -10,3 +10,4 @@ dumps/
 *.log
 *.bmp
 nul
+__pycache__/
