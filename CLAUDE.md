@@ -10,11 +10,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目状态
 
-**阶段一 M1.3 进行中** — Buffer 数据传输 + 动画三角形。
+**阶段一 M1.4 完成** — 纹理三角形端到端渲染 + Venus codegen 基础框架。
 
-已完成：
+已完成里程碑：
 - M1.2：DX11 静态三角形通过 DXVK → ICD → TCP → Host Vulkan 完整链路渲染 ✓
 - M1.3：变色动画三角形（cbuffer 传 time 值 + HSV 色环 shader）✓
+- M1.4：纹理三角形渲染（vertex buffer + texture + sampler 全链路）✓
+
+已完成功能：
 - ICD 代理框架（Vulkan 1.3, Features2, 60+ 扩展）
 - Venus 命令流编解码 + TCP 传输 + 延迟 Present
 - GPU 资源序列化：Image/Memory/ImageView/Sampler/DescriptorSet/Buffer 全链路
@@ -25,16 +28,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Pipeline barrier 转发（vkCmdPipelineBarrier/Barrier2）
 - ClearAttachments 转发
 - BeginRendering imageView 路由（swapchain vs 内部 render target）
+- Viewport 动态状态转发（含 Y 轴翻转）
+- CullMode / FrontFace 动态状态转发
 - 命令流反汇编工具 + Host 内置 captureScreenshot
+- Venus protocol codegen 框架（32/62 API 自动生成，13 个已集成到 encoder）
 
 当前状态：
-- 变色三角形在 Host 窗口正确动画显示（host 截图验证 frame5=橙红 frame150=蓝紫）
-- DXVK 原始 SPIR-V shader 渲染，uniform buffer 数据正确传输
+- 纹理三角形 + HSV 变色动画在 Host 窗口正确渲染
+- 13 个命令已切换到 codegen 生成函数 + Venus 标准命令 ID
 
 后续：
-- Viewport 动态状态转发（Y 轴翻转修复）
-- CullMode 转发
-- 更多 DX11 测试用例（带纹理、vertex buffer）
+- 更多 DX11 测试用例（深度测试、多物体、alpha blend）
+- codegen Step 3：结构体序列化支持（解锁 vkCreate* 命令）
 
 ## 架构要点
 

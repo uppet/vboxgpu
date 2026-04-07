@@ -1202,8 +1202,8 @@ static void VKAPI_CALL icd_vkCmdEndRenderPass2(VkCommandBuffer cb, const VkSubpa
 static void VKAPI_CALL icd_vkCmdNextSubpass(VkCommandBuffer, VkSubpassContents) {}
 static void VKAPI_CALL icd_vkCmdNextSubpass2(VkCommandBuffer, const VkSubpassBeginInfo*, const VkSubpassEndInfo*) {}
 
-static void VKAPI_CALL icd_vkCmdBindPipeline(VkCommandBuffer cb, VkPipelineBindPoint, VkPipeline pipeline) {
-    g_icd.encoder.cmdBindPipeline(toId(cb), (uint64_t)pipeline);
+static void VKAPI_CALL icd_vkCmdBindPipeline(VkCommandBuffer cb, VkPipelineBindPoint bindPoint, VkPipeline pipeline) {
+    g_icd.encoder.cmdBindPipeline(toId(cb), static_cast<uint32_t>(bindPoint), (uint64_t)pipeline);
 }
 
 static void VKAPI_CALL icd_vkCmdSetViewport(VkCommandBuffer cb, uint32_t, uint32_t count, const VkViewport* vps) {
@@ -1635,7 +1635,7 @@ static void VKAPI_CALL icd_vkCmdPushConstants(VkCommandBuffer cb, VkPipelineLayo
 static void VKAPI_CALL icd_vkCmdDispatch(VkCommandBuffer, uint32_t, uint32_t, uint32_t) {}
 static void VKAPI_CALL icd_vkCmdFillBuffer(VkCommandBuffer, VkBuffer, VkDeviceSize, VkDeviceSize, uint32_t) {}
 static void VKAPI_CALL icd_vkCmdUpdateBuffer(VkCommandBuffer cb, VkBuffer buf, VkDeviceSize offset, VkDeviceSize dataSize, const void* pData) {
-    g_icd.encoder.cmdUpdateBuffer(toId(cb), (uint64_t)buf, offset, (uint32_t)dataSize, pData);
+    g_icd.encoder.cmdUpdateBuffer(toId(cb), (uint64_t)buf, offset, dataSize, pData);
 }
 static void VKAPI_CALL icd_vkCmdResolveImage(VkCommandBuffer, VkImage, VkImageLayout, VkImage, VkImageLayout, uint32_t, const VkImageResolve*) {}
 static void VKAPI_CALL icd_vkCmdSetEvent(VkCommandBuffer, VkEvent, VkPipelineStageFlags) {}

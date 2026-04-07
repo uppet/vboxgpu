@@ -12,34 +12,50 @@ python3 codegen/bridge_codegen.py
 
 ## 当前状态
 
-**已生成（Batch 1 — 纯标量+handle 命令，11 个）：**
+**已生成（32/62 个 API）：**
+
+Batch 1 — 纯标量+handle 命令（11 个）：
 vkCmdDraw, vkCmdDrawIndexed, vkCmdBindPipeline, vkCmdEndRenderPass,
 vkCmdEndRendering, vkCmdSetCullMode, vkCmdSetFrontFace, vkEndCommandBuffer,
 vkBindBufferMemory, vkBindImageMemory, vkCmdBindIndexBuffer
 
-**待生成（需扩展 codegen）：** 51 个带指针/结构体参数的命令
+Batch 2 — 可忽略指针 (VkAllocationCallbacks*) 解锁的命令（15 个）：
+vkDestroyBuffer, vkDestroyCommandPool, vkDestroyDescriptorPool,
+vkDestroyDescriptorSetLayout, vkDestroyFence, vkDestroyFramebuffer,
+vkDestroyImage, vkDestroyImageView, vkDestroyPipeline,
+vkDestroyPipelineLayout, vkDestroyRenderPass, vkDestroySampler,
+vkDestroySemaphore, vkDestroyShaderModule, vkFreeMemory
+
+Batch 3 — 简单数组参数解锁的命令（6 个）：
+vkResetFences, vkWaitForFences, vkCmdBindDescriptorSets,
+vkCmdBindVertexBuffers, vkCmdPushConstants, vkCmdUpdateBuffer
+
+**待生成（需扩展 codegen）：** 30 个带结构体/输出指针/可选数组的命令
+
+## codegen 支持的参数类型
+
+| 类型 | 说明 | 示例 |
+|------|------|------|
+| handle | Vulkan handle → uint64_t | VkDevice, VkBuffer |
+| scalar | 标量 → uint32_t/uint64_t/float | uint32_t, VkDeviceSize, VkBool32 |
+| ignorable | 指针参数，跳过不传输 | VkAllocationCallbacks* |
+| handle_array | handle 数组，count+元素 | const VkFence* pFences |
+| scalar_array | 标量数组，count+元素 | const uint32_t* pDynamicOffsets |
+| byte_data | 字节数据，size+writeBytes | const void* pValues |
 
 ## 后续扩展步骤
-
-### Step 1: 支持可忽略指针参数
-`vkAllocationCallbacks*` 在所有 vkCreate/vkDestroy 中出现但我们不传输（总是 NULL）。
-codegen 应识别并跳过此参数。这解锁所有 vkDestroyXxx 和部分 vkCreateXxx。
-
-### Step 2: 支持简单数组参数
-如 `vkResetFences(device, fenceCount, const VkFence* pFences)` —
-指针参数带 `len="fenceCount"` 属性，按 `[count] [elem0] [elem1] ...` 序列化。
-解锁：vkResetFences, vkWaitForFences, vkCmdSetViewport, vkCmdSetScissor,
-vkCmdBindVertexBuffers, vkCmdBindDescriptorSets, vkCmdPushConstants 等。
 
 ### Step 3: 支持简单结构体序列化
 如 VkFenceCreateInfo { sType, pNext, flags } — 按成员顺序写入。
 pNext 初期写 NULL 标记（u32 0）。
 解锁：vkCreateFence, vkCreateSemaphore, vkCreateCommandPool,
 vkCreateBuffer, vkCreateImage, vkCreateImageView, vkCreateSampler 等。
+还需处理输出指针参数（vkCreate* 的最后一个 VkXxx* 参数）。
 
 ### Step 4: 支持嵌套结构体和复杂数组
 如 VkWriteDescriptorSet（含 union VkDescriptorImageInfo/BufferInfo），
 VkGraphicsPipelineCreateInfo（15+ 嵌套 sub-structs）。
+以及可选数组参数（vkCmdBindVertexBuffers2 的 pSizes/pStrides）。
 这些是最复杂的，可能需要保持部分手写。
 
 ### Step 5: 集成到 encoder/decoder
@@ -59,3 +75,5 @@ VkGraphicsPipelineCreateInfo（15+ 嵌套 sub-structs）。
 - **Handle 编码**：统一 uint64_t
 - **帧格式**：保留 [cmd_type:u32][cmd_size:u32][payload]（比 Venus 多一个 cmd_size 用于 TCP 错误恢复）
 - **Bridge 命令**：0x10000+ 范围的自定义命令（swapchain/memory/stream）保持手写
+- **可忽略参数**：VkAllocationCallbacks* 等在我们的 bridge 中总为 NULL 的参数直接跳过
+- **数组编码**：count 作为普通标量写入，紧跟数组元素；decoder 用 std::vector 存储

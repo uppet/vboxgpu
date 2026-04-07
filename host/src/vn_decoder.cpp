@@ -1261,6 +1261,7 @@ void VnDecoder::handleCmdEndRendering(VnStreamReader& r) {
 
 void VnDecoder::handleCmdBindPipeline(VnStreamReader& r) {
     uint64_t cbId = r.readU64();
+    uint32_t bindPoint = r.readU32();
     uint64_t pipId = r.readU64();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     VkPipeline pip = lookup(pipelines_, pipId);
@@ -1269,7 +1270,7 @@ void VnDecoder::handleCmdBindPipeline(VnStreamReader& r) {
                 (void*)cb, (void*)pip, (unsigned)cbId, (unsigned)pipId);
         return;
     }
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pip);
+    vkCmdBindPipeline(cb, static_cast<VkPipelineBindPoint>(bindPoint), pip);
 
     // Re-set viewport/scissor after pipeline bind — some drivers reset dynamic state
     HostSwapchain* sc = getFirstSwapchain();
@@ -1408,7 +1409,7 @@ void VnDecoder::handleCmdUpdateBuffer(VnStreamReader& r) {
     uint64_t cbId = r.readU64();
     uint64_t bufId = r.readU64();
     uint64_t offset = r.readU64();
-    uint32_t dataSize = r.readU32();
+    uint64_t dataSize = r.readU64();
     std::vector<uint8_t> data(dataSize);
     r.readBytes(data.data(), dataSize);
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);

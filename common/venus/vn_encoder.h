@@ -6,6 +6,7 @@
 
 #include "vn_command.h"
 #include "vn_stream.h"
+#include "vn_gen_encode.h"
 #include <mutex>
 
 class VnEncoder {
@@ -167,8 +168,7 @@ public:
                             uint64_t memoryId, uint64_t memoryOffset) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkBindImageMemory);
-        w_.writeU64(deviceId); w_.writeU64(imageId);
-        w_.writeU64(memoryId); w_.writeU64(memoryOffset);
+        vn_encode_vkBindImageMemory(&w_, deviceId, imageId, memoryId, memoryOffset);
         w_.endCommand(off);
     }
 
@@ -185,8 +185,7 @@ public:
                              uint64_t memoryId, uint64_t memoryOffset) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkBindBufferMemory);
-        w_.writeU64(deviceId); w_.writeU64(bufferId);
-        w_.writeU64(memoryId); w_.writeU64(memoryOffset);
+        vn_encode_vkBindBufferMemory(&w_, deviceId, bufferId, memoryId, memoryOffset);
         w_.endCommand(off);
     }
 
@@ -405,7 +404,7 @@ public:
     void cmdEndCommandBuffer(uint64_t cmdBufferId) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkEndCommandBuffer);
-        w_.writeU64(cmdBufferId);
+        vn_encode_vkEndCommandBuffer(&w_, cmdBufferId);
         w_.endCommand(off);
     }
 
@@ -430,7 +429,7 @@ public:
     void cmdEndRenderPass(uint64_t cmdBufferId) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdEndRenderPass);
-        w_.writeU64(cmdBufferId);
+        vn_encode_vkCmdEndRenderPass(&w_, cmdBufferId);
         w_.endCommand(off);
     }
 
@@ -461,7 +460,7 @@ public:
     void cmdEndRendering(uint64_t cmdBufferId) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdEndRendering);
-        w_.writeU64(cmdBufferId);
+        vn_encode_vkCmdEndRendering(&w_, cmdBufferId);
         w_.endCommand(off);
     }
 
@@ -506,11 +505,10 @@ public:
     }
 #endif // VK_VERSION_1_0
 
-    void cmdBindPipeline(uint64_t cmdBufferId, uint64_t pipelineId) {
+    void cmdBindPipeline(uint64_t cmdBufferId, uint32_t pipelineBindPoint, uint64_t pipelineId) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdBindPipeline);
-        w_.writeU64(cmdBufferId);
-        w_.writeU64(pipelineId);
+        vn_encode_vkCmdBindPipeline(&w_, cmdBufferId, pipelineBindPoint, pipelineId);
         w_.endCommand(off);
     }
 
@@ -538,16 +536,14 @@ public:
     void cmdSetCullMode(uint64_t cmdBufferId, uint32_t cullMode) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdSetCullMode);
-        w_.writeU64(cmdBufferId);
-        w_.writeU32(cullMode);
+        vn_encode_vkCmdSetCullMode(&w_, cmdBufferId, cullMode);
         w_.endCommand(off);
     }
 
     void cmdSetFrontFace(uint64_t cmdBufferId, uint32_t frontFace) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdSetFrontFace);
-        w_.writeU64(cmdBufferId);
-        w_.writeU32(frontFace);
+        vn_encode_vkCmdSetFrontFace(&w_, cmdBufferId, frontFace);
         w_.endCommand(off);
     }
 
@@ -556,11 +552,8 @@ public:
                  uint32_t firstVertex, uint32_t firstInstance) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdDraw);
-        w_.writeU64(cmdBufferId);
-        w_.writeU32(vertexCount);
-        w_.writeU32(instanceCount);
-        w_.writeU32(firstVertex);
-        w_.writeU32(firstInstance);
+        vn_encode_vkCmdDraw(&w_, cmdBufferId, vertexCount, instanceCount,
+                            firstVertex, firstInstance);
         w_.endCommand(off);
     }
 
@@ -569,9 +562,8 @@ public:
                         uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdDrawIndexed);
-        w_.writeU64(cmdBufferId);
-        w_.writeU32(indexCount); w_.writeU32(instanceCount);
-        w_.writeU32(firstIndex); w_.writeI32(vertexOffset); w_.writeU32(firstInstance);
+        vn_encode_vkCmdDrawIndexed(&w_, cmdBufferId, indexCount, instanceCount,
+                                   firstIndex, vertexOffset, firstInstance);
         w_.endCommand(off);
     }
 
@@ -595,8 +587,7 @@ public:
                             uint64_t offset, uint32_t indexType) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdBindIndexBuffer);
-        w_.writeU64(cmdBufferId);
-        w_.writeU64(bufferId); w_.writeU64(offset); w_.writeU32(indexType);
+        vn_encode_vkCmdBindIndexBuffer(&w_, cmdBufferId, bufferId, offset, indexType);
         w_.endCommand(off);
     }
 
@@ -638,14 +629,10 @@ public:
     }
 
     void cmdUpdateBuffer(uint64_t cmdBufferId, uint64_t bufferId,
-                         uint64_t offset, uint32_t dataSize, const void* pData) {
+                         uint64_t offset, uint64_t dataSize, const void* pData) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdUpdateBuffer);
-        w_.writeU64(cmdBufferId);
-        w_.writeU64(bufferId);
-        w_.writeU64(offset);
-        w_.writeU32(dataSize);
-        w_.writeBytes(pData, dataSize);
+        vn_encode_vkCmdUpdateBuffer(&w_, cmdBufferId, bufferId, offset, dataSize, pData);
         w_.endCommand(off);
     }
 
@@ -654,12 +641,8 @@ public:
                           const void* pValues) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdPushConstants);
-        w_.writeU64(cmdBufferId);
-        w_.writeU64(layoutId);
-        w_.writeU32(stageFlags);
-        w_.writeU32(offset);
-        w_.writeU32(size);
-        w_.writeBytes(pValues, size);
+        vn_encode_vkCmdPushConstants(&w_, cmdBufferId, layoutId,
+                                     stageFlags, offset, size, pValues);
         w_.endCommand(off);
     }
 

@@ -22,6 +22,8 @@ enum VnCommandType : uint32_t {
     VN_CMD_vkFreeMemory                    = 22,
     VN_CMD_vkMapMemory                     = 23,
     VN_CMD_vkUnmapMemory                   = 24,
+    VN_CMD_vkBindBufferMemory              = 28,   // Venus standard (was 44)
+    VN_CMD_vkBindImageMemory               = 29,   // Venus standard (was 48)
     VN_CMD_vkCreateFence                   = 33,
     VN_CMD_vkDestroyFence                  = 34,
     VN_CMD_vkResetFences                   = 35,
@@ -49,23 +51,21 @@ enum VnCommandType : uint32_t {
     VN_CMD_vkDestroyCommandPool            = 72,
     VN_CMD_vkAllocateCommandBuffers        = 73,
     VN_CMD_vkBeginCommandBuffer            = 75,
-    VN_CMD_vkEndCommandBuffer              = 76,
-    VN_CMD_vkCmdBindPipeline               = 78,
+    VN_CMD_vkEndCommandBuffer              = 91,   // Venus standard (was 76)
+    VN_CMD_vkCmdBindPipeline               = 93,   // Venus standard (was 78)
     VN_CMD_vkCmdSetViewport                = 79,
     VN_CMD_vkCmdSetScissor                 = 80,
-    VN_CMD_vkCmdDraw                       = 86,
+    VN_CMD_vkCmdDraw                       = 106,  // Venus standard (was 86)
     VN_CMD_vkCmdBeginRenderPass            = 94,
-    VN_CMD_vkCmdEndRenderPass              = 96,
-    VN_CMD_vkBindBufferMemory              = 44,
-    VN_CMD_vkBindImageMemory               = 48,
-
-    VN_CMD_vkCmdPushConstants              = 87,
+    VN_CMD_vkCmdEndRenderPass              = 135,  // Venus standard (was 96)
+    VN_CMD_vkCmdPushConstants              = 132,  // Venus standard (was 87)
+    VN_CMD_vkCmdBindIndexBuffer            = 104,  // Venus standard (was 0x100E)
 
     // Vulkan 1.3 dynamic rendering
-    VN_CMD_vkCmdBeginRendering             = 0x1000,  // bridge-defined (not in Venus)
-    VN_CMD_vkCmdEndRendering               = 0x1001,
+    VN_CMD_vkCmdBeginRendering             = 0x1000,  // bridge-defined (not yet Venus)
+    VN_CMD_vkCmdEndRendering               = 214,  // Venus standard (was 0x1001)
 
-    // Bridge-defined resource commands (not in Venus protocol)
+    // Bridge-defined resource commands (not yet in codegen — custom wire format)
     VN_CMD_vkCreateSampler                 = 0x1002,
     VN_CMD_vkCreateDescriptorPool          = 0x1003,
     VN_CMD_vkAllocateDescriptorSets        = 0x1004,
@@ -75,14 +75,13 @@ enum VnCommandType : uint32_t {
     VN_CMD_vkCmdPipelineBarrier2          = 0x1008,  // image memory barriers only
     VN_CMD_vkCmdClearAttachments          = 0x1009,
     VN_CMD_vkCmdClearColorImage           = 0x100A,
-    VN_CMD_vkCmdSetCullMode               = 0x100B,
-    VN_CMD_vkCmdSetFrontFace              = 0x100C,
+    VN_CMD_vkCmdSetCullMode               = 215,   // Venus standard (was 0x100B)
+    VN_CMD_vkCmdSetFrontFace              = 216,   // Venus standard (was 0x100C)
     VN_CMD_vkCmdBindVertexBuffers         = 0x100D,
-    VN_CMD_vkCmdBindIndexBuffer           = 0x100E,
-    VN_CMD_vkCmdDrawIndexed               = 0x100F,
+    VN_CMD_vkCmdDrawIndexed               = 107,   // Venus standard (was 0x100F)
     VN_CMD_vkCmdCopyBuffer                = 0x1010,
     VN_CMD_vkCmdCopyBufferToImage         = 0x1011,
-    VN_CMD_vkCmdUpdateBuffer              = 0x1012,
+    VN_CMD_vkCmdUpdateBuffer              = 117,   // Venus standard (was 0x1012)
 
     // Extension: swapchain (handled specially by host)
     VN_CMD_BRIDGE_CreateSwapchain          = 0x10000,

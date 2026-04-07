@@ -30,6 +30,29 @@ static inline void vn_encode_vkBindImageMemory(VnStreamWriter* w
     w->writeU64(memoryOffset);
 }
 
+static inline void vn_encode_vkCmdBindDescriptorSets(VnStreamWriter* w
+    , uint64_t commandBuffer
+    , uint32_t pipelineBindPoint
+    , uint64_t layout
+    , uint32_t firstSet
+    , uint32_t descriptorSetCount
+    , const uint64_t* pDescriptorSets
+    , uint32_t dynamicOffsetCount
+    , const uint32_t* pDynamicOffsets
+)
+{
+    w->writeU64(commandBuffer);
+    w->writeU32(pipelineBindPoint);
+    w->writeU64(layout);
+    w->writeU32(firstSet);
+    w->writeU32(descriptorSetCount);
+    for (uint32_t i = 0; i < descriptorSetCount; i++)
+        w->writeU64(pDescriptorSets[i]);
+    w->writeU32(dynamicOffsetCount);
+    for (uint32_t i = 0; i < dynamicOffsetCount; i++)
+        w->writeU32(pDynamicOffsets[i]);
+}
+
 static inline void vn_encode_vkCmdBindIndexBuffer(VnStreamWriter* w
     , uint64_t commandBuffer
     , uint64_t buffer
@@ -54,6 +77,23 @@ static inline void vn_encode_vkCmdBindPipeline(VnStreamWriter* w
     w->writeU64(pipeline);
 }
 
+static inline void vn_encode_vkCmdBindVertexBuffers(VnStreamWriter* w
+    , uint64_t commandBuffer
+    , uint32_t firstBinding
+    , uint32_t bindingCount
+    , const uint64_t* pBuffers
+    , const uint64_t* pOffsets
+)
+{
+    w->writeU64(commandBuffer);
+    w->writeU32(firstBinding);
+    w->writeU32(bindingCount);
+    for (uint32_t i = 0; i < bindingCount; i++)
+        w->writeU64(pBuffers[i]);
+    for (uint32_t i = 0; i < bindingCount; i++)
+        w->writeU64(pOffsets[i]);
+}
+
 static inline void vn_encode_vkCmdDraw(VnStreamWriter* w
     , uint64_t commandBuffer
     , uint32_t vertexCount
@@ -74,7 +114,7 @@ static inline void vn_encode_vkCmdDrawIndexed(VnStreamWriter* w
     , uint32_t indexCount
     , uint32_t instanceCount
     , uint32_t firstIndex
-    , uint32_t vertexOffset
+    , int32_t vertexOffset
     , uint32_t firstInstance
 )
 {
@@ -82,7 +122,7 @@ static inline void vn_encode_vkCmdDrawIndexed(VnStreamWriter* w
     w->writeU32(indexCount);
     w->writeU32(instanceCount);
     w->writeU32(firstIndex);
-    w->writeU32(vertexOffset);
+    w->writeI32(vertexOffset);
     w->writeU32(firstInstance);
 }
 
@@ -98,6 +138,23 @@ static inline void vn_encode_vkCmdEndRendering(VnStreamWriter* w
 )
 {
     w->writeU64(commandBuffer);
+}
+
+static inline void vn_encode_vkCmdPushConstants(VnStreamWriter* w
+    , uint64_t commandBuffer
+    , uint64_t layout
+    , uint32_t stageFlags
+    , uint32_t offset
+    , uint32_t size
+    , const void* pValues
+)
+{
+    w->writeU64(commandBuffer);
+    w->writeU64(layout);
+    w->writeU32(stageFlags);
+    w->writeU32(offset);
+    w->writeU32(size);
+    w->writeBytes(pValues, size);
 }
 
 static inline void vn_encode_vkCmdSetCullMode(VnStreamWriter* w
@@ -118,6 +175,147 @@ static inline void vn_encode_vkCmdSetFrontFace(VnStreamWriter* w
     w->writeU32(frontFace);
 }
 
+static inline void vn_encode_vkCmdUpdateBuffer(VnStreamWriter* w
+    , uint64_t commandBuffer
+    , uint64_t dstBuffer
+    , uint64_t dstOffset
+    , uint64_t dataSize
+    , const void* pData
+)
+{
+    w->writeU64(commandBuffer);
+    w->writeU64(dstBuffer);
+    w->writeU64(dstOffset);
+    w->writeU64(dataSize);
+    w->writeBytes(pData, dataSize);
+}
+
+static inline void vn_encode_vkDestroyBuffer(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t buffer
+)
+{
+    w->writeU64(device);
+    w->writeU64(buffer);
+}
+
+static inline void vn_encode_vkDestroyCommandPool(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t commandPool
+)
+{
+    w->writeU64(device);
+    w->writeU64(commandPool);
+}
+
+static inline void vn_encode_vkDestroyDescriptorPool(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t descriptorPool
+)
+{
+    w->writeU64(device);
+    w->writeU64(descriptorPool);
+}
+
+static inline void vn_encode_vkDestroyDescriptorSetLayout(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t descriptorSetLayout
+)
+{
+    w->writeU64(device);
+    w->writeU64(descriptorSetLayout);
+}
+
+static inline void vn_encode_vkDestroyFence(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t fence
+)
+{
+    w->writeU64(device);
+    w->writeU64(fence);
+}
+
+static inline void vn_encode_vkDestroyFramebuffer(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t framebuffer
+)
+{
+    w->writeU64(device);
+    w->writeU64(framebuffer);
+}
+
+static inline void vn_encode_vkDestroyImage(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t image
+)
+{
+    w->writeU64(device);
+    w->writeU64(image);
+}
+
+static inline void vn_encode_vkDestroyImageView(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t imageView
+)
+{
+    w->writeU64(device);
+    w->writeU64(imageView);
+}
+
+static inline void vn_encode_vkDestroyPipeline(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t pipeline
+)
+{
+    w->writeU64(device);
+    w->writeU64(pipeline);
+}
+
+static inline void vn_encode_vkDestroyPipelineLayout(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t pipelineLayout
+)
+{
+    w->writeU64(device);
+    w->writeU64(pipelineLayout);
+}
+
+static inline void vn_encode_vkDestroyRenderPass(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t renderPass
+)
+{
+    w->writeU64(device);
+    w->writeU64(renderPass);
+}
+
+static inline void vn_encode_vkDestroySampler(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t sampler
+)
+{
+    w->writeU64(device);
+    w->writeU64(sampler);
+}
+
+static inline void vn_encode_vkDestroySemaphore(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t semaphore
+)
+{
+    w->writeU64(device);
+    w->writeU64(semaphore);
+}
+
+static inline void vn_encode_vkDestroyShaderModule(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t shaderModule
+)
+{
+    w->writeU64(device);
+    w->writeU64(shaderModule);
+}
+
 static inline void vn_encode_vkEndCommandBuffer(VnStreamWriter* w
     , uint64_t commandBuffer
 )
@@ -125,55 +323,71 @@ static inline void vn_encode_vkEndCommandBuffer(VnStreamWriter* w
     w->writeU64(commandBuffer);
 }
 
+static inline void vn_encode_vkFreeMemory(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t memory
+)
+{
+    w->writeU64(device);
+    w->writeU64(memory);
+}
+
+static inline void vn_encode_vkResetFences(VnStreamWriter* w
+    , uint64_t device
+    , uint32_t fenceCount
+    , const uint64_t* pFences
+)
+{
+    w->writeU64(device);
+    w->writeU32(fenceCount);
+    for (uint32_t i = 0; i < fenceCount; i++)
+        w->writeU64(pFences[i]);
+}
+
+static inline void vn_encode_vkWaitForFences(VnStreamWriter* w
+    , uint64_t device
+    , uint32_t fenceCount
+    , const uint64_t* pFences
+    , uint32_t waitAll
+    , uint64_t timeout
+)
+{
+    w->writeU64(device);
+    w->writeU32(fenceCount);
+    for (uint32_t i = 0; i < fenceCount; i++)
+        w->writeU64(pFences[i]);
+    w->writeU32(waitAll);
+    w->writeU64(timeout);
+}
+
 // ── Not yet generated (complex parameter types) ──
-// TODO: vkAllocateCommandBuffers — complex params, needs manual or extended codegen
-// TODO: vkAllocateDescriptorSets — complex params, needs manual or extended codegen
-// TODO: vkAllocateMemory — complex params, needs manual or extended codegen
-// TODO: vkBeginCommandBuffer — complex params, needs manual or extended codegen
-// TODO: vkCmdBeginRenderPass — complex params, needs manual or extended codegen
-// TODO: vkCmdBeginRendering — complex params, needs manual or extended codegen
-// TODO: vkCmdBindDescriptorSets — complex params, needs manual or extended codegen
-// TODO: vkCmdBindVertexBuffers — complex params, needs manual or extended codegen
-// TODO: vkCmdBindVertexBuffers2 — complex params, needs manual or extended codegen
-// TODO: vkCmdClearAttachments — complex params, needs manual or extended codegen
-// TODO: vkCmdClearColorImage — complex params, needs manual or extended codegen
-// TODO: vkCmdCopyBuffer — complex params, needs manual or extended codegen
-// TODO: vkCmdCopyBufferToImage — complex params, needs manual or extended codegen
-// TODO: vkCmdPipelineBarrier — complex params, needs manual or extended codegen
-// TODO: vkCmdPushConstants — complex params, needs manual or extended codegen
-// TODO: vkCmdSetScissor — complex params, needs manual or extended codegen
-// TODO: vkCmdSetViewport — complex params, needs manual or extended codegen
-// TODO: vkCmdUpdateBuffer — complex params, needs manual or extended codegen
-// TODO: vkCreateBuffer — complex params, needs manual or extended codegen
-// TODO: vkCreateCommandPool — complex params, needs manual or extended codegen
-// TODO: vkCreateDescriptorPool — complex params, needs manual or extended codegen
-// TODO: vkCreateDescriptorSetLayout — complex params, needs manual or extended codegen
-// TODO: vkCreateFence — complex params, needs manual or extended codegen
-// TODO: vkCreateFramebuffer — complex params, needs manual or extended codegen
-// TODO: vkCreateGraphicsPipelines — complex params, needs manual or extended codegen
-// TODO: vkCreateImage — complex params, needs manual or extended codegen
-// TODO: vkCreateImageView — complex params, needs manual or extended codegen
-// TODO: vkCreatePipelineLayout — complex params, needs manual or extended codegen
-// TODO: vkCreateRenderPass — complex params, needs manual or extended codegen
-// TODO: vkCreateSampler — complex params, needs manual or extended codegen
-// TODO: vkCreateSemaphore — complex params, needs manual or extended codegen
-// TODO: vkCreateShaderModule — complex params, needs manual or extended codegen
-// TODO: vkDestroyBuffer — complex params, needs manual or extended codegen
-// TODO: vkDestroyCommandPool — complex params, needs manual or extended codegen
-// TODO: vkDestroyDescriptorPool — complex params, needs manual or extended codegen
-// TODO: vkDestroyDescriptorSetLayout — complex params, needs manual or extended codegen
-// TODO: vkDestroyFence — complex params, needs manual or extended codegen
-// TODO: vkDestroyFramebuffer — complex params, needs manual or extended codegen
-// TODO: vkDestroyImage — complex params, needs manual or extended codegen
-// TODO: vkDestroyImageView — complex params, needs manual or extended codegen
-// TODO: vkDestroyPipeline — complex params, needs manual or extended codegen
-// TODO: vkDestroyPipelineLayout — complex params, needs manual or extended codegen
-// TODO: vkDestroyRenderPass — complex params, needs manual or extended codegen
-// TODO: vkDestroySampler — complex params, needs manual or extended codegen
-// TODO: vkDestroySemaphore — complex params, needs manual or extended codegen
-// TODO: vkDestroyShaderModule — complex params, needs manual or extended codegen
-// TODO: vkFreeMemory — complex params, needs manual or extended codegen
-// TODO: vkQueueSubmit — complex params, needs manual or extended codegen
-// TODO: vkResetFences — complex params, needs manual or extended codegen
-// TODO: vkUpdateDescriptorSets — complex params, needs manual or extended codegen
-// TODO: vkWaitForFences — complex params, needs manual or extended codegen
+// TODO: vkAllocateCommandBuffers — complex: VkCommandBufferAllocateInfo* pAllocateInfo, VkCommandBuffer* pCommandBuffers
+// TODO: vkAllocateDescriptorSets — complex: VkDescriptorSetAllocateInfo* pAllocateInfo, VkDescriptorSet* pDescriptorSets
+// TODO: vkAllocateMemory — complex: VkMemoryAllocateInfo* pAllocateInfo, VkDeviceMemory* pMemory
+// TODO: vkBeginCommandBuffer — complex: VkCommandBufferBeginInfo* pBeginInfo
+// TODO: vkCmdBeginRenderPass — complex: VkRenderPassBeginInfo* pRenderPassBegin
+// TODO: vkCmdBeginRendering — complex: VkRenderingInfo* pRenderingInfo
+// TODO: vkCmdBindVertexBuffers2 — complex: VkDeviceSize* pSizes, VkDeviceSize* pStrides
+// TODO: vkCmdClearAttachments — complex: VkClearAttachment* pAttachments, VkClearRect* pRects
+// TODO: vkCmdClearColorImage — complex: VkClearColorValue* pColor, VkImageSubresourceRange* pRanges
+// TODO: vkCmdCopyBuffer — complex: VkBufferCopy* pRegions
+// TODO: vkCmdCopyBufferToImage — complex: VkBufferImageCopy* pRegions
+// TODO: vkCmdPipelineBarrier — complex: VkMemoryBarrier* pMemoryBarriers, VkBufferMemoryBarrier* pBufferMemoryBarriers, VkImageMemoryBarrier* pImageMemoryBarriers
+// TODO: vkCmdSetScissor — complex: VkRect2D* pScissors
+// TODO: vkCmdSetViewport — complex: VkViewport* pViewports
+// TODO: vkCreateBuffer — complex: VkBufferCreateInfo* pCreateInfo, VkBuffer* pBuffer
+// TODO: vkCreateCommandPool — complex: VkCommandPoolCreateInfo* pCreateInfo, VkCommandPool* pCommandPool
+// TODO: vkCreateDescriptorPool — complex: VkDescriptorPoolCreateInfo* pCreateInfo, VkDescriptorPool* pDescriptorPool
+// TODO: vkCreateDescriptorSetLayout — complex: VkDescriptorSetLayoutCreateInfo* pCreateInfo, VkDescriptorSetLayout* pSetLayout
+// TODO: vkCreateFence — complex: VkFenceCreateInfo* pCreateInfo, VkFence* pFence
+// TODO: vkCreateFramebuffer — complex: VkFramebufferCreateInfo* pCreateInfo, VkFramebuffer* pFramebuffer
+// TODO: vkCreateGraphicsPipelines — complex: VkGraphicsPipelineCreateInfo* pCreateInfos
+// TODO: vkCreateImage — complex: VkImageCreateInfo* pCreateInfo, VkImage* pImage
+// TODO: vkCreateImageView — complex: VkImageViewCreateInfo* pCreateInfo, VkImageView* pView
+// TODO: vkCreatePipelineLayout — complex: VkPipelineLayoutCreateInfo* pCreateInfo, VkPipelineLayout* pPipelineLayout
+// TODO: vkCreateRenderPass — complex: VkRenderPassCreateInfo* pCreateInfo, VkRenderPass* pRenderPass
+// TODO: vkCreateSampler — complex: VkSamplerCreateInfo* pCreateInfo, VkSampler* pSampler
+// TODO: vkCreateSemaphore — complex: VkSemaphoreCreateInfo* pCreateInfo, VkSemaphore* pSemaphore
+// TODO: vkCreateShaderModule — complex: VkShaderModuleCreateInfo* pCreateInfo, VkShaderModule* pShaderModule
+// TODO: vkQueueSubmit — complex: VkSubmitInfo* pSubmits
+// TODO: vkUpdateDescriptorSets — complex: VkWriteDescriptorSet* pDescriptorWrites, VkCopyDescriptorSet* pDescriptorCopies

@@ -122,7 +122,7 @@ static std::vector<uint8_t> buildFrameStream(uint64_t fbId) {
     enc.cmdBeginRenderPass(H_CMD_BUF, H_RENDER_PASS, fbId,
                            WINDOW_WIDTH, WINDOW_HEIGHT,
                            0.0f, 0.0f, 0.0f, 1.0f);
-    enc.cmdBindPipeline(H_CMD_BUF, H_PIPELINE);
+    enc.cmdBindPipeline(H_CMD_BUF, 0 /*VK_PIPELINE_BIND_POINT_GRAPHICS*/, H_PIPELINE);
     enc.cmdDraw(H_CMD_BUF, 3, 1, 0, 0);
     enc.cmdEndRenderPass(H_CMD_BUF);
     enc.cmdEndCommandBuffer(H_CMD_BUF);

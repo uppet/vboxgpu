@@ -3,6 +3,7 @@
 #pragma once
 
 #include "vn_stream.h"
+#include <vector>
 
 struct VnDecode_vkBindBufferMemory {
     uint64_t device;
@@ -34,6 +35,33 @@ static inline void vn_decode_vkBindImageMemory(VnStreamReader* r, VnDecode_vkBin
     args->memoryOffset = r->readU64();
 }
 
+struct VnDecode_vkCmdBindDescriptorSets {
+    uint64_t commandBuffer;
+    uint32_t pipelineBindPoint;
+    uint64_t layout;
+    uint32_t firstSet;
+    uint32_t descriptorSetCount;
+    std::vector<uint64_t> pDescriptorSets;
+    uint32_t dynamicOffsetCount;
+    std::vector<uint32_t> pDynamicOffsets;
+};
+
+static inline void vn_decode_vkCmdBindDescriptorSets(VnStreamReader* r, VnDecode_vkCmdBindDescriptorSets* args)
+{
+    args->commandBuffer = r->readU64();
+    args->pipelineBindPoint = r->readU32();
+    args->layout = r->readU64();
+    args->firstSet = r->readU32();
+    args->descriptorSetCount = r->readU32();
+    args->pDescriptorSets.resize(args->descriptorSetCount);
+    for (uint32_t i = 0; i < args->descriptorSetCount; i++)
+        args->pDescriptorSets[i] = r->readU64();
+    args->dynamicOffsetCount = r->readU32();
+    args->pDynamicOffsets.resize(args->dynamicOffsetCount);
+    for (uint32_t i = 0; i < args->dynamicOffsetCount; i++)
+        args->pDynamicOffsets[i] = r->readU32();
+}
+
 struct VnDecode_vkCmdBindIndexBuffer {
     uint64_t commandBuffer;
     uint64_t buffer;
@@ -62,6 +90,27 @@ static inline void vn_decode_vkCmdBindPipeline(VnStreamReader* r, VnDecode_vkCmd
     args->pipeline = r->readU64();
 }
 
+struct VnDecode_vkCmdBindVertexBuffers {
+    uint64_t commandBuffer;
+    uint32_t firstBinding;
+    uint32_t bindingCount;
+    std::vector<uint64_t> pBuffers;
+    std::vector<uint64_t> pOffsets;
+};
+
+static inline void vn_decode_vkCmdBindVertexBuffers(VnStreamReader* r, VnDecode_vkCmdBindVertexBuffers* args)
+{
+    args->commandBuffer = r->readU64();
+    args->firstBinding = r->readU32();
+    args->bindingCount = r->readU32();
+    args->pBuffers.resize(args->bindingCount);
+    for (uint32_t i = 0; i < args->bindingCount; i++)
+        args->pBuffers[i] = r->readU64();
+    args->pOffsets.resize(args->bindingCount);
+    for (uint32_t i = 0; i < args->bindingCount; i++)
+        args->pOffsets[i] = r->readU64();
+}
+
 struct VnDecode_vkCmdDraw {
     uint64_t commandBuffer;
     uint32_t vertexCount;
@@ -84,7 +133,7 @@ struct VnDecode_vkCmdDrawIndexed {
     uint32_t indexCount;
     uint32_t instanceCount;
     uint32_t firstIndex;
-    uint32_t vertexOffset;
+    int32_t vertexOffset;
     uint32_t firstInstance;
 };
 
@@ -94,7 +143,7 @@ static inline void vn_decode_vkCmdDrawIndexed(VnStreamReader* r, VnDecode_vkCmdD
     args->indexCount = r->readU32();
     args->instanceCount = r->readU32();
     args->firstIndex = r->readU32();
-    args->vertexOffset = r->readU32();
+    args->vertexOffset = r->readI32();
     args->firstInstance = r->readU32();
 }
 
@@ -114,6 +163,26 @@ struct VnDecode_vkCmdEndRendering {
 static inline void vn_decode_vkCmdEndRendering(VnStreamReader* r, VnDecode_vkCmdEndRendering* args)
 {
     args->commandBuffer = r->readU64();
+}
+
+struct VnDecode_vkCmdPushConstants {
+    uint64_t commandBuffer;
+    uint64_t layout;
+    uint32_t stageFlags;
+    uint32_t offset;
+    uint32_t size;
+    std::vector<uint8_t> pValues;
+};
+
+static inline void vn_decode_vkCmdPushConstants(VnStreamReader* r, VnDecode_vkCmdPushConstants* args)
+{
+    args->commandBuffer = r->readU64();
+    args->layout = r->readU64();
+    args->stageFlags = r->readU32();
+    args->offset = r->readU32();
+    args->size = r->readU32();
+    args->pValues.resize(args->size);
+    r->readBytes(args->pValues.data(), args->size);
 }
 
 struct VnDecode_vkCmdSetCullMode {
@@ -138,6 +207,178 @@ static inline void vn_decode_vkCmdSetFrontFace(VnStreamReader* r, VnDecode_vkCmd
     args->frontFace = r->readU32();
 }
 
+struct VnDecode_vkCmdUpdateBuffer {
+    uint64_t commandBuffer;
+    uint64_t dstBuffer;
+    uint64_t dstOffset;
+    uint64_t dataSize;
+    std::vector<uint8_t> pData;
+};
+
+static inline void vn_decode_vkCmdUpdateBuffer(VnStreamReader* r, VnDecode_vkCmdUpdateBuffer* args)
+{
+    args->commandBuffer = r->readU64();
+    args->dstBuffer = r->readU64();
+    args->dstOffset = r->readU64();
+    args->dataSize = r->readU64();
+    args->pData.resize(args->dataSize);
+    r->readBytes(args->pData.data(), args->dataSize);
+}
+
+struct VnDecode_vkDestroyBuffer {
+    uint64_t device;
+    uint64_t buffer;
+};
+
+static inline void vn_decode_vkDestroyBuffer(VnStreamReader* r, VnDecode_vkDestroyBuffer* args)
+{
+    args->device = r->readU64();
+    args->buffer = r->readU64();
+}
+
+struct VnDecode_vkDestroyCommandPool {
+    uint64_t device;
+    uint64_t commandPool;
+};
+
+static inline void vn_decode_vkDestroyCommandPool(VnStreamReader* r, VnDecode_vkDestroyCommandPool* args)
+{
+    args->device = r->readU64();
+    args->commandPool = r->readU64();
+}
+
+struct VnDecode_vkDestroyDescriptorPool {
+    uint64_t device;
+    uint64_t descriptorPool;
+};
+
+static inline void vn_decode_vkDestroyDescriptorPool(VnStreamReader* r, VnDecode_vkDestroyDescriptorPool* args)
+{
+    args->device = r->readU64();
+    args->descriptorPool = r->readU64();
+}
+
+struct VnDecode_vkDestroyDescriptorSetLayout {
+    uint64_t device;
+    uint64_t descriptorSetLayout;
+};
+
+static inline void vn_decode_vkDestroyDescriptorSetLayout(VnStreamReader* r, VnDecode_vkDestroyDescriptorSetLayout* args)
+{
+    args->device = r->readU64();
+    args->descriptorSetLayout = r->readU64();
+}
+
+struct VnDecode_vkDestroyFence {
+    uint64_t device;
+    uint64_t fence;
+};
+
+static inline void vn_decode_vkDestroyFence(VnStreamReader* r, VnDecode_vkDestroyFence* args)
+{
+    args->device = r->readU64();
+    args->fence = r->readU64();
+}
+
+struct VnDecode_vkDestroyFramebuffer {
+    uint64_t device;
+    uint64_t framebuffer;
+};
+
+static inline void vn_decode_vkDestroyFramebuffer(VnStreamReader* r, VnDecode_vkDestroyFramebuffer* args)
+{
+    args->device = r->readU64();
+    args->framebuffer = r->readU64();
+}
+
+struct VnDecode_vkDestroyImage {
+    uint64_t device;
+    uint64_t image;
+};
+
+static inline void vn_decode_vkDestroyImage(VnStreamReader* r, VnDecode_vkDestroyImage* args)
+{
+    args->device = r->readU64();
+    args->image = r->readU64();
+}
+
+struct VnDecode_vkDestroyImageView {
+    uint64_t device;
+    uint64_t imageView;
+};
+
+static inline void vn_decode_vkDestroyImageView(VnStreamReader* r, VnDecode_vkDestroyImageView* args)
+{
+    args->device = r->readU64();
+    args->imageView = r->readU64();
+}
+
+struct VnDecode_vkDestroyPipeline {
+    uint64_t device;
+    uint64_t pipeline;
+};
+
+static inline void vn_decode_vkDestroyPipeline(VnStreamReader* r, VnDecode_vkDestroyPipeline* args)
+{
+    args->device = r->readU64();
+    args->pipeline = r->readU64();
+}
+
+struct VnDecode_vkDestroyPipelineLayout {
+    uint64_t device;
+    uint64_t pipelineLayout;
+};
+
+static inline void vn_decode_vkDestroyPipelineLayout(VnStreamReader* r, VnDecode_vkDestroyPipelineLayout* args)
+{
+    args->device = r->readU64();
+    args->pipelineLayout = r->readU64();
+}
+
+struct VnDecode_vkDestroyRenderPass {
+    uint64_t device;
+    uint64_t renderPass;
+};
+
+static inline void vn_decode_vkDestroyRenderPass(VnStreamReader* r, VnDecode_vkDestroyRenderPass* args)
+{
+    args->device = r->readU64();
+    args->renderPass = r->readU64();
+}
+
+struct VnDecode_vkDestroySampler {
+    uint64_t device;
+    uint64_t sampler;
+};
+
+static inline void vn_decode_vkDestroySampler(VnStreamReader* r, VnDecode_vkDestroySampler* args)
+{
+    args->device = r->readU64();
+    args->sampler = r->readU64();
+}
+
+struct VnDecode_vkDestroySemaphore {
+    uint64_t device;
+    uint64_t semaphore;
+};
+
+static inline void vn_decode_vkDestroySemaphore(VnStreamReader* r, VnDecode_vkDestroySemaphore* args)
+{
+    args->device = r->readU64();
+    args->semaphore = r->readU64();
+}
+
+struct VnDecode_vkDestroyShaderModule {
+    uint64_t device;
+    uint64_t shaderModule;
+};
+
+static inline void vn_decode_vkDestroyShaderModule(VnStreamReader* r, VnDecode_vkDestroyShaderModule* args)
+{
+    args->device = r->readU64();
+    args->shaderModule = r->readU64();
+}
+
 struct VnDecode_vkEndCommandBuffer {
     uint64_t commandBuffer;
 };
@@ -145,4 +386,49 @@ struct VnDecode_vkEndCommandBuffer {
 static inline void vn_decode_vkEndCommandBuffer(VnStreamReader* r, VnDecode_vkEndCommandBuffer* args)
 {
     args->commandBuffer = r->readU64();
+}
+
+struct VnDecode_vkFreeMemory {
+    uint64_t device;
+    uint64_t memory;
+};
+
+static inline void vn_decode_vkFreeMemory(VnStreamReader* r, VnDecode_vkFreeMemory* args)
+{
+    args->device = r->readU64();
+    args->memory = r->readU64();
+}
+
+struct VnDecode_vkResetFences {
+    uint64_t device;
+    uint32_t fenceCount;
+    std::vector<uint64_t> pFences;
+};
+
+static inline void vn_decode_vkResetFences(VnStreamReader* r, VnDecode_vkResetFences* args)
+{
+    args->device = r->readU64();
+    args->fenceCount = r->readU32();
+    args->pFences.resize(args->fenceCount);
+    for (uint32_t i = 0; i < args->fenceCount; i++)
+        args->pFences[i] = r->readU64();
+}
+
+struct VnDecode_vkWaitForFences {
+    uint64_t device;
+    uint32_t fenceCount;
+    std::vector<uint64_t> pFences;
+    uint32_t waitAll;
+    uint64_t timeout;
+};
+
+static inline void vn_decode_vkWaitForFences(VnStreamReader* r, VnDecode_vkWaitForFences* args)
+{
+    args->device = r->readU64();
+    args->fenceCount = r->readU32();
+    args->pFences.resize(args->fenceCount);
+    for (uint32_t i = 0; i < args->fenceCount; i++)
+        args->pFences[i] = r->readU64();
+    args->waitAll = r->readU32();
+    args->timeout = r->readU64();
 }
