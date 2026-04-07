@@ -1243,7 +1243,9 @@ static VkResult VKAPI_CALL icd_vkCreateFence(VkDevice, const VkFenceCreateInfo* 
 static void VKAPI_CALL icd_vkDestroyFence(VkDevice, VkFence v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyFence(1, (uint64_t)v); }
 static VkResult VKAPI_CALL icd_vkWaitForFences(VkDevice, uint32_t count, const VkFence* p, VkBool32 waitAll, uint64_t timeout) {
     if (count > 0 && p) {
-        // Cast VkFence array to uint64_t array (both are 8 bytes, same representation)
+        fprintf(stderr, "[ICD] WaitForFences: count=%u fences=[", count);
+        for (uint32_t i = 0; i < count; i++) fprintf(stderr, "%s%llu", i?",":"", (unsigned long long)(uint64_t)p[i]);
+        fprintf(stderr, "] waitAll=%u\n", waitAll);
         g_icd.encoder.cmdWaitForFences(1, count, reinterpret_cast<const uint64_t*>(p), waitAll, timeout);
     }
     return VK_SUCCESS;
@@ -1259,40 +1261,53 @@ static VkResult VKAPI_CALL icd_vkGetFenceStatus(VkDevice, VkFence) { return VK_S
 // --- Queue submit ---
 
 static VkResult VKAPI_CALL icd_vkQueueSubmit(VkQueue q, uint32_t count, const VkSubmitInfo* pSubmits, VkFence fence) {
+    fprintf(stderr, "[ICD] QueueSubmit: count=%u fence=%llu\n", count, (unsigned long long)(uint64_t)fence);
     for (uint32_t i = 0; i < count; i++) {
         uint32_t cbCount = pSubmits[i].commandBufferCount;
         uint64_t waitSem = pSubmits[i].waitSemaphoreCount > 0 ? (uint64_t)pSubmits[i].pWaitSemaphores[0] : 0;
         uint64_t sigSem = pSubmits[i].signalSemaphoreCount > 0 ? (uint64_t)pSubmits[i].pSignalSemaphores[0] : 0;
-        fprintf(stderr, "[ICD] QueueSubmit: submit[%u] cbCount=%u waitSem=%llu sigSem=%llu\n",
-                i, cbCount, (unsigned long long)waitSem, (unsigned long long)sigSem);
-        // Encode ALL command buffers, not just the first one.
-        // Only the first CB gets the wait semaphore, only the last CB gets signal semaphore + fence.
-        for (uint32_t j = 0; j < cbCount; j++) {
-            uint64_t cbId = toId(pSubmits[i].pCommandBuffers[j]);
-            uint64_t ws = (j == 0) ? waitSem : 0;
-            uint64_t ss = (j == cbCount - 1) ? sigSem : 0;
-            uint64_t f  = (i == count - 1 && j == cbCount - 1) ? (uint64_t)fence : 0;
-            fprintf(stderr, "[ICD]   -> cb[%u]=%llu ws=%llu ss=%llu fence=%llu\n",
-                    j, (unsigned long long)cbId, (unsigned long long)ws, (unsigned long long)ss, (unsigned long long)f);
-            g_icd.encoder.cmdQueueSubmit(toId(q), cbId, ws, ss, f);
+        bool isLast = (i == count - 1);
+        if (cbCount == 0) {
+            // No command buffers — still need to forward semaphores and fence
+            uint64_t f = isLast ? (uint64_t)fence : 0;
+            if (waitSem || sigSem || f) {
+                g_icd.encoder.cmdQueueSubmit(toId(q), 0, waitSem, sigSem, f);
+            }
+        } else {
+            for (uint32_t j = 0; j < cbCount; j++) {
+                uint64_t cbId = toId(pSubmits[i].pCommandBuffers[j]);
+                uint64_t ws = (j == 0) ? waitSem : 0;
+                uint64_t ss = (j == cbCount - 1) ? sigSem : 0;
+                uint64_t f  = (isLast && j == cbCount - 1) ? (uint64_t)fence : 0;
+                g_icd.encoder.cmdQueueSubmit(toId(q), cbId, ws, ss, f);
+            }
         }
     }
     return VK_SUCCESS;
 }
 
 static VkResult VKAPI_CALL icd_vkQueueSubmit2(VkQueue q, uint32_t count, const VkSubmitInfo2* pSubmits, VkFence fence) {
+    fprintf(stderr, "[ICD] QueueSubmit2: count=%u fence=%llu\n", count, (unsigned long long)(uint64_t)fence);
     for (uint32_t i = 0; i < count; i++) {
         uint32_t cbCount = pSubmits[i].commandBufferInfoCount;
+        fprintf(stderr, "[ICD]   submit[%u]: cbCount=%u waitSem=%u sigSem=%u\n",
+                i, cbCount, pSubmits[i].waitSemaphoreInfoCount, pSubmits[i].signalSemaphoreInfoCount);
         uint64_t waitSem = pSubmits[i].waitSemaphoreInfoCount > 0 ? (uint64_t)pSubmits[i].pWaitSemaphoreInfos[0].semaphore : 0;
         uint64_t sigSem = pSubmits[i].signalSemaphoreInfoCount > 0 ? (uint64_t)pSubmits[i].pSignalSemaphoreInfos[0].semaphore : 0;
-        fprintf(stderr, "[ICD] QueueSubmit2: submit[%u] cbCount=%u\n", i, cbCount);
-        for (uint32_t j = 0; j < cbCount; j++) {
-            uint64_t cbId = toId(pSubmits[i].pCommandBufferInfos[j].commandBuffer);
-            uint64_t ws = (j == 0) ? waitSem : 0;
-            uint64_t ss = (j == cbCount - 1) ? sigSem : 0;
-            uint64_t f  = (i == count - 1 && j == cbCount - 1) ? (uint64_t)fence : 0;
-            fprintf(stderr, "[ICD]   -> cb[%u]=%llu\n", j, (unsigned long long)cbId);
-            g_icd.encoder.cmdQueueSubmit(toId(q), cbId, ws, ss, f);
+        bool isLast = (i == count - 1);
+        if (cbCount == 0) {
+            uint64_t f = isLast ? (uint64_t)fence : 0;
+            if (waitSem || sigSem || f) {
+                g_icd.encoder.cmdQueueSubmit(toId(q), 0, waitSem, sigSem, f);
+            }
+        } else {
+            for (uint32_t j = 0; j < cbCount; j++) {
+                uint64_t cbId = toId(pSubmits[i].pCommandBufferInfos[j].commandBuffer);
+                uint64_t ws = (j == 0) ? waitSem : 0;
+                uint64_t ss = (j == cbCount - 1) ? sigSem : 0;
+                uint64_t f  = (isLast && j == cbCount - 1) ? (uint64_t)fence : 0;
+                g_icd.encoder.cmdQueueSubmit(toId(q), cbId, ws, ss, f);
+            }
         }
     }
     return VK_SUCCESS;

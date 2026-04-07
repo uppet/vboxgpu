@@ -1599,13 +1599,11 @@ void VnDecoder::handleWaitForFences(VnStreamReader& r) {
     fprintf(stderr, "]\n");
     fflush(stderr);
     if (!fences.empty()) {
-        // Cap timeout: our bridge doesn't implement all fence-signaling paths
-        // (e.g. DXVK internal fences not tied to QueueSubmit). Without a cap,
-        // unsignaled fences cause permanent blocking.
+        // TODO: cap timeout until all fence-signal paths are implemented
         constexpr uint64_t MAX_WAIT_NS = 100000000ULL; // 100ms
-        uint64_t cappedTimeout = (timeout > MAX_WAIT_NS) ? MAX_WAIT_NS : timeout;
+        uint64_t t = (timeout > MAX_WAIT_NS) ? MAX_WAIT_NS : timeout;
         vkWaitForFences(device_, (uint32_t)fences.size(), fences.data(),
-                        waitAll ? VK_TRUE : VK_FALSE, cappedTimeout);
+                        waitAll ? VK_TRUE : VK_FALSE, t);
     }
 }
 
