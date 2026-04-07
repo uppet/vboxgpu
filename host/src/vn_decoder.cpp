@@ -1591,9 +1591,22 @@ void VnDecoder::handleWaitForFences(VnStreamReader& r) {
     (void)deviceId;
     // Remove null fences (unknown IDs)
     fences.erase(std::remove(fences.begin(), fences.end(), VK_NULL_HANDLE), fences.end());
-    if (!fences.empty())
+    fprintf(stderr, "[Decoder] WaitForFences: count=%u valid=%zu fencePtrs=[",
+            fenceCount, fences.size(), waitAll, (unsigned long long)timeout);
+    // Re-read fence IDs for logging (we already consumed them, so log the VkFence pointers)
+    for (size_t i = 0; i < fences.size(); i++)
+        fprintf(stderr, "%s%p", i ? "," : "", (void*)fences[i]);
+    fprintf(stderr, "]\n");
+    fflush(stderr);
+    if (!fences.empty()) {
+        // Cap timeout: our bridge doesn't implement all fence-signaling paths
+        // (e.g. DXVK internal fences not tied to QueueSubmit). Without a cap,
+        // unsignaled fences cause permanent blocking.
+        constexpr uint64_t MAX_WAIT_NS = 100000000ULL; // 100ms
+        uint64_t cappedTimeout = (timeout > MAX_WAIT_NS) ? MAX_WAIT_NS : timeout;
         vkWaitForFences(device_, (uint32_t)fences.size(), fences.data(),
-                        waitAll ? VK_TRUE : VK_FALSE, timeout);
+                        waitAll ? VK_TRUE : VK_FALSE, cappedTimeout);
+    }
 }
 
 void VnDecoder::handleResetFences(VnStreamReader& r) {

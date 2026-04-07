@@ -328,7 +328,6 @@ int main(int argc, char* argv[]) {
     std::thread workerThread([&]() {
         constexpr size_t BUF_SIZE = 64 * 1024 * 1024; // 64 MB max per message
         std::vector<uint8_t> recvBuf(BUF_SIZE);
-
         while (g_running) {
             // Receive a command stream message (blocking)
             size_t bytesRead = 0;
