@@ -5,6 +5,32 @@
 #include "vn_stream.h"
 #include <vector>
 
+struct VnDecode_vkAllocateMemory {
+    uint64_t device;
+    uint64_t pMemory;
+    uint64_t pAllocateInfo_allocationSize;
+    uint32_t pAllocateInfo_memoryTypeIndex;
+};
+
+static inline void vn_decode_vkAllocateMemory(VnStreamReader* r, VnDecode_vkAllocateMemory* args)
+{
+    args->device = r->readU64();
+    args->pMemory = r->readU64();
+    args->pAllocateInfo_allocationSize = r->readU64();
+    args->pAllocateInfo_memoryTypeIndex = r->readU32();
+}
+
+struct VnDecode_vkBeginCommandBuffer {
+    uint64_t commandBuffer;
+    uint32_t pBeginInfo_flags;
+};
+
+static inline void vn_decode_vkBeginCommandBuffer(VnStreamReader* r, VnDecode_vkBeginCommandBuffer* args)
+{
+    args->commandBuffer = r->readU64();
+    args->pBeginInfo_flags = r->readU32();
+}
+
 struct VnDecode_vkBindBufferMemory {
     uint64_t device;
     uint64_t buffer;
@@ -37,8 +63,8 @@ static inline void vn_decode_vkBindImageMemory(VnStreamReader* r, VnDecode_vkBin
 
 struct VnDecode_vkCmdBindDescriptorSets {
     uint64_t commandBuffer;
-    uint32_t pipelineBindPoint;
     uint64_t layout;
+    uint32_t pipelineBindPoint;
     uint32_t firstSet;
     uint32_t descriptorSetCount;
     std::vector<uint64_t> pDescriptorSets;
@@ -49,8 +75,8 @@ struct VnDecode_vkCmdBindDescriptorSets {
 static inline void vn_decode_vkCmdBindDescriptorSets(VnStreamReader* r, VnDecode_vkCmdBindDescriptorSets* args)
 {
     args->commandBuffer = r->readU64();
-    args->pipelineBindPoint = r->readU32();
     args->layout = r->readU64();
+    args->pipelineBindPoint = r->readU32();
     args->firstSet = r->readU32();
     args->descriptorSetCount = r->readU32();
     args->pDescriptorSets.resize(args->descriptorSetCount);
@@ -79,15 +105,15 @@ static inline void vn_decode_vkCmdBindIndexBuffer(VnStreamReader* r, VnDecode_vk
 
 struct VnDecode_vkCmdBindPipeline {
     uint64_t commandBuffer;
-    uint32_t pipelineBindPoint;
     uint64_t pipeline;
+    uint32_t pipelineBindPoint;
 };
 
 static inline void vn_decode_vkCmdBindPipeline(VnStreamReader* r, VnDecode_vkCmdBindPipeline* args)
 {
     args->commandBuffer = r->readU64();
-    args->pipelineBindPoint = r->readU32();
     args->pipeline = r->readU64();
+    args->pipelineBindPoint = r->readU32();
 }
 
 struct VnDecode_vkCmdBindVertexBuffers {
@@ -278,6 +304,127 @@ static inline void vn_decode_vkCmdUpdateBuffer(VnStreamReader* r, VnDecode_vkCmd
     args->dataSize = r->readU64();
     args->pData.resize(args->dataSize);
     r->readBytes(args->pData.data(), args->dataSize);
+}
+
+struct VnDecode_vkCreateCommandPool {
+    uint64_t device;
+    uint64_t pCommandPool;
+    uint32_t pCreateInfo_flags;
+    uint32_t pCreateInfo_queueFamilyIndex;
+};
+
+static inline void vn_decode_vkCreateCommandPool(VnStreamReader* r, VnDecode_vkCreateCommandPool* args)
+{
+    args->device = r->readU64();
+    args->pCommandPool = r->readU64();
+    args->pCreateInfo_flags = r->readU32();
+    args->pCreateInfo_queueFamilyIndex = r->readU32();
+}
+
+struct VnDecode_vkCreateFence {
+    uint64_t device;
+    uint64_t pFence;
+    uint32_t pCreateInfo_flags;
+};
+
+static inline void vn_decode_vkCreateFence(VnStreamReader* r, VnDecode_vkCreateFence* args)
+{
+    args->device = r->readU64();
+    args->pFence = r->readU64();
+    args->pCreateInfo_flags = r->readU32();
+}
+
+struct VnDecode_vkCreateImageView {
+    uint64_t device;
+    uint64_t pView;
+    uint32_t pCreateInfo_flags;
+    uint64_t pCreateInfo_image;
+    uint32_t pCreateInfo_viewType;
+    uint32_t pCreateInfo_format;
+    uint32_t pCreateInfo_components_r;
+    uint32_t pCreateInfo_components_g;
+    uint32_t pCreateInfo_components_b;
+    uint32_t pCreateInfo_components_a;
+    uint32_t pCreateInfo_subresourceRange_aspectMask;
+    uint32_t pCreateInfo_subresourceRange_baseMipLevel;
+    uint32_t pCreateInfo_subresourceRange_levelCount;
+    uint32_t pCreateInfo_subresourceRange_baseArrayLayer;
+    uint32_t pCreateInfo_subresourceRange_layerCount;
+};
+
+static inline void vn_decode_vkCreateImageView(VnStreamReader* r, VnDecode_vkCreateImageView* args)
+{
+    args->device = r->readU64();
+    args->pView = r->readU64();
+    args->pCreateInfo_flags = r->readU32();
+    args->pCreateInfo_image = r->readU64();
+    args->pCreateInfo_viewType = r->readU32();
+    args->pCreateInfo_format = r->readU32();
+    args->pCreateInfo_components_r = r->readU32();
+    args->pCreateInfo_components_g = r->readU32();
+    args->pCreateInfo_components_b = r->readU32();
+    args->pCreateInfo_components_a = r->readU32();
+    args->pCreateInfo_subresourceRange_aspectMask = r->readU32();
+    args->pCreateInfo_subresourceRange_baseMipLevel = r->readU32();
+    args->pCreateInfo_subresourceRange_levelCount = r->readU32();
+    args->pCreateInfo_subresourceRange_baseArrayLayer = r->readU32();
+    args->pCreateInfo_subresourceRange_layerCount = r->readU32();
+}
+
+struct VnDecode_vkCreateSampler {
+    uint64_t device;
+    uint64_t pSampler;
+    uint32_t pCreateInfo_flags;
+    uint32_t pCreateInfo_magFilter;
+    uint32_t pCreateInfo_minFilter;
+    uint32_t pCreateInfo_mipmapMode;
+    uint32_t pCreateInfo_addressModeU;
+    uint32_t pCreateInfo_addressModeV;
+    uint32_t pCreateInfo_addressModeW;
+    float pCreateInfo_mipLodBias;
+    uint32_t pCreateInfo_anisotropyEnable;
+    float pCreateInfo_maxAnisotropy;
+    uint32_t pCreateInfo_compareEnable;
+    uint32_t pCreateInfo_compareOp;
+    float pCreateInfo_minLod;
+    float pCreateInfo_maxLod;
+    uint32_t pCreateInfo_borderColor;
+    uint32_t pCreateInfo_unnormalizedCoordinates;
+};
+
+static inline void vn_decode_vkCreateSampler(VnStreamReader* r, VnDecode_vkCreateSampler* args)
+{
+    args->device = r->readU64();
+    args->pSampler = r->readU64();
+    args->pCreateInfo_flags = r->readU32();
+    args->pCreateInfo_magFilter = r->readU32();
+    args->pCreateInfo_minFilter = r->readU32();
+    args->pCreateInfo_mipmapMode = r->readU32();
+    args->pCreateInfo_addressModeU = r->readU32();
+    args->pCreateInfo_addressModeV = r->readU32();
+    args->pCreateInfo_addressModeW = r->readU32();
+    args->pCreateInfo_mipLodBias = r->readF32();
+    args->pCreateInfo_anisotropyEnable = r->readU32();
+    args->pCreateInfo_maxAnisotropy = r->readF32();
+    args->pCreateInfo_compareEnable = r->readU32();
+    args->pCreateInfo_compareOp = r->readU32();
+    args->pCreateInfo_minLod = r->readF32();
+    args->pCreateInfo_maxLod = r->readF32();
+    args->pCreateInfo_borderColor = r->readU32();
+    args->pCreateInfo_unnormalizedCoordinates = r->readU32();
+}
+
+struct VnDecode_vkCreateSemaphore {
+    uint64_t device;
+    uint64_t pSemaphore;
+    uint32_t pCreateInfo_flags;
+};
+
+static inline void vn_decode_vkCreateSemaphore(VnStreamReader* r, VnDecode_vkCreateSemaphore* args)
+{
+    args->device = r->readU64();
+    args->pSemaphore = r->readU64();
+    args->pCreateInfo_flags = r->readU32();
 }
 
 struct VnDecode_vkDestroyBuffer {

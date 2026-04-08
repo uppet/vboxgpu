@@ -171,6 +171,80 @@ class VkRegistry:
         return 0
 
 
+# ── Struct serialization ─────────────────────────────────────────────────────
+
+def is_simple_scalar_struct(reg, type_name, depth=0):
+    """Check if a struct type has only scalar/enum/handle members (no arrays, no complex pointers).
+    Allows nested structs up to depth 2 if they are also simple scalar structs."""
+    if depth > 2:
+        return False
+    t = reg.types.get(type_name)
+    if not t or t.category != 'struct':
+        return False
+    for m in t.members:
+        if m.name in ('sType', 'pNext'):
+            continue
+        if m.is_pointer:
+            # Allow optional handle arrays (we'll write count=0) — but not required arrays
+            if m.optional:
+                continue
+            return False
+        if reg.is_handle(m.type_name):
+            continue
+        if reg.get_scalar_size(m.type_name) > 0:
+            continue
+        # Nested struct — must also be simple scalar
+        if reg.is_struct(m.type_name):
+            if is_simple_scalar_struct(reg, m.type_name, depth + 1):
+                continue
+            return False
+        return False
+    return True
+
+def can_serialize_struct(reg, type_name):
+    """Check if codegen can serialize this struct type."""
+    return is_simple_scalar_struct(reg, type_name)
+
+def get_struct_wire_members(reg, struct_type):
+    """Return flat list of (write_fn, read_fn, field_expr, c_type) for struct serialization.
+    Nested scalar structs are inlined."""
+    members = []
+    for m in struct_type.members:
+        if m.name in ('sType', 'pNext'):
+            continue
+        if m.is_pointer:
+            # Optional pointer — skip (write nothing; decoder skips)
+            continue
+        if reg.is_handle(m.type_name):
+            members.append(('writeU64', 'readU64', m.name, 'uint64_t'))
+        elif m.type_name == 'float':
+            members.append(('writeF32', 'readF32', m.name, 'float'))
+        elif m.type_name == 'int32_t':
+            members.append(('writeI32', 'readI32', m.name, 'int32_t'))
+        elif reg.get_scalar_size(m.type_name) == 8:
+            members.append(('writeU64', 'readU64', m.name, 'uint64_t'))
+        elif reg.get_scalar_size(m.type_name) > 0:
+            members.append(('writeU32', 'readU32', m.name, 'uint32_t'))
+        elif reg.is_struct(m.type_name):
+            # Inline nested struct members
+            nested = reg.types[m.type_name]
+            for nm in nested.members:
+                prefix = f'{m.name}.{nm.name}'
+                if nm.is_pointer:
+                    continue
+                if reg.is_handle(nm.type_name):
+                    members.append(('writeU64', 'readU64', prefix, 'uint64_t'))
+                elif nm.type_name == 'float':
+                    members.append(('writeF32', 'readF32', prefix, 'float'))
+                elif nm.type_name == 'int32_t':
+                    members.append(('writeI32', 'readI32', prefix, 'int32_t'))
+                elif reg.get_scalar_size(nm.type_name) == 8:
+                    members.append(('writeU64', 'readU64', prefix, 'uint64_t'))
+                elif reg.get_scalar_size(nm.type_name) > 0:
+                    members.append(('writeU32', 'readU32', prefix, 'uint32_t'))
+    return members
+
+
 # ── Parameter classification ─────────────────────────────────────────────────
 
 # Pointer types we skip entirely (always NULL in our bridge)
@@ -200,10 +274,19 @@ def classify_param(reg, param):
             if reg.get_scalar_size(param.type_name) > 0:
                 return 'scalar_array'
 
+    # Output handle pointer: non-const handle* without len (e.g. VkFence* pFence)
+    if not param.is_const and not param.len_expr and reg.is_handle(param.type_name):
+        return 'output_handle'
+
+    # Const struct pointer without len (e.g. const VkFenceCreateInfo* pCreateInfo)
+    if param.is_const and not param.len_expr and reg.is_struct(param.type_name):
+        if can_serialize_struct(reg, param.type_name):
+            return 'struct'
+
     return 'complex'
 
 def can_generate(reg, cmd):
-    """Check if all params can be code-generated (scalars, handles, ignorable, arrays)."""
+    """Check if all params can be code-generated (scalars, handles, ignorable, arrays, structs)."""
     for p in cmd.params:
         cls = classify_param(reg, p)
         if cls in ('unknown', 'complex'):
@@ -221,6 +304,8 @@ def param_c_type_enc(reg, param, cls):
     """Return the C type for a param in the encoder function signature."""
     if cls == 'handle':
         return 'uint64_t'
+    if cls == 'output_handle':
+        return 'uint64_t'  # ICD sends the assigned handle ID
     if cls == 'scalar':
         if param.type_name == 'float':
             return 'float'
@@ -233,11 +318,15 @@ def param_c_type_enc(reg, param, cls):
         return 'const uint64_t*' if reg.get_scalar_size(param.type_name) == 8 else 'const uint32_t*'
     if cls == 'byte_data':
         return 'const void*'
+    if cls == 'struct':
+        return None  # struct members are inlined, no single param
     return None  # ignorable
 
 def param_c_type_dec(reg, param, cls):
     """Return the C type for a param in the decoder struct."""
     if cls == 'handle':
+        return 'uint64_t'
+    if cls == 'output_handle':
         return 'uint64_t'
     if cls == 'scalar':
         if param.type_name == 'float':
@@ -252,28 +341,55 @@ def param_c_type_dec(reg, param, cls):
         return f'std::vector<{elem}>'
     if cls == 'byte_data':
         return 'std::vector<uint8_t>'
+    if cls == 'struct':
+        return None  # struct members inlined into decoder struct
     return None  # ignorable
 
 
 # ── Code generation ─────────────────────────────────────────────────────────
 
+def _order_params(reg, cmd):
+    """Reorder params: handles and output_handles first, then structs, then rest.
+    This matches the existing manual wire format: (device, objectId, ...struct fields)."""
+    first = []   # handles + output_handles
+    rest = []    # everything else
+    for p in cmd.params:
+        cls = classify_param(reg, p)
+        if cls in ('handle', 'output_handle'):
+            first.append(p)
+        else:
+            rest.append(p)
+    return first + rest
+
 def gen_encoder(reg, cmd):
     """Generate encoder function for a command."""
     lines = []
     lines.append(f'static inline void vn_encode_{cmd.name}(VnStreamWriter* w')
-    for p in cmd.params:
+
+    ordered = _order_params(reg, cmd)
+
+    # Build parameter list: struct params become individual member params
+    for p in ordered:
         cls = classify_param(reg, p)
         if cls == 'ignorable':
             continue
-        ctype = param_c_type_enc(reg, p, cls)
-        lines.append(f'    , {ctype} {p.name}')
+        if cls == 'struct':
+            # Inline struct members as individual params
+            st = reg.types[p.type_name]
+            for wfn, rfn, field, ctype in get_struct_wire_members(reg, st):
+                safe_name = field.replace('.', '_')
+                lines.append(f'    , {ctype} {p.name}_{safe_name}')
+        else:
+            ctype = param_c_type_enc(reg, p, cls)
+            lines.append(f'    , {ctype} {p.name}')
     lines.append(')')
     lines.append('{')
-    for p in cmd.params:
+
+    for p in ordered:
         cls = classify_param(reg, p)
         if cls == 'ignorable':
             continue
-        if cls == 'handle':
+        if cls in ('handle', 'output_handle'):
             lines.append(f'    w->writeU64({p.name});')
         elif cls == 'scalar':
             if p.type_name == 'float':
@@ -284,6 +400,11 @@ def gen_encoder(reg, cmd):
                 lines.append(f'    w->writeU64({p.name});')
             else:
                 lines.append(f'    w->writeU32({p.name});')
+        elif cls == 'struct':
+            st = reg.types[p.type_name]
+            for wfn, rfn, field, ctype in get_struct_wire_members(reg, st):
+                safe_name = field.replace('.', '_')
+                lines.append(f'    w->{wfn}({p.name}_{safe_name});')
         elif cls == 'handle_array':
             count = get_len_param_name(p)
             lines.append(f'    for (uint32_t i = 0; i < {count}; i++)')
@@ -303,22 +424,32 @@ def gen_decoder(reg, cmd):
     """Generate decoder struct + decode function for a command."""
     lines = []
     struct_name = f'VnDecode_{cmd.name}'
+
+    ordered = _order_params(reg, cmd)
+
     lines.append(f'struct {struct_name} {{')
-    for p in cmd.params:
+    for p in ordered:
         cls = classify_param(reg, p)
         if cls == 'ignorable':
             continue
-        ctype = param_c_type_dec(reg, p, cls)
-        lines.append(f'    {ctype} {p.name};')
+        if cls == 'struct':
+            # Inline struct members into decoder struct
+            st = reg.types[p.type_name]
+            for wfn, rfn, field, ctype in get_struct_wire_members(reg, st):
+                safe_name = field.replace('.', '_')
+                lines.append(f'    {ctype} {p.name}_{safe_name};')
+        else:
+            ctype = param_c_type_dec(reg, p, cls)
+            lines.append(f'    {ctype} {p.name};')
     lines.append('};')
     lines.append('')
     lines.append(f'static inline void vn_decode_{cmd.name}(VnStreamReader* r, {struct_name}* args)')
     lines.append('{')
-    for p in cmd.params:
+    for p in ordered:
         cls = classify_param(reg, p)
         if cls == 'ignorable':
             continue
-        if cls == 'handle':
+        if cls in ('handle', 'output_handle'):
             lines.append(f'    args->{p.name} = r->readU64();')
         elif cls == 'scalar':
             if p.type_name == 'float':
@@ -329,6 +460,11 @@ def gen_decoder(reg, cmd):
                 lines.append(f'    args->{p.name} = r->readU64();')
             else:
                 lines.append(f'    args->{p.name} = r->readU32();')
+        elif cls == 'struct':
+            st = reg.types[p.type_name]
+            for wfn, rfn, field, ctype in get_struct_wire_members(reg, st):
+                safe_name = field.replace('.', '_')
+                lines.append(f'    args->{p.name}_{safe_name} = r->{rfn}();')
         elif cls == 'handle_array':
             count = get_len_param_name(p)
             lines.append(f'    args->{p.name}.resize(args->{count});')

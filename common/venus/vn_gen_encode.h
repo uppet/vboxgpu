@@ -4,6 +4,28 @@
 
 #include "vn_stream.h"
 
+static inline void vn_encode_vkAllocateMemory(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t pMemory
+    , uint64_t pAllocateInfo_allocationSize
+    , uint32_t pAllocateInfo_memoryTypeIndex
+)
+{
+    w->writeU64(device);
+    w->writeU64(pMemory);
+    w->writeU64(pAllocateInfo_allocationSize);
+    w->writeU32(pAllocateInfo_memoryTypeIndex);
+}
+
+static inline void vn_encode_vkBeginCommandBuffer(VnStreamWriter* w
+    , uint64_t commandBuffer
+    , uint32_t pBeginInfo_flags
+)
+{
+    w->writeU64(commandBuffer);
+    w->writeU32(pBeginInfo_flags);
+}
+
 static inline void vn_encode_vkBindBufferMemory(VnStreamWriter* w
     , uint64_t device
     , uint64_t buffer
@@ -32,8 +54,8 @@ static inline void vn_encode_vkBindImageMemory(VnStreamWriter* w
 
 static inline void vn_encode_vkCmdBindDescriptorSets(VnStreamWriter* w
     , uint64_t commandBuffer
-    , uint32_t pipelineBindPoint
     , uint64_t layout
+    , uint32_t pipelineBindPoint
     , uint32_t firstSet
     , uint32_t descriptorSetCount
     , const uint64_t* pDescriptorSets
@@ -42,8 +64,8 @@ static inline void vn_encode_vkCmdBindDescriptorSets(VnStreamWriter* w
 )
 {
     w->writeU64(commandBuffer);
-    w->writeU32(pipelineBindPoint);
     w->writeU64(layout);
+    w->writeU32(pipelineBindPoint);
     w->writeU32(firstSet);
     w->writeU32(descriptorSetCount);
     for (uint32_t i = 0; i < descriptorSetCount; i++)
@@ -68,13 +90,13 @@ static inline void vn_encode_vkCmdBindIndexBuffer(VnStreamWriter* w
 
 static inline void vn_encode_vkCmdBindPipeline(VnStreamWriter* w
     , uint64_t commandBuffer
-    , uint32_t pipelineBindPoint
     , uint64_t pipeline
+    , uint32_t pipelineBindPoint
 )
 {
     w->writeU64(commandBuffer);
-    w->writeU32(pipelineBindPoint);
     w->writeU64(pipeline);
+    w->writeU32(pipelineBindPoint);
 }
 
 static inline void vn_encode_vkCmdBindVertexBuffers(VnStreamWriter* w
@@ -233,6 +255,117 @@ static inline void vn_encode_vkCmdUpdateBuffer(VnStreamWriter* w
     w->writeU64(dstOffset);
     w->writeU64(dataSize);
     w->writeBytes(pData, dataSize);
+}
+
+static inline void vn_encode_vkCreateCommandPool(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t pCommandPool
+    , uint32_t pCreateInfo_flags
+    , uint32_t pCreateInfo_queueFamilyIndex
+)
+{
+    w->writeU64(device);
+    w->writeU64(pCommandPool);
+    w->writeU32(pCreateInfo_flags);
+    w->writeU32(pCreateInfo_queueFamilyIndex);
+}
+
+static inline void vn_encode_vkCreateFence(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t pFence
+    , uint32_t pCreateInfo_flags
+)
+{
+    w->writeU64(device);
+    w->writeU64(pFence);
+    w->writeU32(pCreateInfo_flags);
+}
+
+static inline void vn_encode_vkCreateImageView(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t pView
+    , uint32_t pCreateInfo_flags
+    , uint64_t pCreateInfo_image
+    , uint32_t pCreateInfo_viewType
+    , uint32_t pCreateInfo_format
+    , uint32_t pCreateInfo_components_r
+    , uint32_t pCreateInfo_components_g
+    , uint32_t pCreateInfo_components_b
+    , uint32_t pCreateInfo_components_a
+    , uint32_t pCreateInfo_subresourceRange_aspectMask
+    , uint32_t pCreateInfo_subresourceRange_baseMipLevel
+    , uint32_t pCreateInfo_subresourceRange_levelCount
+    , uint32_t pCreateInfo_subresourceRange_baseArrayLayer
+    , uint32_t pCreateInfo_subresourceRange_layerCount
+)
+{
+    w->writeU64(device);
+    w->writeU64(pView);
+    w->writeU32(pCreateInfo_flags);
+    w->writeU64(pCreateInfo_image);
+    w->writeU32(pCreateInfo_viewType);
+    w->writeU32(pCreateInfo_format);
+    w->writeU32(pCreateInfo_components_r);
+    w->writeU32(pCreateInfo_components_g);
+    w->writeU32(pCreateInfo_components_b);
+    w->writeU32(pCreateInfo_components_a);
+    w->writeU32(pCreateInfo_subresourceRange_aspectMask);
+    w->writeU32(pCreateInfo_subresourceRange_baseMipLevel);
+    w->writeU32(pCreateInfo_subresourceRange_levelCount);
+    w->writeU32(pCreateInfo_subresourceRange_baseArrayLayer);
+    w->writeU32(pCreateInfo_subresourceRange_layerCount);
+}
+
+static inline void vn_encode_vkCreateSampler(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t pSampler
+    , uint32_t pCreateInfo_flags
+    , uint32_t pCreateInfo_magFilter
+    , uint32_t pCreateInfo_minFilter
+    , uint32_t pCreateInfo_mipmapMode
+    , uint32_t pCreateInfo_addressModeU
+    , uint32_t pCreateInfo_addressModeV
+    , uint32_t pCreateInfo_addressModeW
+    , float pCreateInfo_mipLodBias
+    , uint32_t pCreateInfo_anisotropyEnable
+    , float pCreateInfo_maxAnisotropy
+    , uint32_t pCreateInfo_compareEnable
+    , uint32_t pCreateInfo_compareOp
+    , float pCreateInfo_minLod
+    , float pCreateInfo_maxLod
+    , uint32_t pCreateInfo_borderColor
+    , uint32_t pCreateInfo_unnormalizedCoordinates
+)
+{
+    w->writeU64(device);
+    w->writeU64(pSampler);
+    w->writeU32(pCreateInfo_flags);
+    w->writeU32(pCreateInfo_magFilter);
+    w->writeU32(pCreateInfo_minFilter);
+    w->writeU32(pCreateInfo_mipmapMode);
+    w->writeU32(pCreateInfo_addressModeU);
+    w->writeU32(pCreateInfo_addressModeV);
+    w->writeU32(pCreateInfo_addressModeW);
+    w->writeF32(pCreateInfo_mipLodBias);
+    w->writeU32(pCreateInfo_anisotropyEnable);
+    w->writeF32(pCreateInfo_maxAnisotropy);
+    w->writeU32(pCreateInfo_compareEnable);
+    w->writeU32(pCreateInfo_compareOp);
+    w->writeF32(pCreateInfo_minLod);
+    w->writeF32(pCreateInfo_maxLod);
+    w->writeU32(pCreateInfo_borderColor);
+    w->writeU32(pCreateInfo_unnormalizedCoordinates);
+}
+
+static inline void vn_encode_vkCreateSemaphore(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t pSemaphore
+    , uint32_t pCreateInfo_flags
+)
+{
+    w->writeU64(device);
+    w->writeU64(pSemaphore);
+    w->writeU32(pCreateInfo_flags);
 }
 
 static inline void vn_encode_vkDestroyBuffer(VnStreamWriter* w
@@ -406,10 +539,8 @@ static inline void vn_encode_vkWaitForFences(VnStreamWriter* w
 }
 
 // ── Not yet generated (complex parameter types) ──
-// TODO: vkAllocateCommandBuffers — complex: VkCommandBufferAllocateInfo* pAllocateInfo, VkCommandBuffer* pCommandBuffers
+// TODO: vkAllocateCommandBuffers — complex: VkCommandBuffer* pCommandBuffers
 // TODO: vkAllocateDescriptorSets — complex: VkDescriptorSetAllocateInfo* pAllocateInfo, VkDescriptorSet* pDescriptorSets
-// TODO: vkAllocateMemory — complex: VkMemoryAllocateInfo* pAllocateInfo, VkDeviceMemory* pMemory
-// TODO: vkBeginCommandBuffer — complex: VkCommandBufferBeginInfo* pBeginInfo
 // TODO: vkCmdBeginRenderPass — complex: VkRenderPassBeginInfo* pRenderPassBegin
 // TODO: vkCmdBeginRendering — complex: VkRenderingInfo* pRenderingInfo
 // TODO: vkCmdBindVertexBuffers2 — complex: VkDeviceSize* pSizes, VkDeviceSize* pStrides
@@ -420,19 +551,14 @@ static inline void vn_encode_vkWaitForFences(VnStreamWriter* w
 // TODO: vkCmdPipelineBarrier — complex: VkMemoryBarrier* pMemoryBarriers, VkBufferMemoryBarrier* pBufferMemoryBarriers, VkImageMemoryBarrier* pImageMemoryBarriers
 // TODO: vkCmdSetScissor — complex: VkRect2D* pScissors
 // TODO: vkCmdSetViewport — complex: VkViewport* pViewports
-// TODO: vkCreateBuffer — complex: VkBufferCreateInfo* pCreateInfo, VkBuffer* pBuffer
-// TODO: vkCreateCommandPool — complex: VkCommandPoolCreateInfo* pCreateInfo, VkCommandPool* pCommandPool
-// TODO: vkCreateDescriptorPool — complex: VkDescriptorPoolCreateInfo* pCreateInfo, VkDescriptorPool* pDescriptorPool
-// TODO: vkCreateDescriptorSetLayout — complex: VkDescriptorSetLayoutCreateInfo* pCreateInfo, VkDescriptorSetLayout* pSetLayout
-// TODO: vkCreateFence — complex: VkFenceCreateInfo* pCreateInfo, VkFence* pFence
-// TODO: vkCreateFramebuffer — complex: VkFramebufferCreateInfo* pCreateInfo, VkFramebuffer* pFramebuffer
+// TODO: vkCreateBuffer — complex: VkBufferCreateInfo* pCreateInfo
+// TODO: vkCreateDescriptorPool — complex: VkDescriptorPoolCreateInfo* pCreateInfo
+// TODO: vkCreateDescriptorSetLayout — complex: VkDescriptorSetLayoutCreateInfo* pCreateInfo
+// TODO: vkCreateFramebuffer — complex: VkFramebufferCreateInfo* pCreateInfo
 // TODO: vkCreateGraphicsPipelines — complex: VkGraphicsPipelineCreateInfo* pCreateInfos
-// TODO: vkCreateImage — complex: VkImageCreateInfo* pCreateInfo, VkImage* pImage
-// TODO: vkCreateImageView — complex: VkImageViewCreateInfo* pCreateInfo, VkImageView* pView
-// TODO: vkCreatePipelineLayout — complex: VkPipelineLayoutCreateInfo* pCreateInfo, VkPipelineLayout* pPipelineLayout
-// TODO: vkCreateRenderPass — complex: VkRenderPassCreateInfo* pCreateInfo, VkRenderPass* pRenderPass
-// TODO: vkCreateSampler — complex: VkSamplerCreateInfo* pCreateInfo, VkSampler* pSampler
-// TODO: vkCreateSemaphore — complex: VkSemaphoreCreateInfo* pCreateInfo, VkSemaphore* pSemaphore
-// TODO: vkCreateShaderModule — complex: VkShaderModuleCreateInfo* pCreateInfo, VkShaderModule* pShaderModule
+// TODO: vkCreateImage — complex: VkImageCreateInfo* pCreateInfo
+// TODO: vkCreatePipelineLayout — complex: VkPipelineLayoutCreateInfo* pCreateInfo
+// TODO: vkCreateRenderPass — complex: VkRenderPassCreateInfo* pCreateInfo
+// TODO: vkCreateShaderModule — complex: VkShaderModuleCreateInfo* pCreateInfo
 // TODO: vkQueueSubmit — complex: VkSubmitInfo* pSubmits
 // TODO: vkUpdateDescriptorSets — complex: VkWriteDescriptorSet* pDescriptorWrites, VkCopyDescriptorSet* pDescriptorCopies
