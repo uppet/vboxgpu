@@ -31,11 +31,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Viewport 动态状态转发（含 Y 轴翻转）
 - CullMode / FrontFace 动态状态转发
 - 命令流反汇编工具 + Host 内置 captureScreenshot
-- Venus protocol codegen 框架（32/62 API 自动生成，13 个已集成到 encoder）
+- Venus protocol codegen 框架（32/62 API 自动生成，18 个已集成到 encoder）
+- 资源销毁全链路（15 个 vkDestroy*/vkFreeMemory 命令，host 端正确释放）
+- Present fence 转发（VkSwapchainPresentFenceInfoKHR pNext 解析）
+- Host server worker thread 架构（decoder 独立线程，窗口始终响应）
+- 命令 ID 全量迁移到 Venus VkCommandTypeEXT 标准值
 
 当前状态：
-- 纹理三角形 + HSV 变色动画在 Host 窗口正确渲染
-- 13 个命令已切换到 codegen 生成函数 + Venus 标准命令 ID
+- 纹理三角形 + HSV 变色动画在 Host 窗口正确渲染，~180 fps
+- 18 个命令使用 codegen 生成函数 + Venus 标准命令 ID
+- WaitForFences 使用 Vulkan 原始 timeout 语义（无 cap）
 
 后续：
 - 更多 DX11 测试用例（深度测试、多物体、alpha blend）
