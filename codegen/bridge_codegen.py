@@ -173,76 +173,192 @@ class VkRegistry:
 
 # ── Struct serialization ─────────────────────────────────────────────────────
 
-def is_simple_scalar_struct(reg, type_name, depth=0):
-    """Check if a struct type has only scalar/enum/handle members (no arrays, no complex pointers).
-    Allows nested structs up to depth 2 if they are also simple scalar structs."""
-    if depth > 2:
-        return False
+def _classify_struct_member(reg, m, depth=0):
+    """Classify a struct member for serialization. Returns classification string or None if unsupported."""
+    if m.name in ('sType', 'pNext'):
+        return 'skip'
+    if not m.is_pointer:
+        if reg.is_handle(m.type_name):
+            return 'handle'
+        if reg.get_scalar_size(m.type_name) > 0:
+            return 'scalar'
+        if reg.is_struct(m.type_name) and depth < 2:
+            if _all_struct_members_ok(reg, m.type_name, depth + 1):
+                return 'nested_struct'
+        return None
+    # Pointer member
+    if m.optional and not m.len_expr:
+        return 'skip'  # optional non-array pointer, skip
+    if m.len_expr:
+        len_name = m.len_expr.split(',')[0].strip()
+        if not len_name.isidentifier():
+            return None  # latexmath or complex len expression
+        if reg.is_handle(m.type_name):
+            return 'handle_array'
+        if reg.get_scalar_size(m.type_name) > 0:
+            return 'scalar_array'
+        if reg.is_struct(m.type_name) and depth < 2:
+            if _all_struct_members_ok(reg, m.type_name, depth + 1):
+                return 'struct_array'
+        return None
+    return None
+
+def _all_struct_members_ok(reg, type_name, depth=0):
+    """Check if all members of a struct can be serialized."""
     t = reg.types.get(type_name)
     if not t or t.category != 'struct':
         return False
     for m in t.members:
-        if m.name in ('sType', 'pNext'):
-            continue
-        if m.is_pointer:
-            # Allow optional handle arrays (we'll write count=0) — but not required arrays
-            if m.optional:
-                continue
+        if _classify_struct_member(reg, m, depth) is None:
             return False
-        if reg.is_handle(m.type_name):
-            continue
-        if reg.get_scalar_size(m.type_name) > 0:
-            continue
-        # Nested struct — must also be simple scalar
-        if reg.is_struct(m.type_name):
-            if is_simple_scalar_struct(reg, m.type_name, depth + 1):
-                continue
-            return False
-        return False
     return True
+
+def is_simple_scalar_struct(reg, type_name, depth=0):
+    """Check if a struct can be serialized (scalar members, handle/scalar/struct arrays)."""
+    return _all_struct_members_ok(reg, type_name, depth)
 
 def can_serialize_struct(reg, type_name):
     """Check if codegen can serialize this struct type."""
     return is_simple_scalar_struct(reg, type_name)
 
-def get_struct_wire_members(reg, struct_type):
-    """Return flat list of (write_fn, read_fn, field_expr, c_type) for struct serialization.
-    Nested scalar structs are inlined."""
-    members = []
+def _scalar_wire_info(reg, type_name):
+    """Return (write_fn, read_fn, c_type) for a scalar type, or None."""
+    if reg.is_handle(type_name):
+        return ('writeU64', 'readU64', 'uint64_t')
+    if type_name == 'float':
+        return ('writeF32', 'readF32', 'float')
+    if type_name == 'int32_t':
+        return ('writeI32', 'readI32', 'int32_t')
+    if reg.get_scalar_size(type_name) == 8:
+        return ('writeU64', 'readU64', 'uint64_t')
+    if reg.get_scalar_size(type_name) > 0:
+        return ('writeU32', 'readU32', 'uint32_t')
+    return None
+
+# Wire member types for struct serialization
+# Each entry is a dict with 'kind' and relevant fields
+# kind='scalar': write_fn, read_fn, field, c_type
+# kind='nested': field, sub_members (list of scalar entries)
+# kind='array': field, count_field, elem_kind, elem_info
+
+def get_struct_wire_plan(reg, struct_type):
+    """Return a serialization plan for a struct: list of wire ops."""
+    plan = []
     for m in struct_type.members:
-        if m.name in ('sType', 'pNext'):
+        cls = _classify_struct_member(reg, m)
+        if cls in ('skip', None):
             continue
-        if m.is_pointer:
-            # Optional pointer — skip (write nothing; decoder skips)
-            continue
-        if reg.is_handle(m.type_name):
-            members.append(('writeU64', 'readU64', m.name, 'uint64_t'))
-        elif m.type_name == 'float':
-            members.append(('writeF32', 'readF32', m.name, 'float'))
-        elif m.type_name == 'int32_t':
-            members.append(('writeI32', 'readI32', m.name, 'int32_t'))
-        elif reg.get_scalar_size(m.type_name) == 8:
-            members.append(('writeU64', 'readU64', m.name, 'uint64_t'))
-        elif reg.get_scalar_size(m.type_name) > 0:
-            members.append(('writeU32', 'readU32', m.name, 'uint32_t'))
-        elif reg.is_struct(m.type_name):
-            # Inline nested struct members
+        if cls in ('handle', 'scalar'):
+            info = _scalar_wire_info(reg, m.type_name)
+            if info:
+                plan.append({'kind': 'scalar', 'field': m.name,
+                             'write_fn': info[0], 'read_fn': info[1], 'c_type': info[2]})
+        elif cls == 'nested_struct':
             nested = reg.types[m.type_name]
+            subs = []
             for nm in nested.members:
-                prefix = f'{m.name}.{nm.name}'
-                if nm.is_pointer:
+                if nm.name in ('sType', 'pNext') or nm.is_pointer:
                     continue
-                if reg.is_handle(nm.type_name):
-                    members.append(('writeU64', 'readU64', prefix, 'uint64_t'))
-                elif nm.type_name == 'float':
-                    members.append(('writeF32', 'readF32', prefix, 'float'))
-                elif nm.type_name == 'int32_t':
-                    members.append(('writeI32', 'readI32', prefix, 'int32_t'))
-                elif reg.get_scalar_size(nm.type_name) == 8:
-                    members.append(('writeU64', 'readU64', prefix, 'uint64_t'))
-                elif reg.get_scalar_size(nm.type_name) > 0:
-                    members.append(('writeU32', 'readU32', prefix, 'uint32_t'))
-    return members
+                info = _scalar_wire_info(reg, nm.type_name)
+                if info:
+                    subs.append({'field': nm.name, 'write_fn': info[0],
+                                 'read_fn': info[1], 'c_type': info[2]})
+            plan.append({'kind': 'nested', 'field': m.name, 'sub_members': subs})
+        elif cls in ('handle_array', 'scalar_array'):
+            info = _scalar_wire_info(reg, m.type_name)
+            count_name = m.len_expr.split(',')[0].strip()
+            plan.append({'kind': 'array', 'field': m.name, 'count_field': count_name,
+                         'elem_write': info[0], 'elem_read': info[1], 'elem_c_type': info[2]})
+        elif cls == 'struct_array':
+            nested = reg.types[m.type_name]
+            count_name = m.len_expr.split(',')[0].strip()
+            subs = []
+            for nm in nested.members:
+                if nm.name in ('sType', 'pNext') or nm.is_pointer:
+                    continue
+                info = _scalar_wire_info(reg, nm.type_name)
+                if info:
+                    subs.append({'field': nm.name, 'write_fn': info[0],
+                                 'read_fn': info[1], 'c_type': info[2]})
+            plan.append({'kind': 'struct_array', 'field': m.name, 'count_field': count_name,
+                         'struct_name': m.type_name, 'sub_members': subs})
+    return plan
+
+def get_struct_wire_members(reg, struct_type):
+    """Return flat list of (write_fn, read_fn, field_expr, c_type) for simple struct members.
+    Only returns scalar and nested-scalar members (no arrays)."""
+    result = []
+    plan = get_struct_wire_plan(reg, struct_type)
+    for op in plan:
+        if op['kind'] == 'scalar':
+            result.append((op['write_fn'], op['read_fn'], op['field'], op['c_type']))
+        elif op['kind'] == 'nested':
+            for sub in op['sub_members']:
+                result.append((sub['write_fn'], sub['read_fn'],
+                               f"{op['field']}.{sub['field']}", sub['c_type']))
+        # arrays handled separately in gen_encoder/gen_decoder
+    return result
+
+def _has_array_members(reg, struct_type):
+    """Check if struct has any array members in its wire plan."""
+    plan = get_struct_wire_plan(reg, struct_type)
+    return any(op['kind'] in ('array', 'struct_array') for op in plan)
+
+def _emit_struct_decoder_fields(lines, plan, prefix):
+    """Emit decoder struct fields for a struct wire plan."""
+    for op in plan:
+        if op['kind'] == 'scalar':
+            lines.append(f'    {op["c_type"]} {prefix}{op["field"]};')
+        elif op['kind'] == 'nested':
+            for sub in op['sub_members']:
+                lines.append(f'    {sub["c_type"]} {prefix}{op["field"]}_{sub["field"]};')
+        elif op['kind'] == 'array':
+            lines.append(f'    std::vector<{op["elem_c_type"]}> {prefix}{op["field"]};')
+        elif op['kind'] == 'struct_array':
+            # For struct arrays, store each sub-member as a vector
+            for sub in op['sub_members']:
+                lines.append(f'    std::vector<{sub["c_type"]}> {prefix}{op["field"]}_{sub["field"]};')
+
+def _emit_struct_decode(lines, plan, prefix):
+    """Emit decoder read lines for a struct wire plan."""
+    for op in plan:
+        if op['kind'] == 'scalar':
+            lines.append(f'    {prefix}{op["field"]} = r->{op["read_fn"]}();')
+        elif op['kind'] == 'nested':
+            for sub in op['sub_members']:
+                lines.append(f'    {prefix}{op["field"]}_{sub["field"]} = r->{sub["read_fn"]}();')
+        elif op['kind'] == 'array':
+            f, c = op['field'], op['count_field']
+            lines.append(f'    {prefix}{f}.resize({prefix}{c});')
+            lines.append(f'    for (uint32_t _i = 0; _i < {prefix}{c}; _i++)')
+            lines.append(f'        {prefix}{f}[_i] = r->{op["elem_read"]}();')
+        elif op['kind'] == 'struct_array':
+            f, c = op['field'], op['count_field']
+            for sub in op['sub_members']:
+                lines.append(f'    {prefix}{f}_{sub["field"]}.resize({prefix}{c});')
+            lines.append(f'    for (uint32_t _i = 0; _i < {prefix}{c}; _i++) {{')
+            for sub in op['sub_members']:
+                lines.append(f'        {prefix}{f}_{sub["field"]}[_i] = r->{sub["read_fn"]}();')
+            lines.append(f'    }}')
+
+def _emit_struct_encode(lines, plan, prefix):
+    """Emit encoder lines for a struct wire plan. prefix is 'p->' or 'name_'."""
+    for op in plan:
+        if op['kind'] == 'scalar':
+            lines.append(f'    w->{op["write_fn"]}({prefix}{op["field"]});')
+        elif op['kind'] == 'nested':
+            for sub in op['sub_members']:
+                lines.append(f'    w->{sub["write_fn"]}({prefix}{op["field"]}.{sub["field"]});')
+        elif op['kind'] == 'array':
+            f, c = op['field'], op['count_field']
+            lines.append(f'    for (uint32_t _i = 0; _i < {prefix}{c}; _i++)')
+            lines.append(f'        w->{op["elem_write"]}({prefix}{f}[_i]);')
+        elif op['kind'] == 'struct_array':
+            f, c = op['field'], op['count_field']
+            lines.append(f'    for (uint32_t _i = 0; _i < {prefix}{c}; _i++) {{')
+            for sub in op['sub_members']:
+                lines.append(f'        w->{sub["write_fn"]}({prefix}{f}[_i].{sub["field"]});')
+            lines.append(f'    }}')
 
 
 # ── Parameter classification ─────────────────────────────────────────────────
@@ -368,17 +484,21 @@ def gen_encoder(reg, cmd):
 
     ordered = _order_params(reg, cmd)
 
-    # Build parameter list: struct params become individual member params
+    # Build parameter list: struct params become individual member params or struct pointer
     for p in ordered:
         cls = classify_param(reg, p)
         if cls == 'ignorable':
             continue
         if cls == 'struct':
-            # Inline struct members as individual params
             st = reg.types[p.type_name]
-            for wfn, rfn, field, ctype in get_struct_wire_members(reg, st):
-                safe_name = field.replace('.', '_')
-                lines.append(f'    , {ctype} {p.name}_{safe_name}')
+            if _has_array_members(reg, st):
+                # Struct with arrays — pass as pointer
+                lines.append(f'    , const {p.type_name}* {p.name}')
+            else:
+                # Simple struct — inline members as individual params
+                for wfn, rfn, field, ctype in get_struct_wire_members(reg, st):
+                    safe_name = field.replace('.', '_')
+                    lines.append(f'    , {ctype} {p.name}_{safe_name}')
         else:
             ctype = param_c_type_enc(reg, p, cls)
             lines.append(f'    , {ctype} {p.name}')
@@ -402,9 +522,15 @@ def gen_encoder(reg, cmd):
                 lines.append(f'    w->writeU32({p.name});')
         elif cls == 'struct':
             st = reg.types[p.type_name]
-            for wfn, rfn, field, ctype in get_struct_wire_members(reg, st):
-                safe_name = field.replace('.', '_')
-                lines.append(f'    w->{wfn}({p.name}_{safe_name});')
+            plan = get_struct_wire_plan(reg, st)
+            if _has_array_members(reg, st):
+                # Struct pointer — access members via ->
+                _emit_struct_encode(lines, plan, f'{p.name}->')
+            else:
+                # Inlined params
+                for wfn, rfn, field, ctype in get_struct_wire_members(reg, st):
+                    safe_name = field.replace('.', '_')
+                    lines.append(f'    w->{wfn}({p.name}_{safe_name});')
         elif cls == 'handle_array':
             count = get_len_param_name(p)
             lines.append(f'    for (uint32_t i = 0; i < {count}; i++)')
@@ -433,11 +559,14 @@ def gen_decoder(reg, cmd):
         if cls == 'ignorable':
             continue
         if cls == 'struct':
-            # Inline struct members into decoder struct
             st = reg.types[p.type_name]
-            for wfn, rfn, field, ctype in get_struct_wire_members(reg, st):
-                safe_name = field.replace('.', '_')
-                lines.append(f'    {ctype} {p.name}_{safe_name};')
+            plan = get_struct_wire_plan(reg, st)
+            if _has_array_members(reg, st):
+                _emit_struct_decoder_fields(lines, plan, f'{p.name}_')
+            else:
+                for wfn, rfn, field, ctype in get_struct_wire_members(reg, st):
+                    safe_name = field.replace('.', '_')
+                    lines.append(f'    {ctype} {p.name}_{safe_name};')
         else:
             ctype = param_c_type_dec(reg, p, cls)
             lines.append(f'    {ctype} {p.name};')
@@ -462,9 +591,13 @@ def gen_decoder(reg, cmd):
                 lines.append(f'    args->{p.name} = r->readU32();')
         elif cls == 'struct':
             st = reg.types[p.type_name]
-            for wfn, rfn, field, ctype in get_struct_wire_members(reg, st):
-                safe_name = field.replace('.', '_')
-                lines.append(f'    args->{p.name}_{safe_name} = r->{rfn}();')
+            plan = get_struct_wire_plan(reg, st)
+            if _has_array_members(reg, st):
+                _emit_struct_decode(lines, plan, f'args->{p.name}_')
+            else:
+                for wfn, rfn, field, ctype in get_struct_wire_members(reg, st):
+                    safe_name = field.replace('.', '_')
+                    lines.append(f'    args->{p.name}_{safe_name} = r->{rfn}();')
         elif cls == 'handle_array':
             count = get_len_param_name(p)
             lines.append(f'    args->{p.name}.resize(args->{count});')

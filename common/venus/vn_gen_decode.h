@@ -306,6 +306,31 @@ static inline void vn_decode_vkCmdUpdateBuffer(VnStreamReader* r, VnDecode_vkCmd
     r->readBytes(args->pData.data(), args->dataSize);
 }
 
+struct VnDecode_vkCreateBuffer {
+    uint64_t device;
+    uint64_t pBuffer;
+    uint32_t pCreateInfo_flags;
+    uint64_t pCreateInfo_size;
+    uint32_t pCreateInfo_usage;
+    uint32_t pCreateInfo_sharingMode;
+    uint32_t pCreateInfo_queueFamilyIndexCount;
+    std::vector<uint32_t> pCreateInfo_pQueueFamilyIndices;
+};
+
+static inline void vn_decode_vkCreateBuffer(VnStreamReader* r, VnDecode_vkCreateBuffer* args)
+{
+    args->device = r->readU64();
+    args->pBuffer = r->readU64();
+    args->pCreateInfo_flags = r->readU32();
+    args->pCreateInfo_size = r->readU64();
+    args->pCreateInfo_usage = r->readU32();
+    args->pCreateInfo_sharingMode = r->readU32();
+    args->pCreateInfo_queueFamilyIndexCount = r->readU32();
+    args->pCreateInfo_pQueueFamilyIndices.resize(args->pCreateInfo_queueFamilyIndexCount);
+    for (uint32_t _i = 0; _i < args->pCreateInfo_queueFamilyIndexCount; _i++)
+        args->pCreateInfo_pQueueFamilyIndices[_i] = r->readU32();
+}
+
 struct VnDecode_vkCreateCommandPool {
     uint64_t device;
     uint64_t pCommandPool;
@@ -321,6 +346,60 @@ static inline void vn_decode_vkCreateCommandPool(VnStreamReader* r, VnDecode_vkC
     args->pCreateInfo_queueFamilyIndex = r->readU32();
 }
 
+struct VnDecode_vkCreateDescriptorPool {
+    uint64_t device;
+    uint64_t pDescriptorPool;
+    uint32_t pCreateInfo_flags;
+    uint32_t pCreateInfo_maxSets;
+    uint32_t pCreateInfo_poolSizeCount;
+    std::vector<uint32_t> pCreateInfo_pPoolSizes_type;
+    std::vector<uint32_t> pCreateInfo_pPoolSizes_descriptorCount;
+};
+
+static inline void vn_decode_vkCreateDescriptorPool(VnStreamReader* r, VnDecode_vkCreateDescriptorPool* args)
+{
+    args->device = r->readU64();
+    args->pDescriptorPool = r->readU64();
+    args->pCreateInfo_flags = r->readU32();
+    args->pCreateInfo_maxSets = r->readU32();
+    args->pCreateInfo_poolSizeCount = r->readU32();
+    args->pCreateInfo_pPoolSizes_type.resize(args->pCreateInfo_poolSizeCount);
+    args->pCreateInfo_pPoolSizes_descriptorCount.resize(args->pCreateInfo_poolSizeCount);
+    for (uint32_t _i = 0; _i < args->pCreateInfo_poolSizeCount; _i++) {
+        args->pCreateInfo_pPoolSizes_type[_i] = r->readU32();
+        args->pCreateInfo_pPoolSizes_descriptorCount[_i] = r->readU32();
+    }
+}
+
+struct VnDecode_vkCreateDescriptorSetLayout {
+    uint64_t device;
+    uint64_t pSetLayout;
+    uint32_t pCreateInfo_flags;
+    uint32_t pCreateInfo_bindingCount;
+    std::vector<uint32_t> pCreateInfo_pBindings_binding;
+    std::vector<uint32_t> pCreateInfo_pBindings_descriptorType;
+    std::vector<uint32_t> pCreateInfo_pBindings_descriptorCount;
+    std::vector<uint32_t> pCreateInfo_pBindings_stageFlags;
+};
+
+static inline void vn_decode_vkCreateDescriptorSetLayout(VnStreamReader* r, VnDecode_vkCreateDescriptorSetLayout* args)
+{
+    args->device = r->readU64();
+    args->pSetLayout = r->readU64();
+    args->pCreateInfo_flags = r->readU32();
+    args->pCreateInfo_bindingCount = r->readU32();
+    args->pCreateInfo_pBindings_binding.resize(args->pCreateInfo_bindingCount);
+    args->pCreateInfo_pBindings_descriptorType.resize(args->pCreateInfo_bindingCount);
+    args->pCreateInfo_pBindings_descriptorCount.resize(args->pCreateInfo_bindingCount);
+    args->pCreateInfo_pBindings_stageFlags.resize(args->pCreateInfo_bindingCount);
+    for (uint32_t _i = 0; _i < args->pCreateInfo_bindingCount; _i++) {
+        args->pCreateInfo_pBindings_binding[_i] = r->readU32();
+        args->pCreateInfo_pBindings_descriptorType[_i] = r->readU32();
+        args->pCreateInfo_pBindings_descriptorCount[_i] = r->readU32();
+        args->pCreateInfo_pBindings_stageFlags[_i] = r->readU32();
+    }
+}
+
 struct VnDecode_vkCreateFence {
     uint64_t device;
     uint64_t pFence;
@@ -332,6 +411,76 @@ static inline void vn_decode_vkCreateFence(VnStreamReader* r, VnDecode_vkCreateF
     args->device = r->readU64();
     args->pFence = r->readU64();
     args->pCreateInfo_flags = r->readU32();
+}
+
+struct VnDecode_vkCreateFramebuffer {
+    uint64_t device;
+    uint64_t pFramebuffer;
+    uint32_t pCreateInfo_flags;
+    uint64_t pCreateInfo_renderPass;
+    uint32_t pCreateInfo_attachmentCount;
+    std::vector<uint64_t> pCreateInfo_pAttachments;
+    uint32_t pCreateInfo_width;
+    uint32_t pCreateInfo_height;
+    uint32_t pCreateInfo_layers;
+};
+
+static inline void vn_decode_vkCreateFramebuffer(VnStreamReader* r, VnDecode_vkCreateFramebuffer* args)
+{
+    args->device = r->readU64();
+    args->pFramebuffer = r->readU64();
+    args->pCreateInfo_flags = r->readU32();
+    args->pCreateInfo_renderPass = r->readU64();
+    args->pCreateInfo_attachmentCount = r->readU32();
+    args->pCreateInfo_pAttachments.resize(args->pCreateInfo_attachmentCount);
+    for (uint32_t _i = 0; _i < args->pCreateInfo_attachmentCount; _i++)
+        args->pCreateInfo_pAttachments[_i] = r->readU64();
+    args->pCreateInfo_width = r->readU32();
+    args->pCreateInfo_height = r->readU32();
+    args->pCreateInfo_layers = r->readU32();
+}
+
+struct VnDecode_vkCreateImage {
+    uint64_t device;
+    uint64_t pImage;
+    uint32_t pCreateInfo_flags;
+    uint32_t pCreateInfo_imageType;
+    uint32_t pCreateInfo_format;
+    uint32_t pCreateInfo_extent_width;
+    uint32_t pCreateInfo_extent_height;
+    uint32_t pCreateInfo_extent_depth;
+    uint32_t pCreateInfo_mipLevels;
+    uint32_t pCreateInfo_arrayLayers;
+    uint32_t pCreateInfo_samples;
+    uint32_t pCreateInfo_tiling;
+    uint32_t pCreateInfo_usage;
+    uint32_t pCreateInfo_sharingMode;
+    uint32_t pCreateInfo_queueFamilyIndexCount;
+    std::vector<uint32_t> pCreateInfo_pQueueFamilyIndices;
+    uint32_t pCreateInfo_initialLayout;
+};
+
+static inline void vn_decode_vkCreateImage(VnStreamReader* r, VnDecode_vkCreateImage* args)
+{
+    args->device = r->readU64();
+    args->pImage = r->readU64();
+    args->pCreateInfo_flags = r->readU32();
+    args->pCreateInfo_imageType = r->readU32();
+    args->pCreateInfo_format = r->readU32();
+    args->pCreateInfo_extent_width = r->readU32();
+    args->pCreateInfo_extent_height = r->readU32();
+    args->pCreateInfo_extent_depth = r->readU32();
+    args->pCreateInfo_mipLevels = r->readU32();
+    args->pCreateInfo_arrayLayers = r->readU32();
+    args->pCreateInfo_samples = r->readU32();
+    args->pCreateInfo_tiling = r->readU32();
+    args->pCreateInfo_usage = r->readU32();
+    args->pCreateInfo_sharingMode = r->readU32();
+    args->pCreateInfo_queueFamilyIndexCount = r->readU32();
+    args->pCreateInfo_pQueueFamilyIndices.resize(args->pCreateInfo_queueFamilyIndexCount);
+    for (uint32_t _i = 0; _i < args->pCreateInfo_queueFamilyIndexCount; _i++)
+        args->pCreateInfo_pQueueFamilyIndices[_i] = r->readU32();
+    args->pCreateInfo_initialLayout = r->readU32();
 }
 
 struct VnDecode_vkCreateImageView {
@@ -369,6 +518,126 @@ static inline void vn_decode_vkCreateImageView(VnStreamReader* r, VnDecode_vkCre
     args->pCreateInfo_subresourceRange_levelCount = r->readU32();
     args->pCreateInfo_subresourceRange_baseArrayLayer = r->readU32();
     args->pCreateInfo_subresourceRange_layerCount = r->readU32();
+}
+
+struct VnDecode_vkCreatePipelineLayout {
+    uint64_t device;
+    uint64_t pPipelineLayout;
+    uint32_t pCreateInfo_flags;
+    uint32_t pCreateInfo_setLayoutCount;
+    std::vector<uint64_t> pCreateInfo_pSetLayouts;
+    uint32_t pCreateInfo_pushConstantRangeCount;
+    std::vector<uint32_t> pCreateInfo_pPushConstantRanges_stageFlags;
+    std::vector<uint32_t> pCreateInfo_pPushConstantRanges_offset;
+    std::vector<uint32_t> pCreateInfo_pPushConstantRanges_size;
+};
+
+static inline void vn_decode_vkCreatePipelineLayout(VnStreamReader* r, VnDecode_vkCreatePipelineLayout* args)
+{
+    args->device = r->readU64();
+    args->pPipelineLayout = r->readU64();
+    args->pCreateInfo_flags = r->readU32();
+    args->pCreateInfo_setLayoutCount = r->readU32();
+    args->pCreateInfo_pSetLayouts.resize(args->pCreateInfo_setLayoutCount);
+    for (uint32_t _i = 0; _i < args->pCreateInfo_setLayoutCount; _i++)
+        args->pCreateInfo_pSetLayouts[_i] = r->readU64();
+    args->pCreateInfo_pushConstantRangeCount = r->readU32();
+    args->pCreateInfo_pPushConstantRanges_stageFlags.resize(args->pCreateInfo_pushConstantRangeCount);
+    args->pCreateInfo_pPushConstantRanges_offset.resize(args->pCreateInfo_pushConstantRangeCount);
+    args->pCreateInfo_pPushConstantRanges_size.resize(args->pCreateInfo_pushConstantRangeCount);
+    for (uint32_t _i = 0; _i < args->pCreateInfo_pushConstantRangeCount; _i++) {
+        args->pCreateInfo_pPushConstantRanges_stageFlags[_i] = r->readU32();
+        args->pCreateInfo_pPushConstantRanges_offset[_i] = r->readU32();
+        args->pCreateInfo_pPushConstantRanges_size[_i] = r->readU32();
+    }
+}
+
+struct VnDecode_vkCreateRenderPass {
+    uint64_t device;
+    uint64_t pRenderPass;
+    uint32_t pCreateInfo_flags;
+    uint32_t pCreateInfo_attachmentCount;
+    std::vector<uint32_t> pCreateInfo_pAttachments_flags;
+    std::vector<uint32_t> pCreateInfo_pAttachments_format;
+    std::vector<uint32_t> pCreateInfo_pAttachments_samples;
+    std::vector<uint32_t> pCreateInfo_pAttachments_loadOp;
+    std::vector<uint32_t> pCreateInfo_pAttachments_storeOp;
+    std::vector<uint32_t> pCreateInfo_pAttachments_stencilLoadOp;
+    std::vector<uint32_t> pCreateInfo_pAttachments_stencilStoreOp;
+    std::vector<uint32_t> pCreateInfo_pAttachments_initialLayout;
+    std::vector<uint32_t> pCreateInfo_pAttachments_finalLayout;
+    uint32_t pCreateInfo_subpassCount;
+    std::vector<uint32_t> pCreateInfo_pSubpasses_flags;
+    std::vector<uint32_t> pCreateInfo_pSubpasses_pipelineBindPoint;
+    std::vector<uint32_t> pCreateInfo_pSubpasses_inputAttachmentCount;
+    std::vector<uint32_t> pCreateInfo_pSubpasses_colorAttachmentCount;
+    std::vector<uint32_t> pCreateInfo_pSubpasses_preserveAttachmentCount;
+    uint32_t pCreateInfo_dependencyCount;
+    std::vector<uint32_t> pCreateInfo_pDependencies_srcSubpass;
+    std::vector<uint32_t> pCreateInfo_pDependencies_dstSubpass;
+    std::vector<uint32_t> pCreateInfo_pDependencies_srcStageMask;
+    std::vector<uint32_t> pCreateInfo_pDependencies_dstStageMask;
+    std::vector<uint32_t> pCreateInfo_pDependencies_srcAccessMask;
+    std::vector<uint32_t> pCreateInfo_pDependencies_dstAccessMask;
+    std::vector<uint32_t> pCreateInfo_pDependencies_dependencyFlags;
+};
+
+static inline void vn_decode_vkCreateRenderPass(VnStreamReader* r, VnDecode_vkCreateRenderPass* args)
+{
+    args->device = r->readU64();
+    args->pRenderPass = r->readU64();
+    args->pCreateInfo_flags = r->readU32();
+    args->pCreateInfo_attachmentCount = r->readU32();
+    args->pCreateInfo_pAttachments_flags.resize(args->pCreateInfo_attachmentCount);
+    args->pCreateInfo_pAttachments_format.resize(args->pCreateInfo_attachmentCount);
+    args->pCreateInfo_pAttachments_samples.resize(args->pCreateInfo_attachmentCount);
+    args->pCreateInfo_pAttachments_loadOp.resize(args->pCreateInfo_attachmentCount);
+    args->pCreateInfo_pAttachments_storeOp.resize(args->pCreateInfo_attachmentCount);
+    args->pCreateInfo_pAttachments_stencilLoadOp.resize(args->pCreateInfo_attachmentCount);
+    args->pCreateInfo_pAttachments_stencilStoreOp.resize(args->pCreateInfo_attachmentCount);
+    args->pCreateInfo_pAttachments_initialLayout.resize(args->pCreateInfo_attachmentCount);
+    args->pCreateInfo_pAttachments_finalLayout.resize(args->pCreateInfo_attachmentCount);
+    for (uint32_t _i = 0; _i < args->pCreateInfo_attachmentCount; _i++) {
+        args->pCreateInfo_pAttachments_flags[_i] = r->readU32();
+        args->pCreateInfo_pAttachments_format[_i] = r->readU32();
+        args->pCreateInfo_pAttachments_samples[_i] = r->readU32();
+        args->pCreateInfo_pAttachments_loadOp[_i] = r->readU32();
+        args->pCreateInfo_pAttachments_storeOp[_i] = r->readU32();
+        args->pCreateInfo_pAttachments_stencilLoadOp[_i] = r->readU32();
+        args->pCreateInfo_pAttachments_stencilStoreOp[_i] = r->readU32();
+        args->pCreateInfo_pAttachments_initialLayout[_i] = r->readU32();
+        args->pCreateInfo_pAttachments_finalLayout[_i] = r->readU32();
+    }
+    args->pCreateInfo_subpassCount = r->readU32();
+    args->pCreateInfo_pSubpasses_flags.resize(args->pCreateInfo_subpassCount);
+    args->pCreateInfo_pSubpasses_pipelineBindPoint.resize(args->pCreateInfo_subpassCount);
+    args->pCreateInfo_pSubpasses_inputAttachmentCount.resize(args->pCreateInfo_subpassCount);
+    args->pCreateInfo_pSubpasses_colorAttachmentCount.resize(args->pCreateInfo_subpassCount);
+    args->pCreateInfo_pSubpasses_preserveAttachmentCount.resize(args->pCreateInfo_subpassCount);
+    for (uint32_t _i = 0; _i < args->pCreateInfo_subpassCount; _i++) {
+        args->pCreateInfo_pSubpasses_flags[_i] = r->readU32();
+        args->pCreateInfo_pSubpasses_pipelineBindPoint[_i] = r->readU32();
+        args->pCreateInfo_pSubpasses_inputAttachmentCount[_i] = r->readU32();
+        args->pCreateInfo_pSubpasses_colorAttachmentCount[_i] = r->readU32();
+        args->pCreateInfo_pSubpasses_preserveAttachmentCount[_i] = r->readU32();
+    }
+    args->pCreateInfo_dependencyCount = r->readU32();
+    args->pCreateInfo_pDependencies_srcSubpass.resize(args->pCreateInfo_dependencyCount);
+    args->pCreateInfo_pDependencies_dstSubpass.resize(args->pCreateInfo_dependencyCount);
+    args->pCreateInfo_pDependencies_srcStageMask.resize(args->pCreateInfo_dependencyCount);
+    args->pCreateInfo_pDependencies_dstStageMask.resize(args->pCreateInfo_dependencyCount);
+    args->pCreateInfo_pDependencies_srcAccessMask.resize(args->pCreateInfo_dependencyCount);
+    args->pCreateInfo_pDependencies_dstAccessMask.resize(args->pCreateInfo_dependencyCount);
+    args->pCreateInfo_pDependencies_dependencyFlags.resize(args->pCreateInfo_dependencyCount);
+    for (uint32_t _i = 0; _i < args->pCreateInfo_dependencyCount; _i++) {
+        args->pCreateInfo_pDependencies_srcSubpass[_i] = r->readU32();
+        args->pCreateInfo_pDependencies_dstSubpass[_i] = r->readU32();
+        args->pCreateInfo_pDependencies_srcStageMask[_i] = r->readU32();
+        args->pCreateInfo_pDependencies_dstStageMask[_i] = r->readU32();
+        args->pCreateInfo_pDependencies_srcAccessMask[_i] = r->readU32();
+        args->pCreateInfo_pDependencies_dstAccessMask[_i] = r->readU32();
+        args->pCreateInfo_pDependencies_dependencyFlags[_i] = r->readU32();
+    }
 }
 
 struct VnDecode_vkCreateSampler {
