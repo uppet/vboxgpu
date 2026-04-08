@@ -141,7 +141,7 @@ void IcdState::initDefaults() {
         "VK_EXT_robustness2", "VK_EXT_attachment_feedback_loop_layout",
         "VK_EXT_conservative_rasterization", "VK_EXT_custom_border_color",
         "VK_EXT_depth_clip_enable", "VK_EXT_depth_bias_control",
-        "VK_EXT_extended_dynamic_state3",
+        // "VK_EXT_extended_dynamic_state3",  // disabled: blend state baked into pipeline instead
         "VK_EXT_shader_stencil_export", "VK_EXT_swapchain_colorspace",
         "VK_EXT_swapchain_maintenance1", "VK_EXT_descriptor_indexing",
         "VK_EXT_host_query_reset", "VK_EXT_sampler_filter_minmax",

@@ -68,6 +68,11 @@ enum VnCommandId : uint32_t {
     VN_CMD_vkCmdSetCullMode = 215,
     VN_CMD_vkCmdSetFrontFace = 216,
     VN_CMD_vkCmdBindVertexBuffers2 = 220,
+    VN_CMD_vkCmdSetDepthTestEnable = 221,
+    VN_CMD_vkCmdSetDepthWriteEnable = 222,
+    VN_CMD_vkCmdSetDepthCompareOp = 223,
+    VN_CMD_vkCmdSetDepthBoundsTestEnable = 224,
+    VN_CMD_vkCmdSetDepthBiasEnable = 228,
 
     // Bridge-specific commands (not in Vulkan spec)
     VN_CMD_BRIDGE_CreateSwapchain = 0x10000,

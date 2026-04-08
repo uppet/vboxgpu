@@ -86,6 +86,11 @@ CODEGEN_APIS = {
     "vkCmdSetCullMode": 215,
     "vkCmdSetFrontFace": 216,
     "vkCmdBindVertexBuffers2": 220,
+    "vkCmdSetDepthTestEnable": 221,
+    "vkCmdSetDepthWriteEnable": 222,
+    "vkCmdSetDepthCompareOp": 223,
+    "vkCmdSetDepthBoundsTestEnable": 224,
+    "vkCmdSetDepthBiasEnable": 228,
 }
 
 # Bridge-specific commands (not in Vulkan spec, not code-generated)

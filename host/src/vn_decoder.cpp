@@ -89,6 +89,11 @@ void VnDecoder::dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdS
     case VN_CMD_vkCmdSetScissor:          handleCmdSetScissor(reader); break;
     case VN_CMD_vkCmdSetCullMode:         handleCmdSetCullMode(reader); break;
     case VN_CMD_vkCmdSetFrontFace:        handleCmdSetFrontFace(reader); break;
+    case VN_CMD_vkCmdSetDepthTestEnable:  handleCmdSetDepthTestEnable(reader); break;
+    case VN_CMD_vkCmdSetDepthWriteEnable: handleCmdSetDepthWriteEnable(reader); break;
+    case VN_CMD_vkCmdSetDepthCompareOp:   handleCmdSetDepthCompareOp(reader); break;
+    case VN_CMD_vkCmdSetDepthBoundsTestEnable: handleCmdSetDepthBoundsTestEnable(reader); break;
+    case VN_CMD_vkCmdSetDepthBiasEnable:  handleCmdSetDepthBiasEnable(reader); break;
     case VN_CMD_vkCmdBindVertexBuffers:   handleCmdBindVertexBuffers(reader); break;
     case VN_CMD_vkCmdBindIndexBuffer:     handleCmdBindIndexBuffer(reader); break;
     case VN_CMD_vkCmdDrawIndexed:         handleCmdDrawIndexed(reader); break;
@@ -655,12 +660,9 @@ void VnDecoder::handleBindBufferMemory(VnStreamReader& r) {
     VkResult vr = vkBindBufferMemory(device_, buf, mem, offset);
     static int bindLog = 0;
     if (bindLog < 10) {
-        fprintf(stderr, "[Decoder] BindBufferMemory: buf=%llu mem=%llu off=%llu result=%d "
-                "reqs(size=%llu align=%llu typeBits=0x%x)\n",
+        fprintf(stderr, "[Decoder] BindBufferMemory: buf=%llu mem=%llu off=%llu result=%d\n",
                 (unsigned long long)bufferId, (unsigned long long)memoryId,
-                (unsigned long long)offset, (int)vr,
-                (unsigned long long)reqs.size, (unsigned long long)reqs.alignment,
-                reqs.memoryTypeBits);
+                (unsigned long long)offset, (int)vr);
         bindLog++;
     }
 }
@@ -911,8 +913,36 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
         }
     }
 
-    fprintf(stderr, "[Decoder] CreatePipeline vtxInput: %zu bindings, %zu attrs\n",
-            vtxBindings.size(), vtxAttrs.size());
+    // Depth attachment format (appended field — backward compat)
+    uint32_t depthFmt = 0;
+    if (r.remaining() >= 4) {
+        depthFmt = r.readU32();
+    }
+
+    // Blend attachment state (appended field — backward compat)
+    bool hasBlendState = false;
+    VkPipelineColorBlendAttachmentState blendAtt{};
+    blendAtt.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                              VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    if (r.remaining() >= 4) {
+        uint32_t hasBlend = r.readU32();
+        if (hasBlend && r.remaining() >= 32) {
+            hasBlendState = true;
+            blendAtt.blendEnable = r.readU32();
+            blendAtt.srcColorBlendFactor = static_cast<VkBlendFactor>(r.readU32());
+            blendAtt.dstColorBlendFactor = static_cast<VkBlendFactor>(r.readU32());
+            blendAtt.colorBlendOp = static_cast<VkBlendOp>(r.readU32());
+            blendAtt.srcAlphaBlendFactor = static_cast<VkBlendFactor>(r.readU32());
+            blendAtt.dstAlphaBlendFactor = static_cast<VkBlendFactor>(r.readU32());
+            blendAtt.alphaBlendOp = static_cast<VkBlendOp>(r.readU32());
+            blendAtt.colorWriteMask = r.readU32();
+        }
+    }
+
+    fprintf(stderr, "[Decoder] CreatePipeline vtxInput: %zu bindings, %zu attrs depthFmt=%u blend=%d (en=%u src=%u dst=%u op=%u mask=0x%x)\n",
+            vtxBindings.size(), vtxAttrs.size(), depthFmt, (int)hasBlendState,
+            blendAtt.blendEnable, blendAtt.srcColorBlendFactor, blendAtt.dstColorBlendFactor,
+            blendAtt.colorBlendOp, blendAtt.colorWriteMask);
     for (size_t i = 0; i < vtxBindings.size(); i++)
         fprintf(stderr, "  binding[%zu]: slot=%u stride=%u rate=%u\n", i,
                 vtxBindings[i].binding, vtxBindings[i].stride, vtxBindings[i].inputRate);
@@ -948,10 +978,15 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
         VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
         VK_DYNAMIC_STATE_CULL_MODE, VK_DYNAMIC_STATE_FRONT_FACE,
         VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE,
+        VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE,
+        VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE,
+        VK_DYNAMIC_STATE_DEPTH_COMPARE_OP,
+        VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE,
+        VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE,
     };
     VkPipelineDynamicStateCreateInfo dynState{};
     dynState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-    dynState.dynamicStateCount = 5;
+    dynState.dynamicStateCount = 10;
     dynState.pDynamicStates = dynStates;
 
     if (dynamicRendering) {
@@ -974,18 +1009,19 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
     ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
     ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
-    VkPipelineColorBlendAttachmentState cbAtt{};
-    cbAtt.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-
     VkPipelineColorBlendStateCreateInfo cb{};
     cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
     cb.attachmentCount = 1;
-    cb.pAttachments = &cbAtt;
+    cb.pAttachments = &blendAtt;
+
+    // Depth/stencil state (all values set via dynamic state)
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
 
     // Dynamic rendering info (Vulkan 1.3)
     VkPipelineRenderingCreateInfo renderingInfo{};
     VkFormat colorFormat = static_cast<VkFormat>(colorFmt);
+    VkFormat depthFormat = static_cast<VkFormat>(depthFmt);
     HostSwapchain* scFmt = getFirstSwapchain();
     // Only override colorFormat for blit/present pipelines (0 vertex bindings)
     // that target the swapchain. Draw pipelines with vertex input target internal
@@ -1002,6 +1038,7 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
     pInfo.pRasterizationState = &raster;
     pInfo.pMultisampleState = &ms;
     pInfo.pColorBlendState = &cb;
+    pInfo.pDepthStencilState = &depthStencil;
     pInfo.pDynamicState = (dynamicRendering || dynState.dynamicStateCount > 0) ? &dynState : nullptr;
     pInfo.layout = lookup(pipelineLayouts_, layoutId);
 
@@ -1009,6 +1046,8 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
         renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
         renderingInfo.colorAttachmentCount = 1;
         renderingInfo.pColorAttachmentFormats = &colorFormat;
+        if (depthFmt)
+            renderingInfo.depthAttachmentFormat = depthFormat;
         pInfo.pNext = &renderingInfo;
         pInfo.renderPass = VK_NULL_HANDLE;
     } else {
@@ -1190,6 +1229,21 @@ void VnDecoder::handleCmdBeginRendering(VnStreamReader& r) {
     float cr = r.readF32(), cg = r.readF32(), cb_ = r.readF32(), ca = r.readF32();
     uint64_t imageViewId = r.readU64(); // 0 = swapchain, nonzero = specific view
 
+    // Depth attachment (appended field — check remaining for backward compat)
+    uint32_t hasDepth = 0;
+    uint64_t depthViewId = 0;
+    uint32_t depthLoadOp = 0, depthStoreOp = 0;
+    float clearDepth = 1.0f;
+    if (r.remaining() >= 4) {
+        hasDepth = r.readU32();
+        if (hasDepth && r.remaining() >= 20) { // u64 + u32 + u32 + f32 = 20 bytes
+            depthViewId = r.readU64();
+            depthLoadOp = r.readU32();
+            depthStoreOp = r.readU32();
+            clearDepth = r.readF32();
+        }
+    }
+
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     if (!cb) return;
 
@@ -1240,12 +1294,29 @@ void VnDecoder::handleCmdBeginRendering(VnStreamReader& r) {
         clampedH = std::min(areaH, sc->extent.height);
     }
 
+    // Depth attachment info
+    VkRenderingAttachmentInfo depthAttachment{};
+    VkImageView depthView = VK_NULL_HANDLE;
+    if (hasDepth) {
+        depthView = lookup(imageViews_, depthViewId);
+        if (depthView) {
+            depthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+            depthAttachment.imageView = depthView;
+            depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            depthAttachment.loadOp = static_cast<VkAttachmentLoadOp>(depthLoadOp);
+            depthAttachment.storeOp = static_cast<VkAttachmentStoreOp>(depthStoreOp);
+            depthAttachment.clearValue.depthStencil = {clearDepth, 0};
+        }
+    }
+
     VkRenderingInfo renderingInfo{};
     renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
     renderingInfo.renderArea = {{(int32_t)areaX, (int32_t)areaY}, {clampedW, clampedH}};
     renderingInfo.layerCount = 1;
     renderingInfo.colorAttachmentCount = 1;
     renderingInfo.pColorAttachments = &colorAttachment;
+    if (hasDepth && depthView)
+        renderingInfo.pDepthAttachment = &depthAttachment;
 
     // Transition image to COLOR_ATTACHMENT_OPTIMAL (only for swapchain — non-swapchain images
     // are transitioned by the rendering commands themselves)
@@ -1266,9 +1337,9 @@ void VnDecoder::handleCmdBeginRendering(VnStreamReader& r) {
             0, 0, nullptr, 0, nullptr, 1, &barrier);
     }
 
-    fprintf(stderr, "[Decoder] BeginRendering: cb=%p view=%p (ivId=%llu %s) area=%u,%u,%ux%u load=%u\n",
+    fprintf(stderr, "[Decoder] BeginRendering: cb=%p view=%p (ivId=%llu %s) area=%u,%u,%ux%u load=%u depth=%u\n",
             (void*)cb, (void*)targetView, (unsigned long long)imageViewId,
-            isSwapchain ? "swapchain" : "internal", areaX, areaY, clampedW, clampedH, loadOp);
+            isSwapchain ? "swapchain" : "internal", areaX, areaY, clampedW, clampedH, loadOp, hasDepth);
     fflush(stderr);
     vkCmdBeginRendering(cb, &renderingInfo);
 
@@ -1330,15 +1401,8 @@ void VnDecoder::handleCmdBindPipeline(VnStreamReader& r) {
         return;
     }
     vkCmdBindPipeline(cb, static_cast<VkPipelineBindPoint>(bindPoint), pip);
-
-    // Re-set viewport/scissor after pipeline bind — some drivers reset dynamic state
-    HostSwapchain* sc = getFirstSwapchain();
-    if (sc) {
-        VkViewport vp{0, 0, (float)sc->extent.width, (float)sc->extent.height, 0, 1};
-        VkRect2D scissor{{0,0}, sc->extent};
-        vkCmdSetViewport(cb, 0, 1, &vp);
-        vkCmdSetScissor(cb, 0, 1, &scissor);
-    }
+    // Dynamic state (viewport, scissor, cull mode, etc.) persists across pipeline
+    // binds in Vulkan — do NOT override here; DXVK manages these via Set* commands.
 }
 
 void VnDecoder::handleCmdSetViewport(VnStreamReader& r) {
@@ -1371,6 +1435,41 @@ void VnDecoder::handleCmdSetFrontFace(VnStreamReader& r) {
     uint32_t frontFace = r.readU32();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     if (cb) vkCmdSetFrontFace(cb, static_cast<VkFrontFace>(frontFace));
+}
+
+void VnDecoder::handleCmdSetDepthTestEnable(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint32_t enable = r.readU32();
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    if (cb) vkCmdSetDepthTestEnable(cb, enable);
+}
+
+void VnDecoder::handleCmdSetDepthWriteEnable(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint32_t enable = r.readU32();
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    if (cb) vkCmdSetDepthWriteEnable(cb, enable);
+}
+
+void VnDecoder::handleCmdSetDepthCompareOp(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint32_t compareOp = r.readU32();
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    if (cb) vkCmdSetDepthCompareOp(cb, static_cast<VkCompareOp>(compareOp));
+}
+
+void VnDecoder::handleCmdSetDepthBoundsTestEnable(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint32_t enable = r.readU32();
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    if (cb) vkCmdSetDepthBoundsTestEnable(cb, enable);
+}
+
+void VnDecoder::handleCmdSetDepthBiasEnable(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint32_t enable = r.readU32();
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    if (cb) vkCmdSetDepthBiasEnable(cb, enable);
 }
 
 void VnDecoder::handleCmdBindVertexBuffers(VnStreamReader& r) {

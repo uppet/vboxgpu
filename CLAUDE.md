@@ -36,15 +36,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Present fence 转发（VkSwapchainPresentFenceInfoKHR pNext 解析）
 - Host server worker thread 架构（decoder 独立线程，窗口始终响应）
 - 命令 ID 全量迁移到 Venus VkCommandTypeEXT 标准值
+- 深度测试全链路（5 个 depth 动态状态命令 + BeginRendering depth attachment + pipeline depth/stencil state）
+- Alpha blend 支持（pipeline blend state 转发，blend enable/factors/op/mask）
+- 多物体渲染（per-object constant buffer update between draws）
 
 当前状态：
-- 纹理三角形 + HSV 变色动画在 Host 窗口正确渲染，~180 fps
-- 18 个命令使用 codegen 生成函数 + Venus 标准命令 ID
+- 深度测试 + 多物体 + alpha blend（含 blend state 动态切换）在 Host 窗口正确渲染
+- 37 个命令使用 codegen 生成函数 + Venus 标准命令 ID（含 5 个 depth 命令）
 - WaitForFences 使用 Vulkan 原始 timeout 语义（无 cap）
 
 后续：
-- 更多 DX11 测试用例（深度测试、多物体、alpha blend）
 - codegen Step 3：结构体序列化支持（解锁 vkCreate* 命令）
+- 更多 DX11 测试用例（stencil、多 render target）
 
 ## 架构要点
 

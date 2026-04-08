@@ -196,6 +196,61 @@ static inline void vn_decode_vkCmdSetCullMode(VnStreamReader* r, VnDecode_vkCmdS
     args->cullMode = r->readU32();
 }
 
+struct VnDecode_vkCmdSetDepthBiasEnable {
+    uint64_t commandBuffer;
+    uint32_t depthBiasEnable;
+};
+
+static inline void vn_decode_vkCmdSetDepthBiasEnable(VnStreamReader* r, VnDecode_vkCmdSetDepthBiasEnable* args)
+{
+    args->commandBuffer = r->readU64();
+    args->depthBiasEnable = r->readU32();
+}
+
+struct VnDecode_vkCmdSetDepthBoundsTestEnable {
+    uint64_t commandBuffer;
+    uint32_t depthBoundsTestEnable;
+};
+
+static inline void vn_decode_vkCmdSetDepthBoundsTestEnable(VnStreamReader* r, VnDecode_vkCmdSetDepthBoundsTestEnable* args)
+{
+    args->commandBuffer = r->readU64();
+    args->depthBoundsTestEnable = r->readU32();
+}
+
+struct VnDecode_vkCmdSetDepthCompareOp {
+    uint64_t commandBuffer;
+    uint32_t depthCompareOp;
+};
+
+static inline void vn_decode_vkCmdSetDepthCompareOp(VnStreamReader* r, VnDecode_vkCmdSetDepthCompareOp* args)
+{
+    args->commandBuffer = r->readU64();
+    args->depthCompareOp = r->readU32();
+}
+
+struct VnDecode_vkCmdSetDepthTestEnable {
+    uint64_t commandBuffer;
+    uint32_t depthTestEnable;
+};
+
+static inline void vn_decode_vkCmdSetDepthTestEnable(VnStreamReader* r, VnDecode_vkCmdSetDepthTestEnable* args)
+{
+    args->commandBuffer = r->readU64();
+    args->depthTestEnable = r->readU32();
+}
+
+struct VnDecode_vkCmdSetDepthWriteEnable {
+    uint64_t commandBuffer;
+    uint32_t depthWriteEnable;
+};
+
+static inline void vn_decode_vkCmdSetDepthWriteEnable(VnStreamReader* r, VnDecode_vkCmdSetDepthWriteEnable* args)
+{
+    args->commandBuffer = r->readU64();
+    args->depthWriteEnable = r->readU32();
+}
+
 struct VnDecode_vkCmdSetFrontFace {
     uint64_t commandBuffer;
     uint32_t frontFace;

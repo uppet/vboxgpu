@@ -80,6 +80,11 @@ enum VnCommandType : uint32_t {
     VN_CMD_vkCmdClearColorImage           = 0x100A,
     VN_CMD_vkCmdSetCullMode               = 215,   // Venus standard (was 0x100B)
     VN_CMD_vkCmdSetFrontFace              = 216,   // Venus standard (was 0x100C)
+    VN_CMD_vkCmdSetDepthTestEnable        = 221,   // Venus standard
+    VN_CMD_vkCmdSetDepthWriteEnable       = 222,   // Venus standard
+    VN_CMD_vkCmdSetDepthCompareOp         = 223,   // Venus standard
+    VN_CMD_vkCmdSetDepthBoundsTestEnable  = 224,   // Venus standard
+    VN_CMD_vkCmdSetDepthBiasEnable        = 228,   // Venus standard
     VN_CMD_vkCmdBindVertexBuffers         = 0x100D,
     VN_CMD_vkCmdDrawIndexed               = 107,   // Venus standard (was 0x100F)
     VN_CMD_vkCmdCopyBuffer                = 0x1010,

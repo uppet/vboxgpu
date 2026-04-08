@@ -97,6 +97,11 @@ private:
     void handleCmdPushDescriptorSet(VnStreamReader& r);
     void handleCmdSetCullMode(VnStreamReader& r);
     void handleCmdSetFrontFace(VnStreamReader& r);
+    void handleCmdSetDepthTestEnable(VnStreamReader& r);
+    void handleCmdSetDepthWriteEnable(VnStreamReader& r);
+    void handleCmdSetDepthCompareOp(VnStreamReader& r);
+    void handleCmdSetDepthBoundsTestEnable(VnStreamReader& r);
+    void handleCmdSetDepthBiasEnable(VnStreamReader& r);
     void handleCmdBindVertexBuffers(VnStreamReader& r);
     void handleCmdBindIndexBuffer(VnStreamReader& r);
     void handleCmdDrawIndexed(VnStreamReader& r);

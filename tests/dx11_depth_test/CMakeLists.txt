@@ -1,0 +1,3 @@
+add_executable(dx11_depth_test src/main.cpp)
+target_link_libraries(dx11_depth_test PRIVATE d3d11 d3dcompiler dxgi)
+target_compile_definitions(dx11_depth_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)

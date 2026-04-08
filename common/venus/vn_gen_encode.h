@@ -166,6 +166,51 @@ static inline void vn_encode_vkCmdSetCullMode(VnStreamWriter* w
     w->writeU32(cullMode);
 }
 
+static inline void vn_encode_vkCmdSetDepthBiasEnable(VnStreamWriter* w
+    , uint64_t commandBuffer
+    , uint32_t depthBiasEnable
+)
+{
+    w->writeU64(commandBuffer);
+    w->writeU32(depthBiasEnable);
+}
+
+static inline void vn_encode_vkCmdSetDepthBoundsTestEnable(VnStreamWriter* w
+    , uint64_t commandBuffer
+    , uint32_t depthBoundsTestEnable
+)
+{
+    w->writeU64(commandBuffer);
+    w->writeU32(depthBoundsTestEnable);
+}
+
+static inline void vn_encode_vkCmdSetDepthCompareOp(VnStreamWriter* w
+    , uint64_t commandBuffer
+    , uint32_t depthCompareOp
+)
+{
+    w->writeU64(commandBuffer);
+    w->writeU32(depthCompareOp);
+}
+
+static inline void vn_encode_vkCmdSetDepthTestEnable(VnStreamWriter* w
+    , uint64_t commandBuffer
+    , uint32_t depthTestEnable
+)
+{
+    w->writeU64(commandBuffer);
+    w->writeU32(depthTestEnable);
+}
+
+static inline void vn_encode_vkCmdSetDepthWriteEnable(VnStreamWriter* w
+    , uint64_t commandBuffer
+    , uint32_t depthWriteEnable
+)
+{
+    w->writeU64(commandBuffer);
+    w->writeU32(depthWriteEnable);
+}
+
 static inline void vn_encode_vkCmdSetFrontFace(VnStreamWriter* w
     , uint64_t commandBuffer
     , uint32_t frontFace

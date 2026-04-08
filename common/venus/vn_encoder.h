@@ -91,6 +91,13 @@ public:
     // Vertex input binding/attribute info for pipeline creation
     struct VertexBinding { uint32_t binding, stride, inputRate; };
     struct VertexAttribute { uint32_t location, binding, format, offset; };
+    // Color blend attachment state for pipeline creation
+    struct BlendAttachment {
+        uint32_t blendEnable;
+        uint32_t srcColorBlendFactor, dstColorBlendFactor, colorBlendOp;
+        uint32_t srcAlphaBlendFactor, dstAlphaBlendFactor, alphaBlendOp;
+        uint32_t colorWriteMask;
+    };
 
     // Legacy overload (no vertex input) for guest_sim / host_cmd compatibility
     void cmdCreateGraphicsPipeline(uint64_t deviceId, uint64_t pipelineId,
@@ -109,7 +116,9 @@ public:
                                    uint32_t viewportWidth, uint32_t viewportHeight,
                                    uint32_t colorAttachmentFormat,
                                    uint32_t bindingCount, const VertexBinding* bindings,
-                                   uint32_t attributeCount, const VertexAttribute* attributes) {
+                                   uint32_t attributeCount, const VertexAttribute* attributes,
+                                   uint32_t depthAttachmentFormat = 0,
+                                   const BlendAttachment* blendAtt = nullptr) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCreateGraphicsPipelines);
         w_.writeU64(deviceId);
@@ -134,6 +143,21 @@ public:
             w_.writeU32(attributes[i].binding);
             w_.writeU32(attributes[i].format);
             w_.writeU32(attributes[i].offset);
+        }
+        // Depth attachment format (appended for backward compat)
+        w_.writeU32(depthAttachmentFormat);
+        // Blend attachment state (appended for backward compat)
+        uint32_t hasBlend = blendAtt ? 1 : 0;
+        w_.writeU32(hasBlend);
+        if (blendAtt) {
+            w_.writeU32(blendAtt->blendEnable);
+            w_.writeU32(blendAtt->srcColorBlendFactor);
+            w_.writeU32(blendAtt->dstColorBlendFactor);
+            w_.writeU32(blendAtt->colorBlendOp);
+            w_.writeU32(blendAtt->srcAlphaBlendFactor);
+            w_.writeU32(blendAtt->dstAlphaBlendFactor);
+            w_.writeU32(blendAtt->alphaBlendOp);
+            w_.writeU32(blendAtt->colorWriteMask);
         }
         w_.endCommand(off);
     }
@@ -437,7 +461,10 @@ public:
                            uint32_t renderAreaW, uint32_t renderAreaH,
                            uint32_t loadOp, uint32_t storeOp,
                            float clearR, float clearG, float clearB, float clearA,
-                           uint64_t imageViewId = 0) {
+                           uint64_t imageViewId = 0,
+                           uint32_t hasDepth = 0, uint64_t depthViewId = 0,
+                           uint32_t depthLoadOp = 0, uint32_t depthStoreOp = 0,
+                           float clearDepth = 1.0f) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdBeginRendering);
         w_.writeU64(cmdBufferId);
@@ -452,6 +479,14 @@ public:
         w_.writeF32(clearB);
         w_.writeF32(clearA);
         w_.writeU64(imageViewId); // 0 = use swapchain (legacy), nonzero = specific view
+        // Depth attachment (appended for backward compat — decoder checks remaining)
+        w_.writeU32(hasDepth);
+        if (hasDepth) {
+            w_.writeU64(depthViewId);
+            w_.writeU32(depthLoadOp);
+            w_.writeU32(depthStoreOp);
+            w_.writeF32(clearDepth);
+        }
         w_.endCommand(off);
     }
 
@@ -542,6 +577,41 @@ public:
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdSetFrontFace);
         vn_encode_vkCmdSetFrontFace(&w_, cmdBufferId, frontFace);
+        w_.endCommand(off);
+    }
+
+    void cmdSetDepthTestEnable(uint64_t cmdBufferId, uint32_t enable) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdSetDepthTestEnable);
+        vn_encode_vkCmdSetDepthTestEnable(&w_, cmdBufferId, enable);
+        w_.endCommand(off);
+    }
+
+    void cmdSetDepthWriteEnable(uint64_t cmdBufferId, uint32_t enable) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdSetDepthWriteEnable);
+        vn_encode_vkCmdSetDepthWriteEnable(&w_, cmdBufferId, enable);
+        w_.endCommand(off);
+    }
+
+    void cmdSetDepthCompareOp(uint64_t cmdBufferId, uint32_t compareOp) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdSetDepthCompareOp);
+        vn_encode_vkCmdSetDepthCompareOp(&w_, cmdBufferId, compareOp);
+        w_.endCommand(off);
+    }
+
+    void cmdSetDepthBoundsTestEnable(uint64_t cmdBufferId, uint32_t enable) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdSetDepthBoundsTestEnable);
+        vn_encode_vkCmdSetDepthBoundsTestEnable(&w_, cmdBufferId, enable);
+        w_.endCommand(off);
+    }
+
+    void cmdSetDepthBiasEnable(uint64_t cmdBufferId, uint32_t enable) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdSetDepthBiasEnable);
+        vn_encode_vkCmdSetDepthBiasEnable(&w_, cmdBufferId, enable);
         w_.endCommand(off);
     }
 

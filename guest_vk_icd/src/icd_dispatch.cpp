@@ -574,12 +574,27 @@ static void VKAPI_CALL icd_vkCmdBeginRendering(VkCommandBuffer cb, const VkRende
     auto ivIt = g_icd.imageViewToImage.find(imageViewId);
     if (ivIt != g_icd.imageViewToImage.end() && (ivIt->second & 0xFFF00000) == 0xFFF00000)
         imageViewId = 0;
+
+    // Depth attachment
+    uint32_t hasDepth = 0;
+    uint64_t depthViewId = 0;
+    uint32_t depthLoadOp = 0, depthStoreOp = 0;
+    float clearDepth = 1.0f;
+    if (pInfo && pInfo->pDepthAttachment && pInfo->pDepthAttachment->imageView != VK_NULL_HANDLE) {
+        hasDepth = 1;
+        depthViewId = (uint64_t)pInfo->pDepthAttachment->imageView;
+        depthLoadOp = pInfo->pDepthAttachment->loadOp;
+        depthStoreOp = pInfo->pDepthAttachment->storeOp;
+        clearDepth = pInfo->pDepthAttachment->clearValue.depthStencil.depth;
+    }
+
     g_icd.encoder.cmdBeginRendering(toId(cb),
         pInfo ? pInfo->renderArea.offset.x : 0,
         pInfo ? pInfo->renderArea.offset.y : 0,
         pInfo ? pInfo->renderArea.extent.width : 800,
         pInfo ? pInfo->renderArea.extent.height : 600,
-        loadOp, storeOp, cr, cg, cb_, ca, imageViewId);
+        loadOp, storeOp, cr, cg, cb_, ca, imageViewId,
+        hasDepth, depthViewId, depthLoadOp, depthStoreOp, clearDepth);
 }
 static void VKAPI_CALL icd_vkCmdEndRendering(VkCommandBuffer cb) {
     g_icd.encoder.cmdEndRendering(toId(cb));
@@ -599,14 +614,24 @@ static void VKAPI_CALL icd_vkCmdSetScissorWithCount(VkCommandBuffer cb, uint32_t
     if (count > 0 && rects)
         g_icd.encoder.cmdSetScissor(toId(cb), rects[0].offset.x, rects[0].offset.y, rects[0].extent.width, rects[0].extent.height);
 }
-static void VKAPI_CALL icd_vkCmdSetDepthTestEnable(VkCommandBuffer, VkBool32) {}
-static void VKAPI_CALL icd_vkCmdSetDepthWriteEnable(VkCommandBuffer, VkBool32) {}
-static void VKAPI_CALL icd_vkCmdSetDepthCompareOp(VkCommandBuffer, VkCompareOp) {}
-static void VKAPI_CALL icd_vkCmdSetDepthBoundsTestEnable(VkCommandBuffer, VkBool32) {}
+static void VKAPI_CALL icd_vkCmdSetDepthTestEnable(VkCommandBuffer cb, VkBool32 enable) {
+    g_icd.encoder.cmdSetDepthTestEnable(toId(cb), enable);
+}
+static void VKAPI_CALL icd_vkCmdSetDepthWriteEnable(VkCommandBuffer cb, VkBool32 enable) {
+    g_icd.encoder.cmdSetDepthWriteEnable(toId(cb), enable);
+}
+static void VKAPI_CALL icd_vkCmdSetDepthCompareOp(VkCommandBuffer cb, VkCompareOp op) {
+    g_icd.encoder.cmdSetDepthCompareOp(toId(cb), (uint32_t)op);
+}
+static void VKAPI_CALL icd_vkCmdSetDepthBoundsTestEnable(VkCommandBuffer cb, VkBool32 enable) {
+    g_icd.encoder.cmdSetDepthBoundsTestEnable(toId(cb), enable);
+}
 static void VKAPI_CALL icd_vkCmdSetStencilTestEnable(VkCommandBuffer, VkBool32) {}
 static void VKAPI_CALL icd_vkCmdSetStencilOp(VkCommandBuffer, VkStencilFaceFlags, VkStencilOp, VkStencilOp, VkStencilOp, VkCompareOp) {}
 static void VKAPI_CALL icd_vkCmdSetRasterizerDiscardEnable(VkCommandBuffer, VkBool32) {}
-static void VKAPI_CALL icd_vkCmdSetDepthBiasEnable(VkCommandBuffer, VkBool32) {}
+static void VKAPI_CALL icd_vkCmdSetDepthBiasEnable(VkCommandBuffer cb, VkBool32 enable) {
+    g_icd.encoder.cmdSetDepthBiasEnable(toId(cb), enable);
+}
 static void VKAPI_CALL icd_vkCmdSetPrimitiveRestartEnable(VkCommandBuffer, VkBool32) {}
 static void VKAPI_CALL icd_vkCmdBindVertexBuffers2(VkCommandBuffer cb, uint32_t firstBinding, uint32_t bindingCount,
     const VkBuffer* pBuffers, const VkDeviceSize* pOffsets, const VkDeviceSize* pSizes, const VkDeviceSize* pStrides) {
@@ -1089,8 +1114,9 @@ static VkResult VKAPI_CALL icd_vkCreateGraphicsPipelines(
             h = (uint32_t)pInfos[i].pViewportState->pViewports[0].height;
         }
 
-        // Extract color attachment format for dynamic rendering (renderPass == null)
+        // Extract color/depth attachment format for dynamic rendering (renderPass == null)
         uint32_t colorFmt = 0;
+        uint32_t depthFmt = 0;
         if (!pInfos[i].renderPass) {
             // Walk pNext for VkPipelineRenderingCreateInfo
             auto* base = reinterpret_cast<const VkBaseInStructure*>(pInfos[i].pNext);
@@ -1099,6 +1125,7 @@ static VkResult VKAPI_CALL icd_vkCreateGraphicsPipelines(
                     auto* pri = reinterpret_cast<const VkPipelineRenderingCreateInfo*>(base);
                     if (pri->colorAttachmentCount > 0)
                         colorFmt = pri->pColorAttachmentFormats[0];
+                    depthFmt = pri->depthAttachmentFormat;
                     break;
                 }
                 base = base->pNext;
@@ -1121,11 +1148,27 @@ static VkResult VKAPI_CALL icd_vkCreateGraphicsPipelines(
             }
         }
 
+        // Extract blend state from first color attachment
+        VnEncoder::BlendAttachment blendAtt{};
+        const VnEncoder::BlendAttachment* pBlend = nullptr;
+        if (pInfos[i].pColorBlendState && pInfos[i].pColorBlendState->attachmentCount > 0) {
+            auto& att = pInfos[i].pColorBlendState->pAttachments[0];
+            blendAtt.blendEnable = att.blendEnable;
+            blendAtt.srcColorBlendFactor = att.srcColorBlendFactor;
+            blendAtt.dstColorBlendFactor = att.dstColorBlendFactor;
+            blendAtt.colorBlendOp = att.colorBlendOp;
+            blendAtt.srcAlphaBlendFactor = att.srcAlphaBlendFactor;
+            blendAtt.dstAlphaBlendFactor = att.dstAlphaBlendFactor;
+            blendAtt.alphaBlendOp = att.alphaBlendOp;
+            blendAtt.colorWriteMask = att.colorWriteMask;
+            pBlend = &blendAtt;
+        }
+
         g_icd.encoder.cmdCreateGraphicsPipeline(1, id,
             (uint64_t)pInfos[i].renderPass, (uint64_t)pInfos[i].layout,
             vertMod, fragMod, w, h, colorFmt,
             (uint32_t)vtxBindings.size(), vtxBindings.data(),
-            (uint32_t)vtxAttrs.size(), vtxAttrs.data());
+            (uint32_t)vtxAttrs.size(), vtxAttrs.data(), depthFmt, pBlend);
     }
     return VK_SUCCESS;
 }
