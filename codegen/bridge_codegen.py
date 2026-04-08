@@ -384,11 +384,17 @@ def classify_param(reg, param):
 
     if param.len_expr:
         len_name = param.len_expr.split(',')[0].strip()
-        if len_name.isidentifier() and not param.optional:
+        if len_name.isidentifier():
             if reg.is_handle(param.type_name):
-                return 'handle_array'
+                if param.is_const:
+                    return 'handle_array'
+                else:
+                    return 'output_handle_array'
             if reg.get_scalar_size(param.type_name) > 0:
-                return 'scalar_array'
+                return 'scalar_array'  # works for both required and optional
+            if param.is_const and reg.is_struct(param.type_name):
+                if can_serialize_struct(reg, param.type_name):
+                    return 'struct_array'
 
     # Output handle pointer: non-const handle* without len (e.g. VkFence* pFence)
     if not param.is_const and not param.len_expr and reg.is_handle(param.type_name):
@@ -434,8 +440,12 @@ def param_c_type_enc(reg, param, cls):
         return 'const uint64_t*' if reg.get_scalar_size(param.type_name) == 8 else 'const uint32_t*'
     if cls == 'byte_data':
         return 'const void*'
+    if cls == 'output_handle_array':
+        return None  # handled specially (output, not sent)
     if cls == 'struct':
         return None  # struct members are inlined, no single param
+    if cls == 'struct_array':
+        return f'const {param.type_name}*'
     return None  # ignorable
 
 def param_c_type_dec(reg, param, cls):
@@ -452,6 +462,8 @@ def param_c_type_dec(reg, param, cls):
         return 'uint64_t' if reg.get_scalar_size(param.type_name) == 8 else 'uint32_t'
     if cls == 'handle_array':
         return 'std::vector<uint64_t>'
+    if cls == 'output_handle_array':
+        return 'std::vector<uint64_t>'
     if cls == 'scalar_array':
         elem = 'uint64_t' if reg.get_scalar_size(param.type_name) == 8 else 'uint32_t'
         return f'std::vector<{elem}>'
@@ -459,6 +471,8 @@ def param_c_type_dec(reg, param, cls):
         return 'std::vector<uint8_t>'
     if cls == 'struct':
         return None  # struct members inlined into decoder struct
+    if cls == 'struct_array':
+        return None  # handled specially
     return None  # ignorable
 
 
@@ -471,7 +485,7 @@ def _order_params(reg, cmd):
     rest = []    # everything else
     for p in cmd.params:
         cls = classify_param(reg, p)
-        if cls in ('handle', 'output_handle'):
+        if cls in ('handle', 'output_handle', 'output_handle_array'):
             first.append(p)
         else:
             rest.append(p)
@@ -489,18 +503,27 @@ def gen_encoder(reg, cmd):
         cls = classify_param(reg, p)
         if cls == 'ignorable':
             continue
+        if cls == 'output_handle_array':
+            # Output handle arrays: send count + handle IDs
+            count = get_len_param_name(p)
+            lines.append(f'    , uint32_t {count}')
+            lines.append(f'    , const uint64_t* {p.name}')
+            continue
         if cls == 'struct':
             st = reg.types[p.type_name]
             if _has_array_members(reg, st):
-                # Struct with arrays — pass as pointer
                 lines.append(f'    , const {p.type_name}* {p.name}')
             else:
-                # Simple struct — inline members as individual params
                 for wfn, rfn, field, ctype in get_struct_wire_members(reg, st):
                     safe_name = field.replace('.', '_')
                     lines.append(f'    , {ctype} {p.name}_{safe_name}')
-        else:
-            ctype = param_c_type_enc(reg, p, cls)
+            continue
+        if cls == 'struct_array':
+            lines.append(f'    , uint32_t {get_len_param_name(p)}')
+            lines.append(f'    , const {p.type_name}* {p.name}')
+            continue
+        ctype = param_c_type_enc(reg, p, cls)
+        if ctype:
             lines.append(f'    , {ctype} {p.name}')
     lines.append(')')
     lines.append('{')
@@ -543,6 +566,24 @@ def gen_encoder(reg, cmd):
         elif cls == 'byte_data':
             size_param = get_len_param_name(p)
             lines.append(f'    w->writeBytes({p.name}, {size_param});')
+        elif cls == 'output_handle_array':
+            count = get_len_param_name(p)
+            lines.append(f'    w->writeU32({count});')
+            lines.append(f'    for (uint32_t i = 0; i < {count}; i++)')
+            lines.append(f'        w->writeU64({p.name}[i]);')
+        elif cls == 'struct_array':
+            count = get_len_param_name(p)
+            st = reg.types[p.type_name]
+            plan = get_struct_wire_plan(reg, st)
+            lines.append(f'    w->writeU32({count});')
+            lines.append(f'    for (uint32_t _i = 0; _i < {count}; _i++) {{')
+            for op in plan:
+                if op['kind'] == 'scalar':
+                    lines.append(f'        w->{op["write_fn"]}({p.name}[_i].{op["field"]});')
+                elif op['kind'] == 'nested':
+                    for sub in op['sub_members']:
+                        lines.append(f'        w->{sub["write_fn"]}({p.name}[_i].{op["field"]}.{sub["field"]});')
+            lines.append(f'    }}')
     lines.append('}')
     return '\n'.join(lines)
 
@@ -567,9 +608,22 @@ def gen_decoder(reg, cmd):
                 for wfn, rfn, field, ctype in get_struct_wire_members(reg, st):
                     safe_name = field.replace('.', '_')
                     lines.append(f'    {ctype} {p.name}_{safe_name};')
+        elif cls == 'struct_array':
+            count = get_len_param_name(p)
+            lines.append(f'    uint32_t {count};')
+            st = reg.types[p.type_name]
+            plan = get_struct_wire_plan(reg, st)
+            # Each scalar/nested field becomes a vector
+            for op in plan:
+                if op['kind'] == 'scalar':
+                    lines.append(f'    std::vector<{op["c_type"]}> {p.name}_{op["field"]};')
+                elif op['kind'] == 'nested':
+                    for sub in op['sub_members']:
+                        lines.append(f'    std::vector<{sub["c_type"]}> {p.name}_{op["field"]}_{sub["field"]};')
         else:
             ctype = param_c_type_dec(reg, p, cls)
-            lines.append(f'    {ctype} {p.name};')
+            if ctype:
+                lines.append(f'    {ctype} {p.name};')
     lines.append('};')
     lines.append('')
     lines.append(f'static inline void vn_decode_{cmd.name}(VnStreamReader* r, {struct_name}* args)')
@@ -613,6 +667,31 @@ def gen_decoder(reg, cmd):
             size_param = get_len_param_name(p)
             lines.append(f'    args->{p.name}.resize(args->{size_param});')
             lines.append(f'    r->readBytes(args->{p.name}.data(), args->{size_param});')
+        elif cls == 'output_handle_array':
+            count = get_len_param_name(p)
+            lines.append(f'    uint32_t {count} = r->readU32();')
+            lines.append(f'    args->{p.name}.resize({count});')
+            lines.append(f'    for (uint32_t i = 0; i < {count}; i++)')
+            lines.append(f'        args->{p.name}[i] = r->readU64();')
+        elif cls == 'struct_array':
+            count = get_len_param_name(p)
+            st = reg.types[p.type_name]
+            plan = get_struct_wire_plan(reg, st)
+            lines.append(f'    args->{count} = r->readU32();')
+            for op in plan:
+                if op['kind'] == 'scalar':
+                    lines.append(f'    args->{p.name}_{op["field"]}.resize(args->{count});')
+                elif op['kind'] == 'nested':
+                    for sub in op['sub_members']:
+                        lines.append(f'    args->{p.name}_{op["field"]}_{sub["field"]}.resize(args->{count});')
+            lines.append(f'    for (uint32_t _i = 0; _i < args->{count}; _i++) {{')
+            for op in plan:
+                if op['kind'] == 'scalar':
+                    lines.append(f'        args->{p.name}_{op["field"]}[_i] = r->{op["read_fn"]}();')
+                elif op['kind'] == 'nested':
+                    for sub in op['sub_members']:
+                        lines.append(f'        args->{p.name}_{op["field"]}_{sub["field"]}[_i] = r->{sub["read_fn"]}();')
+            lines.append(f'    }}')
     lines.append('}')
     return '\n'.join(lines)
 
