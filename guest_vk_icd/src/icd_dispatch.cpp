@@ -899,11 +899,30 @@ static VkResult VKAPI_CALL icd_vkAcquireNextImageKHR(
     return VK_SUCCESS;
 }
 
-static VkResult VKAPI_CALL icd_vkQueuePresentKHR(VkQueue, const VkPresentInfoKHR* pInfo)
+static VkResult VKAPI_CALL icd_vkQueuePresentKHR(VkQueue q, const VkPresentInfoKHR* pInfo)
 {
     g_icd.encoder.cmdBridgeQueuePresent(2, // H_QUEUE
         ndToId((uint64_t)pInfo->pSwapchains[0]),
         pInfo->waitSemaphoreCount > 0 ? ndToId((uint64_t)pInfo->pWaitSemaphores[0]) : 0);
+
+    // Walk pNext for VkSwapchainPresentFenceInfoEXT (sType=1000275001) —
+    // DXVK presenter attaches fences that must be signaled after present completes.
+    // Forward them as empty QueueSubmit so the host signals them after present.
+    {
+        struct PresentFenceInfo { VkStructureType sType; const void* pNext; uint32_t swapchainCount; const VkFence* pFences; };
+        const VkBaseInStructure* pNext = reinterpret_cast<const VkBaseInStructure*>(pInfo->pNext);
+        while (pNext) {
+            if (pNext->sType == (VkStructureType)1000275001) { // VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT
+                auto* fi = reinterpret_cast<const PresentFenceInfo*>(pNext);
+                for (uint32_t i = 0; i < pInfo->swapchainCount; i++) {
+                    if (fi->pFences[i])
+                        g_icd.encoder.cmdQueueSubmit(toId(q), 0, 0, 0, (uint64_t)fi->pFences[i]);
+                }
+                break;
+            }
+            pNext = pNext->pNext;
+        }
+    }
 
     // Send the accumulated frame to host and get next image index
     uint32_t nextIdx = 0;

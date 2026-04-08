@@ -1598,13 +1598,9 @@ void VnDecoder::handleWaitForFences(VnStreamReader& r) {
         fprintf(stderr, "%s%p", i ? "," : "", (void*)fences[i]);
     fprintf(stderr, "]\n");
     fflush(stderr);
-    if (!fences.empty()) {
-        // TODO: cap timeout until all fence-signal paths are implemented
-        constexpr uint64_t MAX_WAIT_NS = 100000000ULL; // 100ms
-        uint64_t t = (timeout > MAX_WAIT_NS) ? MAX_WAIT_NS : timeout;
+    if (!fences.empty())
         vkWaitForFences(device_, (uint32_t)fences.size(), fences.data(),
-                        waitAll ? VK_TRUE : VK_FALSE, t);
-    }
+                        waitAll ? VK_TRUE : VK_FALSE, timeout);
 }
 
 void VnDecoder::handleResetFences(VnStreamReader& r) {
