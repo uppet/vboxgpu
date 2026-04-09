@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <algorithm>
 #include <string>
+#include <cstddef>
 
 IcdState g_icd;
 
@@ -1475,6 +1476,12 @@ static VkResult VKAPI_CALL icd_vkQueueSubmit2(VkQueue q, uint32_t count, const V
                 i, cbCount, pSubmits[i].waitSemaphoreInfoCount, pSubmits[i].signalSemaphoreInfoCount);
         uint64_t waitSem = pSubmits[i].waitSemaphoreInfoCount > 0 ? (uint64_t)pSubmits[i].pWaitSemaphoreInfos[0].semaphore : 0;
         uint64_t sigSem = pSubmits[i].signalSemaphoreInfoCount > 0 ? (uint64_t)pSubmits[i].pSignalSemaphoreInfos[0].semaphore : 0;
+        if (waitSem > 10000 || sigSem > 10000) {
+            icdDbg((std::string("QueueSubmit2 BAD SEM: waitSem=") + std::to_string(waitSem)
+                + " sigSem=" + std::to_string(sigSem)
+                + " sizeof(VkSemaphoreSubmitInfo)=" + std::to_string(sizeof(VkSemaphoreSubmitInfo))
+                + " offsetof(sem)=" + std::to_string(offsetof(VkSemaphoreSubmitInfo, semaphore))).c_str());
+        }
         bool isLast = (i == count - 1);
         if (cbCount == 0) {
             uint64_t f = isLast ? (uint64_t)fence : 0;

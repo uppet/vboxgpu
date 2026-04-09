@@ -15,6 +15,8 @@ set ROOT=S:\bld\vboxgpu
 set HOST_EXE=%ROOT%\build\host\Debug\vbox_host_server.exe
 set ICD_DLL=%ROOT%\build\guest_vk_icd\Debug\vbox_vulkan.dll
 
+set TEST_ARGS=
+
 REM --- Select test ---
 if "%TEST%"=="triangle" (
     set TEST_DIR=%ROOT%\tests\dx11_triangle\test_env
@@ -28,31 +30,38 @@ if "%TEST%"=="triangle" (
 ) else if "%TEST%"=="sortcourt" (
     set TEST_DIR=%ROOT%\tests\SortTheCourt
     set TEST_EXE=SortTheCourt.exe
+    set TEST_ARGS=-screen-width 800 -screen-height 600 -screen-fullscreen 0
+    set ICD_DLL=%ROOT%\build32\guest_vk_icd\Debug\vbox_vulkan.dll
 ) else (
     echo Unknown test: %TEST%
     echo Available: triangle, depth, blend, sortcourt
     exit /b 1
 )
 
+REM --- Kill previous instances ---
+taskkill /F /IM vbox_host_server.exe >nul 2>&1
+taskkill /F /IM %TEST_EXE% >nul 2>&1
+timeout /t 1 /nobreak >nul
+
 REM --- Update ICD DLL ---
 echo [1/3] Copying latest ICD DLL...
 copy /Y "%ICD_DLL%" "%TEST_DIR%\vbox_vulkan.dll" >nul
 
-REM --- Set environment ---
-set VK_ICD_FILENAMES=%TEST_DIR%\vbox_icd.json
-set VK_LOADER_LAYERS_DISABLE=*
-
-REM --- Launch host server ---
+REM --- Launch host server (clean environment, no ICD override) ---
 echo [2/3] Starting host server...
-start "VBox Host Server" /D "%ROOT%" "%HOST_EXE%"
+start "HostServer" /D "%ROOT%" cmd /c "%HOST_EXE% 2>%ROOT%\host_err.txt"
 
 REM Wait for host to initialize
 timeout /t 2 /nobreak >nul
 
+REM --- Set ICD environment for guest only ---
+set VK_ICD_FILENAMES=%TEST_DIR%\vbox_icd.json
+set VK_LOADER_LAYERS_DISABLE=*
+
 REM --- Launch guest ---
-echo [3/3] Starting guest: %TEST_EXE%
+echo [3/3] Starting guest: %TEST_EXE% %TEST_ARGS%
 cd /d "%TEST_DIR%"
-"%TEST_EXE%"
+"%TEST_EXE%" %TEST_ARGS%
 
 REM --- Cleanup: kill host after guest exits ---
 echo.

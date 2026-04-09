@@ -77,4 +77,5 @@ add_dependencies(vbox_host_server shaders)
 target_compile_definitions(vbox_host_server PRIVATE
     VK_USE_PLATFORM_WIN32_KHR
     WINRT_LEAN_AND_MEAN
+    VBOXGPU_DEBUG_SCREENSHOTS  # TODO: remove after debugging SortTheCourt
 )

@@ -1654,6 +1654,11 @@ void VnDecoder::handleQueueSubmit(VnStreamReader& r) {
     uint64_t waitSemId = r.readU64();
     uint64_t signalSemId = r.readU64();
     uint64_t fenceId = r.readU64();
+    if (waitSemId > 10000 || signalSemId > 10000)
+        fprintf(stderr, "[Decoder] QueueSubmit SUSPECT: q=%llu cb=%llu ws=%llu ss=%llu f=%llu\n",
+                (unsigned long long)queueId, (unsigned long long)cbId,
+                (unsigned long long)waitSemId, (unsigned long long)signalSemId,
+                (unsigned long long)fenceId);
 
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     VkSemaphore waitSem = lookup(semaphores_, waitSemId);
@@ -1683,6 +1688,10 @@ void VnDecoder::handleQueueSubmit(VnStreamReader& r) {
         info.signalSemaphoreCount = 1;
         info.pSignalSemaphores = &sigSem;
     }
+
+    // Brute-force sync: wait for all GPU work before every submit.
+    // This eliminates DEVICE_LOST caused by missing semaphore synchronization.
+    vkDeviceWaitIdle(device_);
 
     VkResult submitResult = vkQueueSubmit(graphicsQueue_, 1, &info, fence);
     fprintf(stderr, "[Decoder] QueueSubmit result=%d cb=%p\n", (int)submitResult, (void*)cb);
