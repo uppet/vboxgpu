@@ -1,4 +1,5 @@
 build/
+build32/
 .mcp.json
 CLAUDE.local.md
 .claude/
@@ -9,6 +10,7 @@ third_party/
 !common/third_party/lz4/
 !common/third_party/lz4/*
 tests/dx11_triangle/test_env/
+tests/SortTheCourt/
 dumps/
 *.log
 *.bmp

@@ -9,6 +9,19 @@
 
 IcdState g_icd;
 
+// Quick debug log to file via Win32 API (static CRT fopen unreliable)
+static void icdDbg(const char* msg) {
+    HANDLE h = CreateFileA("S:\\bld\\vboxgpu\\icd_debug.log",
+        FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+        OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h != INVALID_HANDLE_VALUE) {
+        DWORD written;
+        WriteFile(h, msg, (DWORD)strlen(msg), &written, NULL);
+        WriteFile(h, "\r\n", 2, &written, NULL);
+        CloseHandle(h);
+    }
+}
+
 // Lock guard for encoder — DXVK is multithreaded, encoder is not thread-safe
 #define ENC_LOCK std::lock_guard<std::mutex> _enc_lock(g_icd.encoderMutex)
 
@@ -36,6 +49,7 @@ struct CrashHandlerInstaller {
     CrashHandlerInstaller() {
         CreateDirectoryA("S:\\bld\\vboxgpu\\dumps", NULL);
         SetUnhandledExceptionFilter(crashDumpHandler);
+        icdDbg("ICD DLL loaded, crash handler installed");
     }
 } g_crashHandler;
 
@@ -196,9 +210,12 @@ void IcdState::blitFrameToWindow() {
 static VkResult VKAPI_CALL icd_vkCreateInstance(
     const VkInstanceCreateInfo*, const VkAllocationCallbacks*, VkInstance* pInstance)
 {
+    icdDbg("vkCreateInstance: enter");
     g_icd.initDefaults();
+    icdDbg("vkCreateInstance: initDefaults done");
     uint64_t id = g_icd.handles.alloc();
     *pInstance = reinterpret_cast<VkInstance>(makeDispatchable(id));
+    icdDbg("vkCreateInstance: done");
     return VK_SUCCESS;
 }
 
@@ -2255,6 +2272,7 @@ extern "C" {
 
 __declspec(dllexport) PFN_vkVoidFunction VKAPI_CALL
 vk_icdGetInstanceProcAddr(VkInstance instance, const char* pName) {
+    icdDbg(pName ? pName : "(null)");
     return lookupFunc(pName);
 }
 
@@ -2265,11 +2283,9 @@ vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
 
 __declspec(dllexport) VkResult VKAPI_CALL
 vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t* pVersion) {
-    // Version 5: loader uses vk_icdGetInstanceProcAddr for all functions
-    // and expects dispatchable handles to have loader's table as first pointer.
-    // The loader will set up the dispatch table in our returned handle.
+    icdDbg("NegotiateLoaderICDInterfaceVersion: enter");
     if (*pVersion > 5) *pVersion = 5;
-    fprintf(stderr, "[ICD] Negotiated loader interface version: %u\n", *pVersion);
+    icdDbg("NegotiateLoaderICDInterfaceVersion: done");
     return VK_SUCCESS;
 }
 

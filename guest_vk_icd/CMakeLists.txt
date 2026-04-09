@@ -18,6 +18,11 @@ set_target_properties(vbox_vk_icd PROPERTIES
     OUTPUT_NAME "vbox_vulkan"
 )
 
+# 32-bit: stdcall name decoration requires .def file for undecorated exports
+if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+    target_sources(vbox_vk_icd PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/vbox_vulkan.def")
+endif()
+
 # Copy ICD JSON to build directory, to be used with VK_ICD_FILENAMES
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/vbox_icd.json"

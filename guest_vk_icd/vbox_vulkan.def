@@ -1,0 +1,5 @@
+EXPORTS
+    vk_icdGetInstanceProcAddr = _vk_icdGetInstanceProcAddr@8
+    vk_icdNegotiateLoaderICDInterfaceVersion = _vk_icdNegotiateLoaderICDInterfaceVersion@4
+    vk_icdGetPhysicalDeviceProcAddr = _vk_icdGetPhysicalDeviceProcAddr@8
+    vkGetInstanceProcAddr = _vkGetInstanceProcAddr@8
