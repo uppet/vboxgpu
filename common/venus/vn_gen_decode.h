@@ -63,8 +63,8 @@ static inline void vn_decode_vkBindImageMemory(VnStreamReader* r, VnDecode_vkBin
 
 struct VnDecode_vkCmdBindDescriptorSets {
     uint64_t commandBuffer;
-    uint64_t layout;
     uint32_t pipelineBindPoint;
+    uint64_t layout;
     uint32_t firstSet;
     uint32_t descriptorSetCount;
     std::vector<uint64_t> pDescriptorSets;
@@ -75,8 +75,8 @@ struct VnDecode_vkCmdBindDescriptorSets {
 static inline void vn_decode_vkCmdBindDescriptorSets(VnStreamReader* r, VnDecode_vkCmdBindDescriptorSets* args)
 {
     args->commandBuffer = r->readU64();
-    args->layout = r->readU64();
     args->pipelineBindPoint = r->readU32();
+    args->layout = r->readU64();
     args->firstSet = r->readU32();
     args->descriptorSetCount = r->readU32();
     args->pDescriptorSets.resize(args->descriptorSetCount);
@@ -105,15 +105,15 @@ static inline void vn_decode_vkCmdBindIndexBuffer(VnStreamReader* r, VnDecode_vk
 
 struct VnDecode_vkCmdBindPipeline {
     uint64_t commandBuffer;
-    uint64_t pipeline;
     uint32_t pipelineBindPoint;
+    uint64_t pipeline;
 };
 
 static inline void vn_decode_vkCmdBindPipeline(VnStreamReader* r, VnDecode_vkCmdBindPipeline* args)
 {
     args->commandBuffer = r->readU64();
-    args->pipeline = r->readU64();
     args->pipelineBindPoint = r->readU32();
+    args->pipeline = r->readU64();
 }
 
 struct VnDecode_vkCmdBindVertexBuffers {
@@ -171,7 +171,6 @@ struct VnDecode_vkCmdCopyBuffer {
     uint64_t srcBuffer;
     uint64_t dstBuffer;
     uint32_t regionCount;
-    uint32_t regionCount;
     std::vector<uint64_t> pRegions_srcOffset;
     std::vector<uint64_t> pRegions_dstOffset;
     std::vector<uint64_t> pRegions_size;
@@ -182,7 +181,6 @@ static inline void vn_decode_vkCmdCopyBuffer(VnStreamReader* r, VnDecode_vkCmdCo
     args->commandBuffer = r->readU64();
     args->srcBuffer = r->readU64();
     args->dstBuffer = r->readU64();
-    args->regionCount = r->readU32();
     args->regionCount = r->readU32();
     args->pRegions_srcOffset.resize(args->regionCount);
     args->pRegions_dstOffset.resize(args->regionCount);
@@ -199,7 +197,6 @@ struct VnDecode_vkCmdCopyBufferToImage {
     uint64_t srcBuffer;
     uint64_t dstImage;
     uint32_t dstImageLayout;
-    uint32_t regionCount;
     uint32_t regionCount;
     std::vector<uint64_t> pRegions_bufferOffset;
     std::vector<uint32_t> pRegions_bufferRowLength;
@@ -222,7 +219,6 @@ static inline void vn_decode_vkCmdCopyBufferToImage(VnStreamReader* r, VnDecode_
     args->srcBuffer = r->readU64();
     args->dstImage = r->readU64();
     args->dstImageLayout = r->readU32();
-    args->regionCount = r->readU32();
     args->regionCount = r->readU32();
     args->pRegions_bufferOffset.resize(args->regionCount);
     args->pRegions_bufferRowLength.resize(args->regionCount);
@@ -314,10 +310,8 @@ struct VnDecode_vkCmdPipelineBarrier {
     uint32_t dstStageMask;
     uint32_t dependencyFlags;
     uint32_t memoryBarrierCount;
-    uint32_t memoryBarrierCount;
     std::vector<uint32_t> pMemoryBarriers_srcAccessMask;
     std::vector<uint32_t> pMemoryBarriers_dstAccessMask;
-    uint32_t bufferMemoryBarrierCount;
     uint32_t bufferMemoryBarrierCount;
     std::vector<uint32_t> pBufferMemoryBarriers_srcAccessMask;
     std::vector<uint32_t> pBufferMemoryBarriers_dstAccessMask;
@@ -326,7 +320,6 @@ struct VnDecode_vkCmdPipelineBarrier {
     std::vector<uint64_t> pBufferMemoryBarriers_buffer;
     std::vector<uint64_t> pBufferMemoryBarriers_offset;
     std::vector<uint64_t> pBufferMemoryBarriers_size;
-    uint32_t imageMemoryBarrierCount;
     uint32_t imageMemoryBarrierCount;
     std::vector<uint32_t> pImageMemoryBarriers_srcAccessMask;
     std::vector<uint32_t> pImageMemoryBarriers_dstAccessMask;
@@ -349,14 +342,12 @@ static inline void vn_decode_vkCmdPipelineBarrier(VnStreamReader* r, VnDecode_vk
     args->dstStageMask = r->readU32();
     args->dependencyFlags = r->readU32();
     args->memoryBarrierCount = r->readU32();
-    args->memoryBarrierCount = r->readU32();
     args->pMemoryBarriers_srcAccessMask.resize(args->memoryBarrierCount);
     args->pMemoryBarriers_dstAccessMask.resize(args->memoryBarrierCount);
     for (uint32_t _i = 0; _i < args->memoryBarrierCount; _i++) {
         args->pMemoryBarriers_srcAccessMask[_i] = r->readU32();
         args->pMemoryBarriers_dstAccessMask[_i] = r->readU32();
     }
-    args->bufferMemoryBarrierCount = r->readU32();
     args->bufferMemoryBarrierCount = r->readU32();
     args->pBufferMemoryBarriers_srcAccessMask.resize(args->bufferMemoryBarrierCount);
     args->pBufferMemoryBarriers_dstAccessMask.resize(args->bufferMemoryBarrierCount);
@@ -374,7 +365,6 @@ static inline void vn_decode_vkCmdPipelineBarrier(VnStreamReader* r, VnDecode_vk
         args->pBufferMemoryBarriers_offset[_i] = r->readU64();
         args->pBufferMemoryBarriers_size[_i] = r->readU64();
     }
-    args->imageMemoryBarrierCount = r->readU32();
     args->imageMemoryBarrierCount = r->readU32();
     args->pImageMemoryBarriers_srcAccessMask.resize(args->imageMemoryBarrierCount);
     args->pImageMemoryBarriers_dstAccessMask.resize(args->imageMemoryBarrierCount);
@@ -505,7 +495,6 @@ struct VnDecode_vkCmdSetScissor {
     uint64_t commandBuffer;
     uint32_t firstScissor;
     uint32_t scissorCount;
-    uint32_t scissorCount;
     std::vector<int32_t> pScissors_offset_x;
     std::vector<int32_t> pScissors_offset_y;
     std::vector<uint32_t> pScissors_extent_width;
@@ -516,7 +505,6 @@ static inline void vn_decode_vkCmdSetScissor(VnStreamReader* r, VnDecode_vkCmdSe
 {
     args->commandBuffer = r->readU64();
     args->firstScissor = r->readU32();
-    args->scissorCount = r->readU32();
     args->scissorCount = r->readU32();
     args->pScissors_offset_x.resize(args->scissorCount);
     args->pScissors_offset_y.resize(args->scissorCount);
@@ -534,7 +522,6 @@ struct VnDecode_vkCmdSetViewport {
     uint64_t commandBuffer;
     uint32_t firstViewport;
     uint32_t viewportCount;
-    uint32_t viewportCount;
     std::vector<float> pViewports_x;
     std::vector<float> pViewports_y;
     std::vector<float> pViewports_width;
@@ -547,7 +534,6 @@ static inline void vn_decode_vkCmdSetViewport(VnStreamReader* r, VnDecode_vkCmdS
 {
     args->commandBuffer = r->readU64();
     args->firstViewport = r->readU32();
-    args->viewportCount = r->readU32();
     args->viewportCount = r->readU32();
     args->pViewports_x.resize(args->viewportCount);
     args->pViewports_y.resize(args->viewportCount);
@@ -1149,19 +1135,16 @@ static inline void vn_decode_vkFreeMemory(VnStreamReader* r, VnDecode_vkFreeMemo
 
 struct VnDecode_vkQueueSubmit {
     uint64_t queue;
-    uint64_t fence;
-    uint32_t submitCount;
     uint32_t submitCount;
     std::vector<uint32_t> pSubmits_waitSemaphoreCount;
     std::vector<uint32_t> pSubmits_commandBufferCount;
     std::vector<uint32_t> pSubmits_signalSemaphoreCount;
+    uint64_t fence;
 };
 
 static inline void vn_decode_vkQueueSubmit(VnStreamReader* r, VnDecode_vkQueueSubmit* args)
 {
     args->queue = r->readU64();
-    args->fence = r->readU64();
-    args->submitCount = r->readU32();
     args->submitCount = r->readU32();
     args->pSubmits_waitSemaphoreCount.resize(args->submitCount);
     args->pSubmits_commandBufferCount.resize(args->submitCount);
@@ -1171,6 +1154,7 @@ static inline void vn_decode_vkQueueSubmit(VnStreamReader* r, VnDecode_vkQueueSu
         args->pSubmits_commandBufferCount[_i] = r->readU32();
         args->pSubmits_signalSemaphoreCount[_i] = r->readU32();
     }
+    args->fence = r->readU64();
 }
 
 struct VnDecode_vkResetFences {
@@ -1191,13 +1175,11 @@ static inline void vn_decode_vkResetFences(VnStreamReader* r, VnDecode_vkResetFe
 struct VnDecode_vkUpdateDescriptorSets {
     uint64_t device;
     uint32_t descriptorWriteCount;
-    uint32_t descriptorWriteCount;
     std::vector<uint64_t> pDescriptorWrites_dstSet;
     std::vector<uint32_t> pDescriptorWrites_dstBinding;
     std::vector<uint32_t> pDescriptorWrites_dstArrayElement;
     std::vector<uint32_t> pDescriptorWrites_descriptorCount;
     std::vector<uint32_t> pDescriptorWrites_descriptorType;
-    uint32_t descriptorCopyCount;
     uint32_t descriptorCopyCount;
     std::vector<uint64_t> pDescriptorCopies_srcSet;
     std::vector<uint32_t> pDescriptorCopies_srcBinding;
@@ -1212,7 +1194,6 @@ static inline void vn_decode_vkUpdateDescriptorSets(VnStreamReader* r, VnDecode_
 {
     args->device = r->readU64();
     args->descriptorWriteCount = r->readU32();
-    args->descriptorWriteCount = r->readU32();
     args->pDescriptorWrites_dstSet.resize(args->descriptorWriteCount);
     args->pDescriptorWrites_dstBinding.resize(args->descriptorWriteCount);
     args->pDescriptorWrites_dstArrayElement.resize(args->descriptorWriteCount);
@@ -1225,7 +1206,6 @@ static inline void vn_decode_vkUpdateDescriptorSets(VnStreamReader* r, VnDecode_
         args->pDescriptorWrites_descriptorCount[_i] = r->readU32();
         args->pDescriptorWrites_descriptorType[_i] = r->readU32();
     }
-    args->descriptorCopyCount = r->readU32();
     args->descriptorCopyCount = r->readU32();
     args->pDescriptorCopies_srcSet.resize(args->descriptorCopyCount);
     args->pDescriptorCopies_srcBinding.resize(args->descriptorCopyCount);

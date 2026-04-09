@@ -979,7 +979,7 @@ static VkResult VKAPI_CALL icd_vkCreateImageView(
     uint64_t id = g_icd.handles.alloc();
     *p = (VkImageView)id;
     g_icd.imageViewToImage[id] = (uint64_t)pInfo->image;
-    g_icd.encoder.cmdCreateImageView(1, id, (uint64_t)pInfo->image,
+    g_icd.encoder.cmdCreateImageView(1, id, pInfo->flags, (uint64_t)pInfo->image,
         pInfo->viewType, pInfo->format,
         pInfo->components.r, pInfo->components.g, pInfo->components.b, pInfo->components.a,
         pInfo->subresourceRange.aspectMask, pInfo->subresourceRange.baseMipLevel,
@@ -1193,7 +1193,7 @@ static VkResult VKAPI_CALL icd_vkCreateCommandPool(
 {
     uint64_t id = g_icd.handles.alloc();
     *p = (VkCommandPool)id;
-    g_icd.encoder.cmdCreateCommandPool(1, id, pInfo->queueFamilyIndex);
+    g_icd.encoder.cmdCreateCommandPool(1, id, pInfo->flags, pInfo->queueFamilyIndex);
     return VK_SUCCESS;
 }
 
@@ -1467,7 +1467,7 @@ static VkResult VKAPI_CALL icd_vkCreateBuffer(VkDevice, const VkBufferCreateInfo
     uint64_t id = g_icd.handles.alloc();
     *p = (VkBuffer)id;
     g_icd.bufferSizes[id] = pInfo->size;
-    g_icd.encoder.cmdCreateBuffer(1, id, pInfo->size, pInfo->usage);
+    g_icd.encoder.cmdCreateBuffer(1, id, pInfo);
     return VK_SUCCESS;
 }
 static void VKAPI_CALL icd_vkDestroyBuffer(VkDevice, VkBuffer v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyBuffer(1, (uint64_t)v); }

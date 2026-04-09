@@ -1,4 +1,5 @@
 #include "vn_decoder.h"
+#include "../../common/venus/vn_gen_decode.h"
 #include "win_capture.h"
 #include <fstream>
 #include <algorithm>
@@ -53,6 +54,8 @@ bool VnDecoder::execute(const uint8_t* data, size_t size) {
 
 bool VnDecoder::executeOneFrame(VnStreamReader& reader) {
     while (reader.hasMore() && !error_) {
+        size_t cmdStartPos = reader.pos();
+
         uint32_t cmdType = reader.readU32();
         uint32_t cmdSize = reader.readU32();
 
@@ -60,6 +63,11 @@ bool VnDecoder::executeOneFrame(VnStreamReader& reader) {
             return false;
 
         dispatch(cmdType, reader, cmdSize);
+
+        // Ensure reader advances exactly cmdSize bytes (same protection as execute())
+        size_t nextPos = cmdStartPos + cmdSize;
+        if (reader.pos() != nextPos)
+            reader.setPos(nextPos);
 
         if (cmdType == VN_CMD_BRIDGE_QueuePresent)
             return true; // frame boundary
@@ -327,24 +335,23 @@ uint32_t VnDecoder_mapMemoryType(VkPhysicalDevice physDev, uint32_t icdType) {
 }
 
 void VnDecoder::handleAllocateMemory(VnStreamReader& r) {
-    uint64_t deviceId = r.readU64();
-    uint64_t memoryId = r.readU64();
-    uint64_t allocSize = r.readU64();
-    uint32_t memTypeIdx = r.readU32();
+    VnDecode_vkAllocateMemory a;
+    vn_decode_vkAllocateMemory(&r, &a);
 
-    uint32_t hostType = VnDecoder_mapMemoryType(physDevice_, memTypeIdx);
+    uint32_t hostType = VnDecoder_mapMemoryType(physDevice_, a.pAllocateInfo_memoryTypeIndex);
 
     VkMemoryAllocateInfo ai{};
     ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    ai.allocationSize = allocSize;
+    ai.allocationSize = a.pAllocateInfo_allocationSize;
     ai.memoryTypeIndex = hostType;
 
     VkDeviceMemory mem;
     VkResult vr = vkAllocateMemory(device_, &ai, nullptr, &mem);
     fprintf(stderr, "[Decoder] AllocMemory: id=%llu size=%llu icdType=%u→hostType=%u result=%d\n",
-            (unsigned long long)memoryId, (unsigned long long)allocSize, memTypeIdx, hostType, (int)vr);
+            (unsigned long long)a.pMemory, (unsigned long long)a.pAllocateInfo_allocationSize,
+            a.pAllocateInfo_memoryTypeIndex, hostType, (int)vr);
     if (vr != VK_SUCCESS) return;
-    store(deviceMemories_, memoryId, mem);
+    store(deviceMemories_, a.pMemory, mem);
 }
 
 void VnDecoder::handleBindImageMemory(VnStreamReader& r) {
@@ -360,64 +367,68 @@ void VnDecoder::handleBindImageMemory(VnStreamReader& r) {
 }
 
 void VnDecoder::handleCreateImageView(VnStreamReader& r) {
-    uint64_t deviceId = r.readU64();
-    uint64_t viewId = r.readU64();
-    uint64_t imageId = r.readU64();
-    uint32_t viewType = r.readU32(), format = r.readU32();
-    uint32_t cR = r.readU32(), cG = r.readU32(), cB = r.readU32(), cA = r.readU32();
-    uint32_t aspect = r.readU32(), baseMip = r.readU32(), levels = r.readU32();
-    uint32_t baseLayer = r.readU32(), layers = r.readU32();
+    VnDecode_vkCreateImageView a;
+    vn_decode_vkCreateImageView(&r, &a);
 
-    VkImage img = lookup(images_, imageId);
+    VkImage img = lookup(images_, a.pCreateInfo_image);
     if (!img) {
         fprintf(stderr, "[Decoder] CreateImageView: SKIP id=%llu img=%llu NOT FOUND\n",
-                (unsigned long long)viewId, (unsigned long long)imageId);
+                (unsigned long long)a.pView, (unsigned long long)a.pCreateInfo_image);
         return;
     }
 
     VkImageViewCreateInfo ci{};
     ci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    ci.flags = a.pCreateInfo_flags;
     ci.image = img;
-    ci.viewType = static_cast<VkImageViewType>(viewType);
-    ci.format = static_cast<VkFormat>(format);
-    ci.components = {static_cast<VkComponentSwizzle>(cR), static_cast<VkComponentSwizzle>(cG),
-                     static_cast<VkComponentSwizzle>(cB), static_cast<VkComponentSwizzle>(cA)};
-    ci.subresourceRange = {aspect, baseMip, levels, baseLayer, layers};
+    ci.viewType = static_cast<VkImageViewType>(a.pCreateInfo_viewType);
+    ci.format = static_cast<VkFormat>(a.pCreateInfo_format);
+    ci.components = {static_cast<VkComponentSwizzle>(a.pCreateInfo_components_r),
+                     static_cast<VkComponentSwizzle>(a.pCreateInfo_components_g),
+                     static_cast<VkComponentSwizzle>(a.pCreateInfo_components_b),
+                     static_cast<VkComponentSwizzle>(a.pCreateInfo_components_a)};
+    ci.subresourceRange = {a.pCreateInfo_subresourceRange_aspectMask,
+                           a.pCreateInfo_subresourceRange_baseMipLevel,
+                           a.pCreateInfo_subresourceRange_levelCount,
+                           a.pCreateInfo_subresourceRange_baseArrayLayer,
+                           a.pCreateInfo_subresourceRange_layerCount};
 
     VkImageView view;
     VkResult vr = vkCreateImageView(device_, &ci, nullptr, &view);
     fprintf(stderr, "[Decoder] CreateImageView: id=%llu img=%llu fmt=%u type=%u result=%d\n",
-            (unsigned long long)viewId, (unsigned long long)imageId, format, viewType, (int)vr);
+            (unsigned long long)a.pView, (unsigned long long)a.pCreateInfo_image,
+            a.pCreateInfo_format, a.pCreateInfo_viewType, (int)vr);
     if (vr != VK_SUCCESS) return;
-    store(imageViews_, viewId, view);
+    store(imageViews_, a.pView, view);
 }
 
 void VnDecoder::handleCreateSampler(VnStreamReader& r) {
-    uint64_t deviceId = r.readU64();
-    uint64_t samplerId = r.readU64();
+    VnDecode_vkCreateSampler a;
+    vn_decode_vkCreateSampler(&r, &a);
 
     VkSamplerCreateInfo ci{};
     ci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    ci.magFilter = static_cast<VkFilter>(r.readU32());
-    ci.minFilter = static_cast<VkFilter>(r.readU32());
-    ci.mipmapMode = static_cast<VkSamplerMipmapMode>(r.readU32());
-    ci.addressModeU = static_cast<VkSamplerAddressMode>(r.readU32());
-    ci.addressModeV = static_cast<VkSamplerAddressMode>(r.readU32());
-    ci.addressModeW = static_cast<VkSamplerAddressMode>(r.readU32());
-    ci.mipLodBias = r.readF32();
-    ci.anisotropyEnable = r.readU32();
-    ci.maxAnisotropy = r.readF32();
-    ci.compareEnable = r.readU32();
-    ci.compareOp = static_cast<VkCompareOp>(r.readU32());
-    ci.minLod = r.readF32();
-    ci.maxLod = r.readF32();
-    ci.borderColor = static_cast<VkBorderColor>(r.readU32());
-    ci.unnormalizedCoordinates = r.readU32();
+    ci.flags = a.pCreateInfo_flags;
+    ci.magFilter = static_cast<VkFilter>(a.pCreateInfo_magFilter);
+    ci.minFilter = static_cast<VkFilter>(a.pCreateInfo_minFilter);
+    ci.mipmapMode = static_cast<VkSamplerMipmapMode>(a.pCreateInfo_mipmapMode);
+    ci.addressModeU = static_cast<VkSamplerAddressMode>(a.pCreateInfo_addressModeU);
+    ci.addressModeV = static_cast<VkSamplerAddressMode>(a.pCreateInfo_addressModeV);
+    ci.addressModeW = static_cast<VkSamplerAddressMode>(a.pCreateInfo_addressModeW);
+    ci.mipLodBias = a.pCreateInfo_mipLodBias;
+    ci.anisotropyEnable = a.pCreateInfo_anisotropyEnable;
+    ci.maxAnisotropy = a.pCreateInfo_maxAnisotropy;
+    ci.compareEnable = a.pCreateInfo_compareEnable;
+    ci.compareOp = static_cast<VkCompareOp>(a.pCreateInfo_compareOp);
+    ci.minLod = a.pCreateInfo_minLod;
+    ci.maxLod = a.pCreateInfo_maxLod;
+    ci.borderColor = static_cast<VkBorderColor>(a.pCreateInfo_borderColor);
+    ci.unnormalizedCoordinates = a.pCreateInfo_unnormalizedCoordinates;
 
     VkSampler sampler;
     VkResult vr = vkCreateSampler(device_, &ci, nullptr, &sampler);
     if (vr != VK_SUCCESS) return;
-    store(samplers_, samplerId, sampler);
+    store(samplers_, a.pSampler, sampler);
 }
 
 void VnDecoder::handleCreateDescriptorPool(VnStreamReader& r) {
@@ -622,27 +633,27 @@ void VnDecoder::handleCmdPushDescriptorSet(VnStreamReader& r) {
 }
 
 void VnDecoder::handleCreateBuffer(VnStreamReader& r) {
-    uint64_t deviceId = r.readU64();
-    uint64_t bufferId = r.readU64();
-    uint64_t size = r.readU64();
-    uint32_t usage = r.readU32();
+    VnDecode_vkCreateBuffer a;
+    vn_decode_vkCreateBuffer(&r, &a);
 
-    // Strip SHADER_DEVICE_ADDRESS — host uses descriptors, not BDA;
-    // this flag may cause memory-type incompatibility with HOST_VISIBLE memory
-    usage &= ~(uint32_t)VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    // Strip SHADER_DEVICE_ADDRESS — host uses descriptors, not BDA
+    uint32_t usage = a.pCreateInfo_usage & ~(uint32_t)VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 
     VkBufferCreateInfo ci{};
     ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    ci.size = size;
+    ci.flags = a.pCreateInfo_flags;
+    ci.size = a.pCreateInfo_size;
     ci.usage = usage;
-    ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ci.sharingMode = static_cast<VkSharingMode>(a.pCreateInfo_sharingMode);
+    ci.queueFamilyIndexCount = a.pCreateInfo_queueFamilyIndexCount;
+    ci.pQueueFamilyIndices = a.pCreateInfo_pQueueFamilyIndices.data();
 
     VkBuffer buffer;
     VkResult vr = vkCreateBuffer(device_, &ci, nullptr, &buffer);
     fprintf(stderr, "[Decoder] CreateBuffer: id=%llu size=%llu usage=0x%x result=%d\n",
-            (unsigned long long)bufferId, (unsigned long long)size, usage, (int)vr);
+            (unsigned long long)a.pBuffer, (unsigned long long)a.pCreateInfo_size, usage, (int)vr);
     if (vr != VK_SUCCESS) return;
-    store(buffers_, bufferId, buffer);
+    store(buffers_, a.pBuffer, buffer);
 }
 
 void VnDecoder::handleBindBufferMemory(VnStreamReader& r) {
@@ -1093,16 +1104,15 @@ void VnDecoder::handleCreateFramebuffer(VnStreamReader& r) {
 }
 
 void VnDecoder::handleCreateCommandPool(VnStreamReader& r) {
-    uint64_t deviceId = r.readU64();
-    uint64_t poolId = r.readU64();
-    uint32_t queueFamily = r.readU32();
-    fprintf(stderr, "[Decoder] CreateCmdPool: id=%llu family=%u\n",
-            (unsigned long long)poolId, queueFamily);
+    VnDecode_vkCreateCommandPool a;
+    vn_decode_vkCreateCommandPool(&r, &a);
+    fprintf(stderr, "[Decoder] CreateCmdPool: id=%llu flags=%u family=%u\n",
+            (unsigned long long)a.pCommandPool, a.pCreateInfo_flags, a.pCreateInfo_queueFamilyIndex);
 
     VkCommandPoolCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    info.queueFamilyIndex = queueFamily;
+    info.flags = a.pCreateInfo_flags | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    info.queueFamilyIndex = a.pCreateInfo_queueFamilyIndex;
 
     VkCommandPool pool;
     VkResult vr = vkCreateCommandPool(device_, &info, nullptr, &pool);
@@ -1113,7 +1123,7 @@ void VnDecoder::handleCreateCommandPool(VnStreamReader& r) {
         error_ = true;
         return;
     }
-    store(commandPools_, poolId, pool);
+    store(commandPools_, a.pCommandPool, pool);
 }
 
 void VnDecoder::handleAllocateCommandBuffers(VnStreamReader& r) {
@@ -1396,8 +1406,8 @@ void VnDecoder::handleCmdBindPipeline(VnStreamReader& r) {
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     VkPipeline pip = lookup(pipelines_, pipId);
     if (!cb || !pip) {
-        fprintf(stderr, "[Decoder] BindPipeline SKIP: cb=%p pip=%p (ids: cb=%u pip=%u)\n",
-                (void*)cb, (void*)pip, (unsigned)cbId, (unsigned)pipId);
+        fprintf(stderr, "[Decoder] BindPipeline SKIP: cb=%p pip=%p (cbId=%llu pipId=%llu)\n",
+                (void*)cb, (void*)pip, (unsigned long long)cbId, (unsigned long long)pipId);
         return;
     }
     vkCmdBindPipeline(cb, static_cast<VkPipelineBindPoint>(bindPoint), pip);
@@ -1609,33 +1619,33 @@ void VnDecoder::handleCmdPushConstants(VnStreamReader& r) {
 // --- Sync ---
 
 void VnDecoder::handleCreateSemaphore(VnStreamReader& r) {
-    uint64_t deviceId = r.readU64();
-    uint64_t semId = r.readU64();
+    VnDecode_vkCreateSemaphore a;
+    vn_decode_vkCreateSemaphore(&r, &a);
 
     VkSemaphoreCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    info.flags = a.pCreateInfo_flags;
     VkSemaphore sem;
     if (vkCreateSemaphore(device_, &info, nullptr, &sem) != VK_SUCCESS) {
         error_ = true;
         return;
     }
-    store(semaphores_, semId, sem);
+    store(semaphores_, a.pSemaphore, sem);
 }
 
 void VnDecoder::handleCreateFence(VnStreamReader& r) {
-    uint64_t deviceId = r.readU64();
-    uint64_t fenceId = r.readU64();
-    uint32_t flags = r.readU32();
+    VnDecode_vkCreateFence a;
+    vn_decode_vkCreateFence(&r, &a);
 
     VkFenceCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    info.flags = flags;
+    info.flags = a.pCreateInfo_flags;
     VkFence fence;
     if (vkCreateFence(device_, &info, nullptr, &fence) != VK_SUCCESS) {
         error_ = true;
         return;
     }
-    store(fences_, fenceId, fence);
+    store(fences_, a.pFence, fence);
 }
 
 void VnDecoder::handleQueueSubmit(VnStreamReader& r) {

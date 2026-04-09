@@ -54,8 +54,8 @@ static inline void vn_encode_vkBindImageMemory(VnStreamWriter* w
 
 static inline void vn_encode_vkCmdBindDescriptorSets(VnStreamWriter* w
     , uint64_t commandBuffer
-    , uint64_t layout
     , uint32_t pipelineBindPoint
+    , uint64_t layout
     , uint32_t firstSet
     , uint32_t descriptorSetCount
     , const uint64_t* pDescriptorSets
@@ -64,8 +64,8 @@ static inline void vn_encode_vkCmdBindDescriptorSets(VnStreamWriter* w
 )
 {
     w->writeU64(commandBuffer);
-    w->writeU64(layout);
     w->writeU32(pipelineBindPoint);
+    w->writeU64(layout);
     w->writeU32(firstSet);
     w->writeU32(descriptorSetCount);
     for (uint32_t i = 0; i < descriptorSetCount; i++)
@@ -90,13 +90,13 @@ static inline void vn_encode_vkCmdBindIndexBuffer(VnStreamWriter* w
 
 static inline void vn_encode_vkCmdBindPipeline(VnStreamWriter* w
     , uint64_t commandBuffer
-    , uint64_t pipeline
     , uint32_t pipelineBindPoint
+    , uint64_t pipeline
 )
 {
     w->writeU64(commandBuffer);
-    w->writeU64(pipeline);
     w->writeU32(pipelineBindPoint);
+    w->writeU64(pipeline);
 }
 
 static inline void vn_encode_vkCmdBindVertexBuffers(VnStreamWriter* w
@@ -137,60 +137,6 @@ static inline void vn_encode_vkCmdBindVertexBuffers2(VnStreamWriter* w
         w->writeU64(pSizes[i]);
     for (uint32_t i = 0; i < bindingCount; i++)
         w->writeU64(pStrides[i]);
-}
-
-static inline void vn_encode_vkCmdCopyBuffer(VnStreamWriter* w
-    , uint64_t commandBuffer
-    , uint64_t srcBuffer
-    , uint64_t dstBuffer
-    , uint32_t regionCount
-    , uint32_t regionCount
-    , const VkBufferCopy* pRegions
-)
-{
-    w->writeU64(commandBuffer);
-    w->writeU64(srcBuffer);
-    w->writeU64(dstBuffer);
-    w->writeU32(regionCount);
-    w->writeU32(regionCount);
-    for (uint32_t _i = 0; _i < regionCount; _i++) {
-        w->writeU64(pRegions[_i].srcOffset);
-        w->writeU64(pRegions[_i].dstOffset);
-        w->writeU64(pRegions[_i].size);
-    }
-}
-
-static inline void vn_encode_vkCmdCopyBufferToImage(VnStreamWriter* w
-    , uint64_t commandBuffer
-    , uint64_t srcBuffer
-    , uint64_t dstImage
-    , uint32_t dstImageLayout
-    , uint32_t regionCount
-    , uint32_t regionCount
-    , const VkBufferImageCopy* pRegions
-)
-{
-    w->writeU64(commandBuffer);
-    w->writeU64(srcBuffer);
-    w->writeU64(dstImage);
-    w->writeU32(dstImageLayout);
-    w->writeU32(regionCount);
-    w->writeU32(regionCount);
-    for (uint32_t _i = 0; _i < regionCount; _i++) {
-        w->writeU64(pRegions[_i].bufferOffset);
-        w->writeU32(pRegions[_i].bufferRowLength);
-        w->writeU32(pRegions[_i].bufferImageHeight);
-        w->writeU32(pRegions[_i].imageSubresource.aspectMask);
-        w->writeU32(pRegions[_i].imageSubresource.mipLevel);
-        w->writeU32(pRegions[_i].imageSubresource.baseArrayLayer);
-        w->writeU32(pRegions[_i].imageSubresource.layerCount);
-        w->writeI32(pRegions[_i].imageOffset.x);
-        w->writeI32(pRegions[_i].imageOffset.y);
-        w->writeI32(pRegions[_i].imageOffset.z);
-        w->writeU32(pRegions[_i].imageExtent.width);
-        w->writeU32(pRegions[_i].imageExtent.height);
-        w->writeU32(pRegions[_i].imageExtent.depth);
-    }
 }
 
 static inline void vn_encode_vkCmdDraw(VnStreamWriter* w
@@ -237,61 +183,6 @@ static inline void vn_encode_vkCmdEndRendering(VnStreamWriter* w
 )
 {
     w->writeU64(commandBuffer);
-}
-
-static inline void vn_encode_vkCmdPipelineBarrier(VnStreamWriter* w
-    , uint64_t commandBuffer
-    , uint32_t srcStageMask
-    , uint32_t dstStageMask
-    , uint32_t dependencyFlags
-    , uint32_t memoryBarrierCount
-    , uint32_t memoryBarrierCount
-    , const VkMemoryBarrier* pMemoryBarriers
-    , uint32_t bufferMemoryBarrierCount
-    , uint32_t bufferMemoryBarrierCount
-    , const VkBufferMemoryBarrier* pBufferMemoryBarriers
-    , uint32_t imageMemoryBarrierCount
-    , uint32_t imageMemoryBarrierCount
-    , const VkImageMemoryBarrier* pImageMemoryBarriers
-)
-{
-    w->writeU64(commandBuffer);
-    w->writeU32(srcStageMask);
-    w->writeU32(dstStageMask);
-    w->writeU32(dependencyFlags);
-    w->writeU32(memoryBarrierCount);
-    w->writeU32(memoryBarrierCount);
-    for (uint32_t _i = 0; _i < memoryBarrierCount; _i++) {
-        w->writeU32(pMemoryBarriers[_i].srcAccessMask);
-        w->writeU32(pMemoryBarriers[_i].dstAccessMask);
-    }
-    w->writeU32(bufferMemoryBarrierCount);
-    w->writeU32(bufferMemoryBarrierCount);
-    for (uint32_t _i = 0; _i < bufferMemoryBarrierCount; _i++) {
-        w->writeU32(pBufferMemoryBarriers[_i].srcAccessMask);
-        w->writeU32(pBufferMemoryBarriers[_i].dstAccessMask);
-        w->writeU32(pBufferMemoryBarriers[_i].srcQueueFamilyIndex);
-        w->writeU32(pBufferMemoryBarriers[_i].dstQueueFamilyIndex);
-        w->writeU64(pBufferMemoryBarriers[_i].buffer);
-        w->writeU64(pBufferMemoryBarriers[_i].offset);
-        w->writeU64(pBufferMemoryBarriers[_i].size);
-    }
-    w->writeU32(imageMemoryBarrierCount);
-    w->writeU32(imageMemoryBarrierCount);
-    for (uint32_t _i = 0; _i < imageMemoryBarrierCount; _i++) {
-        w->writeU32(pImageMemoryBarriers[_i].srcAccessMask);
-        w->writeU32(pImageMemoryBarriers[_i].dstAccessMask);
-        w->writeU32(pImageMemoryBarriers[_i].oldLayout);
-        w->writeU32(pImageMemoryBarriers[_i].newLayout);
-        w->writeU32(pImageMemoryBarriers[_i].srcQueueFamilyIndex);
-        w->writeU32(pImageMemoryBarriers[_i].dstQueueFamilyIndex);
-        w->writeU64(pImageMemoryBarriers[_i].image);
-        w->writeU32(pImageMemoryBarriers[_i].subresourceRange.aspectMask);
-        w->writeU32(pImageMemoryBarriers[_i].subresourceRange.baseMipLevel);
-        w->writeU32(pImageMemoryBarriers[_i].subresourceRange.levelCount);
-        w->writeU32(pImageMemoryBarriers[_i].subresourceRange.baseArrayLayer);
-        w->writeU32(pImageMemoryBarriers[_i].subresourceRange.layerCount);
-    }
 }
 
 static inline void vn_encode_vkCmdPushConstants(VnStreamWriter* w
@@ -374,48 +265,6 @@ static inline void vn_encode_vkCmdSetFrontFace(VnStreamWriter* w
     w->writeU32(frontFace);
 }
 
-static inline void vn_encode_vkCmdSetScissor(VnStreamWriter* w
-    , uint64_t commandBuffer
-    , uint32_t firstScissor
-    , uint32_t scissorCount
-    , uint32_t scissorCount
-    , const VkRect2D* pScissors
-)
-{
-    w->writeU64(commandBuffer);
-    w->writeU32(firstScissor);
-    w->writeU32(scissorCount);
-    w->writeU32(scissorCount);
-    for (uint32_t _i = 0; _i < scissorCount; _i++) {
-        w->writeI32(pScissors[_i].offset.x);
-        w->writeI32(pScissors[_i].offset.y);
-        w->writeU32(pScissors[_i].extent.width);
-        w->writeU32(pScissors[_i].extent.height);
-    }
-}
-
-static inline void vn_encode_vkCmdSetViewport(VnStreamWriter* w
-    , uint64_t commandBuffer
-    , uint32_t firstViewport
-    , uint32_t viewportCount
-    , uint32_t viewportCount
-    , const VkViewport* pViewports
-)
-{
-    w->writeU64(commandBuffer);
-    w->writeU32(firstViewport);
-    w->writeU32(viewportCount);
-    w->writeU32(viewportCount);
-    for (uint32_t _i = 0; _i < viewportCount; _i++) {
-        w->writeF32(pViewports[_i].x);
-        w->writeF32(pViewports[_i].y);
-        w->writeF32(pViewports[_i].width);
-        w->writeF32(pViewports[_i].height);
-        w->writeF32(pViewports[_i].minDepth);
-        w->writeF32(pViewports[_i].maxDepth);
-    }
-}
-
 static inline void vn_encode_vkCmdUpdateBuffer(VnStreamWriter* w
     , uint64_t commandBuffer
     , uint64_t dstBuffer
@@ -431,23 +280,6 @@ static inline void vn_encode_vkCmdUpdateBuffer(VnStreamWriter* w
     w->writeBytes(pData, dataSize);
 }
 
-static inline void vn_encode_vkCreateBuffer(VnStreamWriter* w
-    , uint64_t device
-    , uint64_t pBuffer
-    , const VkBufferCreateInfo* pCreateInfo
-)
-{
-    w->writeU64(device);
-    w->writeU64(pBuffer);
-    w->writeU32(pCreateInfo->flags);
-    w->writeU64(pCreateInfo->size);
-    w->writeU32(pCreateInfo->usage);
-    w->writeU32(pCreateInfo->sharingMode);
-    w->writeU32(pCreateInfo->queueFamilyIndexCount);
-    for (uint32_t _i = 0; _i < pCreateInfo->queueFamilyIndexCount; _i++)
-        w->writeU32(pCreateInfo->pQueueFamilyIndices[_i]);
-}
-
 static inline void vn_encode_vkCreateCommandPool(VnStreamWriter* w
     , uint64_t device
     , uint64_t pCommandPool
@@ -461,41 +293,6 @@ static inline void vn_encode_vkCreateCommandPool(VnStreamWriter* w
     w->writeU32(pCreateInfo_queueFamilyIndex);
 }
 
-static inline void vn_encode_vkCreateDescriptorPool(VnStreamWriter* w
-    , uint64_t device
-    , uint64_t pDescriptorPool
-    , const VkDescriptorPoolCreateInfo* pCreateInfo
-)
-{
-    w->writeU64(device);
-    w->writeU64(pDescriptorPool);
-    w->writeU32(pCreateInfo->flags);
-    w->writeU32(pCreateInfo->maxSets);
-    w->writeU32(pCreateInfo->poolSizeCount);
-    for (uint32_t _i = 0; _i < pCreateInfo->poolSizeCount; _i++) {
-        w->writeU32(pCreateInfo->pPoolSizes[_i].type);
-        w->writeU32(pCreateInfo->pPoolSizes[_i].descriptorCount);
-    }
-}
-
-static inline void vn_encode_vkCreateDescriptorSetLayout(VnStreamWriter* w
-    , uint64_t device
-    , uint64_t pSetLayout
-    , const VkDescriptorSetLayoutCreateInfo* pCreateInfo
-)
-{
-    w->writeU64(device);
-    w->writeU64(pSetLayout);
-    w->writeU32(pCreateInfo->flags);
-    w->writeU32(pCreateInfo->bindingCount);
-    for (uint32_t _i = 0; _i < pCreateInfo->bindingCount; _i++) {
-        w->writeU32(pCreateInfo->pBindings[_i].binding);
-        w->writeU32(pCreateInfo->pBindings[_i].descriptorType);
-        w->writeU32(pCreateInfo->pBindings[_i].descriptorCount);
-        w->writeU32(pCreateInfo->pBindings[_i].stageFlags);
-    }
-}
-
 static inline void vn_encode_vkCreateFence(VnStreamWriter* w
     , uint64_t device
     , uint64_t pFence
@@ -505,50 +302,6 @@ static inline void vn_encode_vkCreateFence(VnStreamWriter* w
     w->writeU64(device);
     w->writeU64(pFence);
     w->writeU32(pCreateInfo_flags);
-}
-
-static inline void vn_encode_vkCreateFramebuffer(VnStreamWriter* w
-    , uint64_t device
-    , uint64_t pFramebuffer
-    , const VkFramebufferCreateInfo* pCreateInfo
-)
-{
-    w->writeU64(device);
-    w->writeU64(pFramebuffer);
-    w->writeU32(pCreateInfo->flags);
-    w->writeU64(pCreateInfo->renderPass);
-    w->writeU32(pCreateInfo->attachmentCount);
-    for (uint32_t _i = 0; _i < pCreateInfo->attachmentCount; _i++)
-        w->writeU64(pCreateInfo->pAttachments[_i]);
-    w->writeU32(pCreateInfo->width);
-    w->writeU32(pCreateInfo->height);
-    w->writeU32(pCreateInfo->layers);
-}
-
-static inline void vn_encode_vkCreateImage(VnStreamWriter* w
-    , uint64_t device
-    , uint64_t pImage
-    , const VkImageCreateInfo* pCreateInfo
-)
-{
-    w->writeU64(device);
-    w->writeU64(pImage);
-    w->writeU32(pCreateInfo->flags);
-    w->writeU32(pCreateInfo->imageType);
-    w->writeU32(pCreateInfo->format);
-    w->writeU32(pCreateInfo->extent.width);
-    w->writeU32(pCreateInfo->extent.height);
-    w->writeU32(pCreateInfo->extent.depth);
-    w->writeU32(pCreateInfo->mipLevels);
-    w->writeU32(pCreateInfo->arrayLayers);
-    w->writeU32(pCreateInfo->samples);
-    w->writeU32(pCreateInfo->tiling);
-    w->writeU32(pCreateInfo->usage);
-    w->writeU32(pCreateInfo->sharingMode);
-    w->writeU32(pCreateInfo->queueFamilyIndexCount);
-    for (uint32_t _i = 0; _i < pCreateInfo->queueFamilyIndexCount; _i++)
-        w->writeU32(pCreateInfo->pQueueFamilyIndices[_i]);
-    w->writeU32(pCreateInfo->initialLayout);
 }
 
 static inline void vn_encode_vkCreateImageView(VnStreamWriter* w
@@ -584,67 +337,6 @@ static inline void vn_encode_vkCreateImageView(VnStreamWriter* w
     w->writeU32(pCreateInfo_subresourceRange_levelCount);
     w->writeU32(pCreateInfo_subresourceRange_baseArrayLayer);
     w->writeU32(pCreateInfo_subresourceRange_layerCount);
-}
-
-static inline void vn_encode_vkCreatePipelineLayout(VnStreamWriter* w
-    , uint64_t device
-    , uint64_t pPipelineLayout
-    , const VkPipelineLayoutCreateInfo* pCreateInfo
-)
-{
-    w->writeU64(device);
-    w->writeU64(pPipelineLayout);
-    w->writeU32(pCreateInfo->flags);
-    w->writeU32(pCreateInfo->setLayoutCount);
-    for (uint32_t _i = 0; _i < pCreateInfo->setLayoutCount; _i++)
-        w->writeU64(pCreateInfo->pSetLayouts[_i]);
-    w->writeU32(pCreateInfo->pushConstantRangeCount);
-    for (uint32_t _i = 0; _i < pCreateInfo->pushConstantRangeCount; _i++) {
-        w->writeU32(pCreateInfo->pPushConstantRanges[_i].stageFlags);
-        w->writeU32(pCreateInfo->pPushConstantRanges[_i].offset);
-        w->writeU32(pCreateInfo->pPushConstantRanges[_i].size);
-    }
-}
-
-static inline void vn_encode_vkCreateRenderPass(VnStreamWriter* w
-    , uint64_t device
-    , uint64_t pRenderPass
-    , const VkRenderPassCreateInfo* pCreateInfo
-)
-{
-    w->writeU64(device);
-    w->writeU64(pRenderPass);
-    w->writeU32(pCreateInfo->flags);
-    w->writeU32(pCreateInfo->attachmentCount);
-    for (uint32_t _i = 0; _i < pCreateInfo->attachmentCount; _i++) {
-        w->writeU32(pCreateInfo->pAttachments[_i].flags);
-        w->writeU32(pCreateInfo->pAttachments[_i].format);
-        w->writeU32(pCreateInfo->pAttachments[_i].samples);
-        w->writeU32(pCreateInfo->pAttachments[_i].loadOp);
-        w->writeU32(pCreateInfo->pAttachments[_i].storeOp);
-        w->writeU32(pCreateInfo->pAttachments[_i].stencilLoadOp);
-        w->writeU32(pCreateInfo->pAttachments[_i].stencilStoreOp);
-        w->writeU32(pCreateInfo->pAttachments[_i].initialLayout);
-        w->writeU32(pCreateInfo->pAttachments[_i].finalLayout);
-    }
-    w->writeU32(pCreateInfo->subpassCount);
-    for (uint32_t _i = 0; _i < pCreateInfo->subpassCount; _i++) {
-        w->writeU32(pCreateInfo->pSubpasses[_i].flags);
-        w->writeU32(pCreateInfo->pSubpasses[_i].pipelineBindPoint);
-        w->writeU32(pCreateInfo->pSubpasses[_i].inputAttachmentCount);
-        w->writeU32(pCreateInfo->pSubpasses[_i].colorAttachmentCount);
-        w->writeU32(pCreateInfo->pSubpasses[_i].preserveAttachmentCount);
-    }
-    w->writeU32(pCreateInfo->dependencyCount);
-    for (uint32_t _i = 0; _i < pCreateInfo->dependencyCount; _i++) {
-        w->writeU32(pCreateInfo->pDependencies[_i].srcSubpass);
-        w->writeU32(pCreateInfo->pDependencies[_i].dstSubpass);
-        w->writeU32(pCreateInfo->pDependencies[_i].srcStageMask);
-        w->writeU32(pCreateInfo->pDependencies[_i].dstStageMask);
-        w->writeU32(pCreateInfo->pDependencies[_i].srcAccessMask);
-        w->writeU32(pCreateInfo->pDependencies[_i].dstAccessMask);
-        w->writeU32(pCreateInfo->pDependencies[_i].dependencyFlags);
-    }
 }
 
 static inline void vn_encode_vkCreateSampler(VnStreamWriter* w
@@ -841,25 +533,6 @@ static inline void vn_encode_vkFreeMemory(VnStreamWriter* w
     w->writeU64(memory);
 }
 
-static inline void vn_encode_vkQueueSubmit(VnStreamWriter* w
-    , uint64_t queue
-    , uint64_t fence
-    , uint32_t submitCount
-    , uint32_t submitCount
-    , const VkSubmitInfo* pSubmits
-)
-{
-    w->writeU64(queue);
-    w->writeU64(fence);
-    w->writeU32(submitCount);
-    w->writeU32(submitCount);
-    for (uint32_t _i = 0; _i < submitCount; _i++) {
-        w->writeU32(pSubmits[_i].waitSemaphoreCount);
-        w->writeU32(pSubmits[_i].commandBufferCount);
-        w->writeU32(pSubmits[_i].signalSemaphoreCount);
-    }
-}
-
 static inline void vn_encode_vkResetFences(VnStreamWriter* w
     , uint64_t device
     , uint32_t fenceCount
@@ -870,39 +543,6 @@ static inline void vn_encode_vkResetFences(VnStreamWriter* w
     w->writeU32(fenceCount);
     for (uint32_t i = 0; i < fenceCount; i++)
         w->writeU64(pFences[i]);
-}
-
-static inline void vn_encode_vkUpdateDescriptorSets(VnStreamWriter* w
-    , uint64_t device
-    , uint32_t descriptorWriteCount
-    , uint32_t descriptorWriteCount
-    , const VkWriteDescriptorSet* pDescriptorWrites
-    , uint32_t descriptorCopyCount
-    , uint32_t descriptorCopyCount
-    , const VkCopyDescriptorSet* pDescriptorCopies
-)
-{
-    w->writeU64(device);
-    w->writeU32(descriptorWriteCount);
-    w->writeU32(descriptorWriteCount);
-    for (uint32_t _i = 0; _i < descriptorWriteCount; _i++) {
-        w->writeU64(pDescriptorWrites[_i].dstSet);
-        w->writeU32(pDescriptorWrites[_i].dstBinding);
-        w->writeU32(pDescriptorWrites[_i].dstArrayElement);
-        w->writeU32(pDescriptorWrites[_i].descriptorCount);
-        w->writeU32(pDescriptorWrites[_i].descriptorType);
-    }
-    w->writeU32(descriptorCopyCount);
-    w->writeU32(descriptorCopyCount);
-    for (uint32_t _i = 0; _i < descriptorCopyCount; _i++) {
-        w->writeU64(pDescriptorCopies[_i].srcSet);
-        w->writeU32(pDescriptorCopies[_i].srcBinding);
-        w->writeU32(pDescriptorCopies[_i].srcArrayElement);
-        w->writeU64(pDescriptorCopies[_i].dstSet);
-        w->writeU32(pDescriptorCopies[_i].dstBinding);
-        w->writeU32(pDescriptorCopies[_i].dstArrayElement);
-        w->writeU32(pDescriptorCopies[_i].descriptorCount);
-    }
 }
 
 static inline void vn_encode_vkWaitForFences(VnStreamWriter* w
@@ -920,6 +560,350 @@ static inline void vn_encode_vkWaitForFences(VnStreamWriter* w
     w->writeU32(waitAll);
     w->writeU64(timeout);
 }
+
+#ifdef VK_VERSION_1_0  // Functions that use Vulkan struct types
+
+static inline void vn_encode_vkCmdCopyBuffer(VnStreamWriter* w
+    , uint64_t commandBuffer
+    , uint64_t srcBuffer
+    , uint64_t dstBuffer
+    , uint32_t regionCount
+    , const VkBufferCopy* pRegions
+)
+{
+    w->writeU64(commandBuffer);
+    w->writeU64(srcBuffer);
+    w->writeU64(dstBuffer);
+    w->writeU32(regionCount);
+    for (uint32_t _i = 0; _i < regionCount; _i++) {
+        w->writeU64((uint64_t)pRegions[_i].srcOffset);
+        w->writeU64((uint64_t)pRegions[_i].dstOffset);
+        w->writeU64((uint64_t)pRegions[_i].size);
+    }
+}
+
+static inline void vn_encode_vkCmdCopyBufferToImage(VnStreamWriter* w
+    , uint64_t commandBuffer
+    , uint64_t srcBuffer
+    , uint64_t dstImage
+    , uint32_t dstImageLayout
+    , uint32_t regionCount
+    , const VkBufferImageCopy* pRegions
+)
+{
+    w->writeU64(commandBuffer);
+    w->writeU64(srcBuffer);
+    w->writeU64(dstImage);
+    w->writeU32(dstImageLayout);
+    w->writeU32(regionCount);
+    for (uint32_t _i = 0; _i < regionCount; _i++) {
+        w->writeU64((uint64_t)pRegions[_i].bufferOffset);
+        w->writeU32(pRegions[_i].bufferRowLength);
+        w->writeU32(pRegions[_i].bufferImageHeight);
+        w->writeU32(pRegions[_i].imageSubresource.aspectMask);
+        w->writeU32(pRegions[_i].imageSubresource.mipLevel);
+        w->writeU32(pRegions[_i].imageSubresource.baseArrayLayer);
+        w->writeU32(pRegions[_i].imageSubresource.layerCount);
+        w->writeI32(pRegions[_i].imageOffset.x);
+        w->writeI32(pRegions[_i].imageOffset.y);
+        w->writeI32(pRegions[_i].imageOffset.z);
+        w->writeU32(pRegions[_i].imageExtent.width);
+        w->writeU32(pRegions[_i].imageExtent.height);
+        w->writeU32(pRegions[_i].imageExtent.depth);
+    }
+}
+
+static inline void vn_encode_vkCmdPipelineBarrier(VnStreamWriter* w
+    , uint64_t commandBuffer
+    , uint32_t srcStageMask
+    , uint32_t dstStageMask
+    , uint32_t dependencyFlags
+    , uint32_t memoryBarrierCount
+    , const VkMemoryBarrier* pMemoryBarriers
+    , uint32_t bufferMemoryBarrierCount
+    , const VkBufferMemoryBarrier* pBufferMemoryBarriers
+    , uint32_t imageMemoryBarrierCount
+    , const VkImageMemoryBarrier* pImageMemoryBarriers
+)
+{
+    w->writeU64(commandBuffer);
+    w->writeU32(srcStageMask);
+    w->writeU32(dstStageMask);
+    w->writeU32(dependencyFlags);
+    w->writeU32(memoryBarrierCount);
+    for (uint32_t _i = 0; _i < memoryBarrierCount; _i++) {
+        w->writeU32(pMemoryBarriers[_i].srcAccessMask);
+        w->writeU32(pMemoryBarriers[_i].dstAccessMask);
+    }
+    w->writeU32(bufferMemoryBarrierCount);
+    for (uint32_t _i = 0; _i < bufferMemoryBarrierCount; _i++) {
+        w->writeU32(pBufferMemoryBarriers[_i].srcAccessMask);
+        w->writeU32(pBufferMemoryBarriers[_i].dstAccessMask);
+        w->writeU32(pBufferMemoryBarriers[_i].srcQueueFamilyIndex);
+        w->writeU32(pBufferMemoryBarriers[_i].dstQueueFamilyIndex);
+        w->writeU64((uint64_t)pBufferMemoryBarriers[_i].buffer);
+        w->writeU64((uint64_t)pBufferMemoryBarriers[_i].offset);
+        w->writeU64((uint64_t)pBufferMemoryBarriers[_i].size);
+    }
+    w->writeU32(imageMemoryBarrierCount);
+    for (uint32_t _i = 0; _i < imageMemoryBarrierCount; _i++) {
+        w->writeU32(pImageMemoryBarriers[_i].srcAccessMask);
+        w->writeU32(pImageMemoryBarriers[_i].dstAccessMask);
+        w->writeU32(pImageMemoryBarriers[_i].oldLayout);
+        w->writeU32(pImageMemoryBarriers[_i].newLayout);
+        w->writeU32(pImageMemoryBarriers[_i].srcQueueFamilyIndex);
+        w->writeU32(pImageMemoryBarriers[_i].dstQueueFamilyIndex);
+        w->writeU64((uint64_t)pImageMemoryBarriers[_i].image);
+        w->writeU32(pImageMemoryBarriers[_i].subresourceRange.aspectMask);
+        w->writeU32(pImageMemoryBarriers[_i].subresourceRange.baseMipLevel);
+        w->writeU32(pImageMemoryBarriers[_i].subresourceRange.levelCount);
+        w->writeU32(pImageMemoryBarriers[_i].subresourceRange.baseArrayLayer);
+        w->writeU32(pImageMemoryBarriers[_i].subresourceRange.layerCount);
+    }
+}
+
+static inline void vn_encode_vkCmdSetScissor(VnStreamWriter* w
+    , uint64_t commandBuffer
+    , uint32_t firstScissor
+    , uint32_t scissorCount
+    , const VkRect2D* pScissors
+)
+{
+    w->writeU64(commandBuffer);
+    w->writeU32(firstScissor);
+    w->writeU32(scissorCount);
+    for (uint32_t _i = 0; _i < scissorCount; _i++) {
+        w->writeI32(pScissors[_i].offset.x);
+        w->writeI32(pScissors[_i].offset.y);
+        w->writeU32(pScissors[_i].extent.width);
+        w->writeU32(pScissors[_i].extent.height);
+    }
+}
+
+static inline void vn_encode_vkCmdSetViewport(VnStreamWriter* w
+    , uint64_t commandBuffer
+    , uint32_t firstViewport
+    , uint32_t viewportCount
+    , const VkViewport* pViewports
+)
+{
+    w->writeU64(commandBuffer);
+    w->writeU32(firstViewport);
+    w->writeU32(viewportCount);
+    for (uint32_t _i = 0; _i < viewportCount; _i++) {
+        w->writeF32(pViewports[_i].x);
+        w->writeF32(pViewports[_i].y);
+        w->writeF32(pViewports[_i].width);
+        w->writeF32(pViewports[_i].height);
+        w->writeF32(pViewports[_i].minDepth);
+        w->writeF32(pViewports[_i].maxDepth);
+    }
+}
+
+static inline void vn_encode_vkCreateBuffer(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t pBuffer
+    , const VkBufferCreateInfo* pCreateInfo
+)
+{
+    w->writeU64(device);
+    w->writeU64(pBuffer);
+    w->writeU32(pCreateInfo->flags);
+    w->writeU64((uint64_t)pCreateInfo->size);
+    w->writeU32(pCreateInfo->usage);
+    w->writeU32(pCreateInfo->sharingMode);
+    w->writeU32(pCreateInfo->queueFamilyIndexCount);
+    for (uint32_t _i = 0; _i < pCreateInfo->queueFamilyIndexCount; _i++)
+        w->writeU32(pCreateInfo->pQueueFamilyIndices[_i]);
+}
+
+static inline void vn_encode_vkCreateDescriptorPool(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t pDescriptorPool
+    , const VkDescriptorPoolCreateInfo* pCreateInfo
+)
+{
+    w->writeU64(device);
+    w->writeU64(pDescriptorPool);
+    w->writeU32(pCreateInfo->flags);
+    w->writeU32(pCreateInfo->maxSets);
+    w->writeU32(pCreateInfo->poolSizeCount);
+    for (uint32_t _i = 0; _i < pCreateInfo->poolSizeCount; _i++) {
+        w->writeU32(pCreateInfo->pPoolSizes[_i].type);
+        w->writeU32(pCreateInfo->pPoolSizes[_i].descriptorCount);
+    }
+}
+
+static inline void vn_encode_vkCreateDescriptorSetLayout(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t pSetLayout
+    , const VkDescriptorSetLayoutCreateInfo* pCreateInfo
+)
+{
+    w->writeU64(device);
+    w->writeU64(pSetLayout);
+    w->writeU32(pCreateInfo->flags);
+    w->writeU32(pCreateInfo->bindingCount);
+    for (uint32_t _i = 0; _i < pCreateInfo->bindingCount; _i++) {
+        w->writeU32(pCreateInfo->pBindings[_i].binding);
+        w->writeU32(pCreateInfo->pBindings[_i].descriptorType);
+        w->writeU32(pCreateInfo->pBindings[_i].descriptorCount);
+        w->writeU32(pCreateInfo->pBindings[_i].stageFlags);
+    }
+}
+
+static inline void vn_encode_vkCreateFramebuffer(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t pFramebuffer
+    , const VkFramebufferCreateInfo* pCreateInfo
+)
+{
+    w->writeU64(device);
+    w->writeU64(pFramebuffer);
+    w->writeU32(pCreateInfo->flags);
+    w->writeU64((uint64_t)pCreateInfo->renderPass);
+    w->writeU32(pCreateInfo->attachmentCount);
+    for (uint32_t _i = 0; _i < pCreateInfo->attachmentCount; _i++)
+        w->writeU64((uint64_t)pCreateInfo->pAttachments[_i]);
+    w->writeU32(pCreateInfo->width);
+    w->writeU32(pCreateInfo->height);
+    w->writeU32(pCreateInfo->layers);
+}
+
+static inline void vn_encode_vkCreateImage(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t pImage
+    , const VkImageCreateInfo* pCreateInfo
+)
+{
+    w->writeU64(device);
+    w->writeU64(pImage);
+    w->writeU32(pCreateInfo->flags);
+    w->writeU32(pCreateInfo->imageType);
+    w->writeU32(pCreateInfo->format);
+    w->writeU32(pCreateInfo->extent.width);
+    w->writeU32(pCreateInfo->extent.height);
+    w->writeU32(pCreateInfo->extent.depth);
+    w->writeU32(pCreateInfo->mipLevels);
+    w->writeU32(pCreateInfo->arrayLayers);
+    w->writeU32(pCreateInfo->samples);
+    w->writeU32(pCreateInfo->tiling);
+    w->writeU32(pCreateInfo->usage);
+    w->writeU32(pCreateInfo->sharingMode);
+    w->writeU32(pCreateInfo->queueFamilyIndexCount);
+    for (uint32_t _i = 0; _i < pCreateInfo->queueFamilyIndexCount; _i++)
+        w->writeU32(pCreateInfo->pQueueFamilyIndices[_i]);
+    w->writeU32(pCreateInfo->initialLayout);
+}
+
+static inline void vn_encode_vkCreatePipelineLayout(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t pPipelineLayout
+    , const VkPipelineLayoutCreateInfo* pCreateInfo
+)
+{
+    w->writeU64(device);
+    w->writeU64(pPipelineLayout);
+    w->writeU32(pCreateInfo->flags);
+    w->writeU32(pCreateInfo->setLayoutCount);
+    for (uint32_t _i = 0; _i < pCreateInfo->setLayoutCount; _i++)
+        w->writeU64((uint64_t)pCreateInfo->pSetLayouts[_i]);
+    w->writeU32(pCreateInfo->pushConstantRangeCount);
+    for (uint32_t _i = 0; _i < pCreateInfo->pushConstantRangeCount; _i++) {
+        w->writeU32(pCreateInfo->pPushConstantRanges[_i].stageFlags);
+        w->writeU32(pCreateInfo->pPushConstantRanges[_i].offset);
+        w->writeU32(pCreateInfo->pPushConstantRanges[_i].size);
+    }
+}
+
+static inline void vn_encode_vkCreateRenderPass(VnStreamWriter* w
+    , uint64_t device
+    , uint64_t pRenderPass
+    , const VkRenderPassCreateInfo* pCreateInfo
+)
+{
+    w->writeU64(device);
+    w->writeU64(pRenderPass);
+    w->writeU32(pCreateInfo->flags);
+    w->writeU32(pCreateInfo->attachmentCount);
+    for (uint32_t _i = 0; _i < pCreateInfo->attachmentCount; _i++) {
+        w->writeU32(pCreateInfo->pAttachments[_i].flags);
+        w->writeU32(pCreateInfo->pAttachments[_i].format);
+        w->writeU32(pCreateInfo->pAttachments[_i].samples);
+        w->writeU32(pCreateInfo->pAttachments[_i].loadOp);
+        w->writeU32(pCreateInfo->pAttachments[_i].storeOp);
+        w->writeU32(pCreateInfo->pAttachments[_i].stencilLoadOp);
+        w->writeU32(pCreateInfo->pAttachments[_i].stencilStoreOp);
+        w->writeU32(pCreateInfo->pAttachments[_i].initialLayout);
+        w->writeU32(pCreateInfo->pAttachments[_i].finalLayout);
+    }
+    w->writeU32(pCreateInfo->subpassCount);
+    for (uint32_t _i = 0; _i < pCreateInfo->subpassCount; _i++) {
+        w->writeU32(pCreateInfo->pSubpasses[_i].flags);
+        w->writeU32(pCreateInfo->pSubpasses[_i].pipelineBindPoint);
+        w->writeU32(pCreateInfo->pSubpasses[_i].inputAttachmentCount);
+        w->writeU32(pCreateInfo->pSubpasses[_i].colorAttachmentCount);
+        w->writeU32(pCreateInfo->pSubpasses[_i].preserveAttachmentCount);
+    }
+    w->writeU32(pCreateInfo->dependencyCount);
+    for (uint32_t _i = 0; _i < pCreateInfo->dependencyCount; _i++) {
+        w->writeU32(pCreateInfo->pDependencies[_i].srcSubpass);
+        w->writeU32(pCreateInfo->pDependencies[_i].dstSubpass);
+        w->writeU32(pCreateInfo->pDependencies[_i].srcStageMask);
+        w->writeU32(pCreateInfo->pDependencies[_i].dstStageMask);
+        w->writeU32(pCreateInfo->pDependencies[_i].srcAccessMask);
+        w->writeU32(pCreateInfo->pDependencies[_i].dstAccessMask);
+        w->writeU32(pCreateInfo->pDependencies[_i].dependencyFlags);
+    }
+}
+
+static inline void vn_encode_vkQueueSubmit(VnStreamWriter* w
+    , uint64_t queue
+    , uint32_t submitCount
+    , const VkSubmitInfo* pSubmits
+    , uint64_t fence
+)
+{
+    w->writeU64(queue);
+    w->writeU32(submitCount);
+    for (uint32_t _i = 0; _i < submitCount; _i++) {
+        w->writeU32(pSubmits[_i].waitSemaphoreCount);
+        w->writeU32(pSubmits[_i].commandBufferCount);
+        w->writeU32(pSubmits[_i].signalSemaphoreCount);
+    }
+    w->writeU64(fence);
+}
+
+static inline void vn_encode_vkUpdateDescriptorSets(VnStreamWriter* w
+    , uint64_t device
+    , uint32_t descriptorWriteCount
+    , const VkWriteDescriptorSet* pDescriptorWrites
+    , uint32_t descriptorCopyCount
+    , const VkCopyDescriptorSet* pDescriptorCopies
+)
+{
+    w->writeU64(device);
+    w->writeU32(descriptorWriteCount);
+    for (uint32_t _i = 0; _i < descriptorWriteCount; _i++) {
+        w->writeU64((uint64_t)pDescriptorWrites[_i].dstSet);
+        w->writeU32(pDescriptorWrites[_i].dstBinding);
+        w->writeU32(pDescriptorWrites[_i].dstArrayElement);
+        w->writeU32(pDescriptorWrites[_i].descriptorCount);
+        w->writeU32(pDescriptorWrites[_i].descriptorType);
+    }
+    w->writeU32(descriptorCopyCount);
+    for (uint32_t _i = 0; _i < descriptorCopyCount; _i++) {
+        w->writeU64((uint64_t)pDescriptorCopies[_i].srcSet);
+        w->writeU32(pDescriptorCopies[_i].srcBinding);
+        w->writeU32(pDescriptorCopies[_i].srcArrayElement);
+        w->writeU64((uint64_t)pDescriptorCopies[_i].dstSet);
+        w->writeU32(pDescriptorCopies[_i].dstBinding);
+        w->writeU32(pDescriptorCopies[_i].dstArrayElement);
+        w->writeU32(pDescriptorCopies[_i].descriptorCount);
+    }
+}
+
+#endif // VK_VERSION_1_0
 
 // ── Not yet generated (complex parameter types) ──
 // TODO: vkAllocateCommandBuffers — complex: VkCommandBuffer* pCommandBuffers

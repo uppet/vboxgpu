@@ -111,6 +111,7 @@ public:
         pos_ += bytes;
     }
 
+    size_t pos() const { return pos_; }
     void setPos(size_t pos) { pos_ = pos; }
 
     const uint8_t* currentPtr() const { return data_ + pos_; }

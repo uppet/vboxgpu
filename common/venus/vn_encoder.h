@@ -183,8 +183,7 @@ public:
                            uint64_t allocationSize, uint32_t memoryTypeIndex) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkAllocateMemory);
-        w_.writeU64(deviceId); w_.writeU64(memoryId);
-        w_.writeU64(allocationSize); w_.writeU32(memoryTypeIndex);
+        vn_encode_vkAllocateMemory(&w_, deviceId, memoryId, allocationSize, memoryTypeIndex);
         w_.endCommand(off);
     }
 
@@ -198,10 +197,12 @@ public:
 
     void cmdCreateBuffer(uint64_t deviceId, uint64_t bufferId,
                          uint64_t size, uint32_t usage) {
+        // Legacy scalar overload (guest_sim compat) — no flags, sharingMode EXCLUSIVE
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCreateBuffer);
         w_.writeU64(deviceId); w_.writeU64(bufferId);
-        w_.writeU64(size); w_.writeU32(usage);
+        w_.writeU32(0); w_.writeU64(size); w_.writeU32(usage);
+        w_.writeU32(0); w_.writeU32(0); // sharingMode=EXCLUSIVE, queueFamilyIndexCount=0
         w_.endCommand(off);
     }
 
@@ -224,34 +225,39 @@ public:
         w_.endCommand(off);
     }
 
-    void cmdCreateImageView(uint64_t deviceId, uint64_t viewId, uint64_t imageId,
+    void cmdCreateImageView(uint64_t deviceId, uint64_t viewId,
+                            uint32_t flags, uint64_t imageId,
                             uint32_t viewType, uint32_t format,
                             uint32_t compR, uint32_t compG, uint32_t compB, uint32_t compA,
                             uint32_t aspectMask, uint32_t baseMipLevel, uint32_t levelCount,
                             uint32_t baseArrayLayer, uint32_t layerCount) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCreateImageView);
-        w_.writeU64(deviceId); w_.writeU64(viewId); w_.writeU64(imageId);
-        w_.writeU32(viewType); w_.writeU32(format);
-        w_.writeU32(compR); w_.writeU32(compG); w_.writeU32(compB); w_.writeU32(compA);
-        w_.writeU32(aspectMask); w_.writeU32(baseMipLevel); w_.writeU32(levelCount);
-        w_.writeU32(baseArrayLayer); w_.writeU32(layerCount);
+        vn_encode_vkCreateImageView(&w_, deviceId, viewId, flags, imageId,
+            viewType, format, compR, compG, compB, compA,
+            aspectMask, baseMipLevel, levelCount, baseArrayLayer, layerCount);
         w_.endCommand(off);
     }
 
 #ifdef VK_VERSION_1_0 // These methods require Vulkan types (VkSamplerCreateInfo etc.)
+    void cmdCreateBuffer(uint64_t deviceId, uint64_t bufferId,
+                         const VkBufferCreateInfo* pInfo) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCreateBuffer);
+        vn_encode_vkCreateBuffer(&w_, deviceId, bufferId, pInfo);
+        w_.endCommand(off);
+    }
+
     void cmdCreateSampler(uint64_t deviceId, uint64_t samplerId,
                           const VkSamplerCreateInfo* ci) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCreateSampler);
-        w_.writeU64(deviceId); w_.writeU64(samplerId);
-        w_.writeU32(ci->magFilter); w_.writeU32(ci->minFilter); w_.writeU32(ci->mipmapMode);
-        w_.writeU32(ci->addressModeU); w_.writeU32(ci->addressModeV); w_.writeU32(ci->addressModeW);
-        w_.writeF32(ci->mipLodBias);
-        w_.writeU32(ci->anisotropyEnable); w_.writeF32(ci->maxAnisotropy);
-        w_.writeU32(ci->compareEnable); w_.writeU32(ci->compareOp);
-        w_.writeF32(ci->minLod); w_.writeF32(ci->maxLod);
-        w_.writeU32(ci->borderColor); w_.writeU32(ci->unnormalizedCoordinates);
+        vn_encode_vkCreateSampler(&w_, deviceId, samplerId,
+            ci->flags, ci->magFilter, ci->minFilter, ci->mipmapMode,
+            ci->addressModeU, ci->addressModeV, ci->addressModeW,
+            ci->mipLodBias, ci->anisotropyEnable, ci->maxAnisotropy,
+            ci->compareEnable, ci->compareOp, ci->minLod, ci->maxLod,
+            ci->borderColor, ci->unnormalizedCoordinates);
         w_.endCommand(off);
     }
 
@@ -397,12 +403,11 @@ public:
         w_.endCommand(off);
     }
 
-    void cmdCreateCommandPool(uint64_t deviceId, uint64_t poolId, uint32_t queueFamily) {
+    void cmdCreateCommandPool(uint64_t deviceId, uint64_t poolId,
+                              uint32_t flags, uint32_t queueFamily) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCreateCommandPool);
-        w_.writeU64(deviceId);
-        w_.writeU64(poolId);
-        w_.writeU32(queueFamily);
+        vn_encode_vkCreateCommandPool(&w_, deviceId, poolId, flags, queueFamily);
         w_.endCommand(off);
     }
 
@@ -716,20 +721,17 @@ public:
 
     // --- Sync ---
 
-    void cmdCreateSemaphore(uint64_t deviceId, uint64_t semId) {
+    void cmdCreateSemaphore(uint64_t deviceId, uint64_t semId, uint32_t flags = 0) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCreateSemaphore);
-        w_.writeU64(deviceId);
-        w_.writeU64(semId);
+        vn_encode_vkCreateSemaphore(&w_, deviceId, semId, flags);
         w_.endCommand(off);
     }
 
     void cmdCreateFence(uint64_t deviceId, uint64_t fenceId, uint32_t flags) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCreateFence);
-        w_.writeU64(deviceId);
-        w_.writeU64(fenceId);
-        w_.writeU32(flags);
+        vn_encode_vkCreateFence(&w_, deviceId, fenceId, flags);
         w_.endCommand(off);
     }
 

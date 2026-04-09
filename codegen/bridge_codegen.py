@@ -341,23 +341,29 @@ def _emit_struct_decode(lines, plan, prefix):
                 lines.append(f'        {prefix}{f}_{sub["field"]}[_i] = r->{sub["read_fn"]}();')
             lines.append(f'    }}')
 
+def _cast_expr(write_fn, expr):
+    """Wrap expression in a cast if it's a handle being written as u64."""
+    if write_fn == 'writeU64':
+        return f'(uint64_t){expr}'
+    return expr
+
 def _emit_struct_encode(lines, plan, prefix):
     """Emit encoder lines for a struct wire plan. prefix is 'p->' or 'name_'."""
     for op in plan:
         if op['kind'] == 'scalar':
-            lines.append(f'    w->{op["write_fn"]}({prefix}{op["field"]});')
+            lines.append(f'    w->{op["write_fn"]}({_cast_expr(op["write_fn"], prefix + op["field"])});')
         elif op['kind'] == 'nested':
             for sub in op['sub_members']:
                 lines.append(f'    w->{sub["write_fn"]}({prefix}{op["field"]}.{sub["field"]});')
         elif op['kind'] == 'array':
             f, c = op['field'], op['count_field']
             lines.append(f'    for (uint32_t _i = 0; _i < {prefix}{c}; _i++)')
-            lines.append(f'        w->{op["elem_write"]}({prefix}{f}[_i]);')
+            lines.append(f'        w->{op["elem_write"]}({_cast_expr(op["elem_write"], prefix + f + "[_i]")});')
         elif op['kind'] == 'struct_array':
             f, c = op['field'], op['count_field']
             lines.append(f'    for (uint32_t _i = 0; _i < {prefix}{c}; _i++) {{')
             for sub in op['sub_members']:
-                lines.append(f'        w->{sub["write_fn"]}({prefix}{f}[_i].{sub["field"]});')
+                lines.append(f'        w->{sub["write_fn"]}({_cast_expr(sub["write_fn"], prefix + f + "[_i]." + sub["field"])});')
             lines.append(f'    }}')
 
 
@@ -478,11 +484,23 @@ def param_c_type_dec(reg, param, cls):
 
 # ── Code generation ─────────────────────────────────────────────────────────
 
+def _needs_reorder(reg, cmd):
+    """Check if command has output_handle or struct params that need reordering."""
+    for p in cmd.params:
+        cls = classify_param(reg, p)
+        if cls in ('output_handle', 'output_handle_array', 'struct'):
+            return True
+    return False
+
 def _order_params(reg, cmd):
-    """Reorder params: handles and output_handles first, then structs, then rest.
-    This matches the existing manual wire format: (device, objectId, ...struct fields)."""
-    first = []   # handles + output_handles
-    rest = []    # everything else
+    """Reorder params for Create commands: output handles moved right after input handles,
+    before struct fields. This matches existing manual wire format: (device, objectId, ...struct).
+    For other commands (Cmd*, Queue*), keep Vulkan spec order."""
+    if not _needs_reorder(reg, cmd):
+        return cmd.params  # keep original order
+
+    first = []   # input handles + output handles
+    rest = []    # everything else (scalars, structs, arrays)
     for p in cmd.params:
         cls = classify_param(reg, p)
         if cls in ('handle', 'output_handle', 'output_handle_array'):
@@ -491,18 +509,32 @@ def _order_params(reg, cmd):
             rest.append(p)
     return first + rest
 
+def _get_consumed_count_params(reg, cmd):
+    """Return set of param names that are consumed as counts by struct_array/output_handle_array params."""
+    consumed = set()
+    for p in cmd.params:
+        cls = classify_param(reg, p)
+        if cls in ('struct_array', 'output_handle_array'):
+            count = get_len_param_name(p)
+            if count:
+                consumed.add(count)
+    return consumed
+
 def gen_encoder(reg, cmd):
     """Generate encoder function for a command."""
     lines = []
     lines.append(f'static inline void vn_encode_{cmd.name}(VnStreamWriter* w')
 
     ordered = _order_params(reg, cmd)
+    consumed_counts = _get_consumed_count_params(reg, cmd)
 
     # Build parameter list: struct params become individual member params or struct pointer
     for p in ordered:
         cls = classify_param(reg, p)
         if cls == 'ignorable':
             continue
+        if p.name in consumed_counts:
+            continue  # count param consumed by struct_array/output_handle_array
         if cls == 'output_handle_array':
             # Output handle arrays: send count + handle IDs
             count = get_len_param_name(p)
@@ -532,6 +564,8 @@ def gen_encoder(reg, cmd):
         cls = classify_param(reg, p)
         if cls == 'ignorable':
             continue
+        if p.name in consumed_counts:
+            continue  # written by struct_array/output_handle_array handler
         if cls in ('handle', 'output_handle'):
             lines.append(f'    w->writeU64({p.name});')
         elif cls == 'scalar':
@@ -579,10 +613,12 @@ def gen_encoder(reg, cmd):
             lines.append(f'    for (uint32_t _i = 0; _i < {count}; _i++) {{')
             for op in plan:
                 if op['kind'] == 'scalar':
-                    lines.append(f'        w->{op["write_fn"]}({p.name}[_i].{op["field"]});')
+                    expr = f'{p.name}[_i].{op["field"]}'
+                    lines.append(f'        w->{op["write_fn"]}({_cast_expr(op["write_fn"], expr)});')
                 elif op['kind'] == 'nested':
                     for sub in op['sub_members']:
-                        lines.append(f'        w->{sub["write_fn"]}({p.name}[_i].{op["field"]}.{sub["field"]});')
+                        expr = f'{p.name}[_i].{op["field"]}.{sub["field"]}'
+                        lines.append(f'        w->{sub["write_fn"]}({_cast_expr(sub["write_fn"], expr)});')
             lines.append(f'    }}')
     lines.append('}')
     return '\n'.join(lines)
@@ -593,12 +629,15 @@ def gen_decoder(reg, cmd):
     struct_name = f'VnDecode_{cmd.name}'
 
     ordered = _order_params(reg, cmd)
+    consumed_counts = _get_consumed_count_params(reg, cmd)
 
     lines.append(f'struct {struct_name} {{')
     for p in ordered:
         cls = classify_param(reg, p)
         if cls == 'ignorable':
             continue
+        if p.name in consumed_counts:
+            continue  # count field declared by struct_array/output_handle_array
         if cls == 'struct':
             st = reg.types[p.type_name]
             plan = get_struct_wire_plan(reg, st)
@@ -632,6 +671,8 @@ def gen_decoder(reg, cmd):
         cls = classify_param(reg, p)
         if cls == 'ignorable':
             continue
+        if p.name in consumed_counts:
+            continue  # read by struct_array/output_handle_array handler
         if cls in ('handle', 'output_handle'):
             lines.append(f'    args->{p.name} = r->readU64();')
         elif cls == 'scalar':
@@ -720,6 +761,18 @@ def gen_command_header(apis, bridge_cmds):
     lines.append('};')
     return '\n'.join(lines)
 
+def _uses_vulkan_types(reg, cmd):
+    """Check if a command's generated encoder uses Vulkan struct types (needs VK_VERSION_1_0 guard)."""
+    for p in cmd.params:
+        cls = classify_param(reg, p)
+        if cls == 'struct':
+            st = reg.types[p.type_name]
+            if _has_array_members(reg, st):
+                return True  # uses const VkXxxCreateInfo* param
+        if cls in ('struct_array',):
+            return True  # uses const VkXxx* param
+    return False
+
 def gen_encode_header(reg, apis):
     """Generate vn_gen_encode.h."""
     lines = [HEADER]
@@ -728,6 +781,7 @@ def gen_encode_header(reg, apis):
 
     generated = []
     skipped = []
+    guarded = []  # functions that need VK_VERSION_1_0 guard
 
     for name in sorted(apis.keys()):
         cmd = reg.commands.get(name)
@@ -736,8 +790,11 @@ def gen_encode_header(reg, apis):
             continue
 
         if can_generate(reg, cmd):
-            lines.append(gen_encoder(reg, cmd))
-            lines.append('')
+            if _uses_vulkan_types(reg, cmd):
+                guarded.append(name)
+            else:
+                lines.append(gen_encoder(reg, cmd))
+                lines.append('')
             generated.append(name)
         else:
             # Show why it's complex
@@ -748,6 +805,17 @@ def gen_encode_header(reg, apis):
                     complex_params.append(f'{p.type_name}{"*" if p.is_pointer else ""} {p.name}')
             reason = ', '.join(complex_params) if complex_params else 'unknown'
             skipped.append(f'// TODO: {name} — complex: {reason}')
+
+    if guarded:
+        lines.append('#ifdef VK_VERSION_1_0  // Functions that use Vulkan struct types')
+        lines.append('')
+        for name in sorted(guarded):
+            cmd = reg.commands.get(name)
+            if cmd:
+                lines.append(gen_encoder(reg, cmd))
+                lines.append('')
+        lines.append('#endif // VK_VERSION_1_0')
+        lines.append('')
 
     if skipped:
         lines.append('// ── Not yet generated (complex parameter types) ──')

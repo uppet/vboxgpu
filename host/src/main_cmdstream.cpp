@@ -96,7 +96,7 @@ static std::vector<uint8_t> buildSetupStream(const char* shaderDir) {
     }
 
     // Create command pool + buffer
-    enc.cmdCreateCommandPool(H_DEVICE, H_CMD_POOL, 0);
+    enc.cmdCreateCommandPool(H_DEVICE, H_CMD_POOL, 0, 0);
     enc.cmdAllocateCommandBuffers(H_DEVICE, H_CMD_POOL, H_CMD_BUF);
 
     // Create sync objects
