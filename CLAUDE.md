@@ -10,12 +10,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目状态
 
-**阶段一 M1.4 完成** — 纹理三角形端到端渲染 + Venus codegen 基础框架。
+**阶段一 M1.5 完成** — 深度测试 + 多物体 + alpha blend + codegen Stage 3。
 
 已完成里程碑：
 - M1.2：DX11 静态三角形通过 DXVK → ICD → TCP → Host Vulkan 完整链路渲染 ✓
 - M1.3：变色动画三角形（cbuffer 传 time 值 + HSV 色环 shader）✓
 - M1.4：纹理三角形渲染（vertex buffer + texture + sampler 全链路）✓
+- M1.5：深度测试 + 多物体 + alpha blend + blend state 切换 + codegen Stage 3 ✓
 
 已完成功能：
 - ICD 代理框架（Vulkan 1.3, Features2, 60+ 扩展）
@@ -31,7 +32,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Viewport 动态状态转发（含 Y 轴翻转）
 - CullMode / FrontFace 动态状态转发
 - 命令流反汇编工具 + Host 内置 captureScreenshot
-- Venus protocol codegen 框架（32/62 API 自动生成，18 个已集成到 encoder）
+- Venus protocol codegen 框架（59/67 API 可自动生成，7 个已集成到编解码链路）
 - 资源销毁全链路（15 个 vkDestroy*/vkFreeMemory 命令，host 端正确释放）
 - Present fence 转发（VkSwapchainPresentFenceInfoKHR pNext 解析）
 - Host server worker thread 架构（decoder 独立线程，窗口始终响应）
@@ -42,12 +43,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 当前状态：
 - 深度测试 + 多物体 + alpha blend（含 blend state 动态切换）在 Host 窗口正确渲染
-- 37 个命令使用 codegen 生成函数 + Venus 标准命令 ID（含 5 个 depth 命令）
-- WaitForFences 使用 Vulkan 原始 timeout 语义（无 cap）
+- 59/67 命令可 codegen 自动生成，7 个已集成（Stage 3 结构体序列化完成）
+- 3 个测试用例全部通过（dx11_triangle, dx11_depth_test, dx11_multi_blend）
 
-后续：
-- codegen Step 3：结构体序列化支持（解锁 vkCreate* 命令）
-- 更多 DX11 测试用例（stencil、多 render target）
+M1.6 目标：
+- 画面回传：Host 渲染结果通过 TCP 压缩回传 Guest 窗口（方案 A）
+- Stencil test 支持
+- Mipmap 支持
+- 多 Render Target (MRT)
+- 目标：能运行简单的真实 DX11 游戏
 
 ## 架构要点
 
