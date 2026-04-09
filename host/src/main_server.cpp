@@ -356,11 +356,29 @@ int main(int argc, char* argv[]) {
                 break;
             }
 
-            // Send imageIndex response to guest
-            uint32_t imageIndex = 0;
+            // Send response to guest: [imageIndex][width][height][frameSize][pixel data]
             auto* sc = decoder.getFirstSwapchain();
-            if (sc) imageIndex = sc->currentImageIndex;
-            server.send(reinterpret_cast<const uint8_t*>(&imageIndex), sizeof(imageIndex));
+            uint32_t imageIndex = sc ? sc->currentImageIndex : 0;
+
+            if (decoder.hasReadback()) {
+                uint32_t w = decoder.getReadbackWidth();
+                uint32_t h = decoder.getReadbackHeight();
+                uint32_t sz = decoder.getReadbackSize();
+                // Pack header + pixel data into one framed message
+                std::vector<uint8_t> resp(16 + sz);
+                memcpy(resp.data(),      &imageIndex, 4);
+                memcpy(resp.data() + 4,  &w, 4);
+                memcpy(resp.data() + 8,  &h, 4);
+                memcpy(resp.data() + 12, &sz, 4);
+                memcpy(resp.data() + 16, decoder.getReadbackData(), sz);
+                server.send(resp.data(), resp.size());
+            } else {
+                // No frame: send header with frameSize=0
+                uint8_t resp[16] = {};
+                memcpy(resp,     &imageIndex, 4);
+                // width, height, frameSize all zero
+                server.send(resp, sizeof(resp));
+            }
         }
     });
 

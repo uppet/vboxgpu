@@ -54,8 +54,17 @@ struct IcdState {
     VkFormat swapchainFormat = VK_FORMAT_B8G8R8A8_SRGB;
     VkExtent2D swapchainExtent = {800, 600};
 
+    // Surface HWND for frame display (GDI blit)
+    HWND presentHwnd = nullptr;
+
     // Per-frame sync: image index returned by Host
     uint32_t currentImageIndex = 0;
+
+    // Frame return: pixel data received from Host
+    std::vector<uint8_t> frameRecvBuf;    // reusable TCP receive buffer
+    std::vector<uint8_t> framePixels;     // last received frame (BGRA)
+    uint32_t frameWidth = 0, frameHeight = 0;
+    bool frameValid = false;
 
     // Descriptor update templates: save entries so we can interpret pData later
     struct DescriptorTemplateInfo {
@@ -101,6 +110,7 @@ struct IcdState {
     void initDefaults();
     bool connectToHost(const char* host, uint16_t port);
     bool sendAndRecv(uint32_t* imageIndexOut = nullptr);
+    void blitFrameToWindow();
 };
 
 extern IcdState g_icd;

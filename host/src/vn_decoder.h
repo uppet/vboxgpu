@@ -57,6 +57,13 @@ public:
     // Returns true on success.
     bool captureScreenshot(const char* path);
 
+    // Frame readback: last presented frame available for TCP return
+    bool hasReadback() const { return readbackValid_; }
+    const void* getReadbackData() const { return readbackValid_ ? readback_.mappedPtr : nullptr; }
+    uint32_t getReadbackWidth() const { return readback_.width; }
+    uint32_t getReadbackHeight() const { return readback_.height; }
+    uint32_t getReadbackSize() const { return static_cast<uint32_t>(readback_.bufferSize); }
+
 private:
     void dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdSize);
 
@@ -184,6 +191,22 @@ private:
     };
     std::vector<PendingPresent> pendingPresents_;
     void flushPendingPresents();
+
+    // Frame readback infrastructure (persistent, reused per frame)
+    struct FrameReadback {
+        VkBuffer stagingBuf = VK_NULL_HANDLE;
+        VkDeviceMemory stagingMem = VK_NULL_HANDLE;
+        VkCommandPool cmdPool = VK_NULL_HANDLE;
+        VkCommandBuffer cmdBuf = VK_NULL_HANDLE;
+        void* mappedPtr = nullptr;
+        uint32_t width = 0, height = 0;
+        VkDeviceSize bufferSize = 0;
+    };
+    FrameReadback readback_;
+    bool readbackValid_ = false;
+
+    void ensureReadbackResources(uint32_t w, uint32_t h);
+    bool readbackFrame(uint32_t imageIndex, HostSwapchain& sc);
 
     bool error_ = false;
 };

@@ -1829,6 +1829,7 @@ void VnDecoder::handleBridgeQueuePresent(VnStreamReader& r) {
 }
 
 void VnDecoder::flushPendingPresents() {
+    readbackValid_ = false;
     for (auto& pp : pendingPresents_) {
         auto it = swapchains_.find(pp.scId);
         if (it == swapchains_.end()) continue;
@@ -1859,6 +1860,10 @@ void VnDecoder::flushPendingPresents() {
             lastPresentedImageIndex_ = savedLPI;
             fprintf(stderr, "[Decoder] Screenshot saved: %s (presentIdx=%u)\n", path, presentIdx);
         }
+
+        // Readback frame for TCP return (before present, image in PRESENT_SRC layout)
+        readbackFrame(presentIdx, it->second);
+
         VkResult vr = vkQueuePresentKHR(graphicsQueue_, &info);
 
         // WGC disabled — was causing crashes after push descriptor changes
@@ -1888,6 +1893,13 @@ HostSwapchain* VnDecoder::getSwapchain(uint64_t id) {
 void VnDecoder::cleanup() {
     fprintf(stderr, "[Decoder] cleanup() starting\n"); fflush(stderr);
     vkDeviceWaitIdle(device_);
+    // Cleanup frame readback resources
+    if (readback_.mappedPtr) { vkUnmapMemory(device_, readback_.stagingMem); readback_.mappedPtr = nullptr; }
+    if (readback_.cmdBuf) vkFreeCommandBuffers(device_, readback_.cmdPool, 1, &readback_.cmdBuf);
+    if (readback_.cmdPool) vkDestroyCommandPool(device_, readback_.cmdPool, nullptr);
+    if (readback_.stagingBuf) vkDestroyBuffer(device_, readback_.stagingBuf, nullptr);
+    if (readback_.stagingMem) vkFreeMemory(device_, readback_.stagingMem, nullptr);
+    readback_ = {};
     if (acquireSemaphore_) vkDestroySemaphore(device_, acquireSemaphore_, nullptr);
     if (acquireFence_) vkDestroyFence(device_, acquireFence_, nullptr);
     for (auto& [id, p] : pipelines_) vkDestroyPipeline(device_, p, nullptr);
@@ -2074,5 +2086,172 @@ bool VnDecoder::captureScreenshot(const char* path) {
     vkFreeMemory(device_, stagingMem, nullptr);
 
     fprintf(stderr, "[Screenshot] Saved %s (%ux%u)\n", path, w, h);
+    return true;
+}
+
+// --- Frame readback for TCP return ---
+
+void VnDecoder::ensureReadbackResources(uint32_t w, uint32_t h) {
+    VkDeviceSize needed = VkDeviceSize(w) * h * 4; // BGRA8
+    if (readback_.stagingBuf && readback_.bufferSize >= needed) {
+        readback_.width = w;
+        readback_.height = h;
+        return;
+    }
+
+    // Cleanup old resources
+    if (readback_.mappedPtr) {
+        vkUnmapMemory(device_, readback_.stagingMem);
+        readback_.mappedPtr = nullptr;
+    }
+    if (readback_.cmdBuf) {
+        vkFreeCommandBuffers(device_, readback_.cmdPool, 1, &readback_.cmdBuf);
+        readback_.cmdBuf = VK_NULL_HANDLE;
+    }
+    if (readback_.cmdPool) {
+        vkDestroyCommandPool(device_, readback_.cmdPool, nullptr);
+        readback_.cmdPool = VK_NULL_HANDLE;
+    }
+    if (readback_.stagingBuf) {
+        vkDestroyBuffer(device_, readback_.stagingBuf, nullptr);
+        readback_.stagingBuf = VK_NULL_HANDLE;
+    }
+    if (readback_.stagingMem) {
+        vkFreeMemory(device_, readback_.stagingMem, nullptr);
+        readback_.stagingMem = VK_NULL_HANDLE;
+    }
+
+    // Create dedicated command pool + buffer (resettable)
+    VkCommandPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    poolInfo.queueFamilyIndex = graphicsFamily_;
+    if (vkCreateCommandPool(device_, &poolInfo, nullptr, &readback_.cmdPool) != VK_SUCCESS) {
+        fprintf(stderr, "[Readback] Failed to create command pool\n");
+        return;
+    }
+
+    VkCommandBufferAllocateInfo cbAlloc{};
+    cbAlloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cbAlloc.commandPool = readback_.cmdPool;
+    cbAlloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbAlloc.commandBufferCount = 1;
+    vkAllocateCommandBuffers(device_, &cbAlloc, &readback_.cmdBuf);
+
+    // Create staging buffer
+    VkBufferCreateInfo bufInfo{};
+    bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufInfo.size = needed;
+    bufInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(device_, &bufInfo, nullptr, &readback_.stagingBuf) != VK_SUCCESS) {
+        fprintf(stderr, "[Readback] Failed to create staging buffer\n");
+        return;
+    }
+
+    VkMemoryRequirements memReq;
+    vkGetBufferMemoryRequirements(device_, readback_.stagingBuf, &memReq);
+
+    // Prefer HOST_VISIBLE + HOST_CACHED for fast CPU reads
+    VkPhysicalDeviceMemoryProperties memProps;
+    vkGetPhysicalDeviceMemoryProperties(physDevice_, &memProps);
+    uint32_t memType = UINT32_MAX;
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
+        if ((memReq.memoryTypeBits & (1u << i)) &&
+            (memProps.memoryTypes[i].propertyFlags &
+             (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT)) ==
+             (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT)) {
+            memType = i;
+            break;
+        }
+    }
+    if (memType == UINT32_MAX) {
+        for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
+            if ((memReq.memoryTypeBits & (1u << i)) &&
+                (memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
+                memType = i;
+                break;
+            }
+        }
+    }
+    if (memType == UINT32_MAX) {
+        fprintf(stderr, "[Readback] No suitable memory type\n");
+        vkDestroyBuffer(device_, readback_.stagingBuf, nullptr);
+        readback_.stagingBuf = VK_NULL_HANDLE;
+        return;
+    }
+
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memReq.size;
+    allocInfo.memoryTypeIndex = memType;
+    if (vkAllocateMemory(device_, &allocInfo, nullptr, &readback_.stagingMem) != VK_SUCCESS) {
+        vkDestroyBuffer(device_, readback_.stagingBuf, nullptr);
+        readback_.stagingBuf = VK_NULL_HANDLE;
+        return;
+    }
+    vkBindBufferMemory(device_, readback_.stagingBuf, readback_.stagingMem, 0);
+
+    // Persistently map for zero-copy reads
+    vkMapMemory(device_, readback_.stagingMem, 0, needed, 0, &readback_.mappedPtr);
+
+    readback_.width = w;
+    readback_.height = h;
+    readback_.bufferSize = needed;
+    fprintf(stderr, "[Readback] Allocated %ux%u staging buffer (%llu bytes)\n",
+            w, h, (unsigned long long)needed);
+}
+
+bool VnDecoder::readbackFrame(uint32_t imageIndex, HostSwapchain& sc) {
+    readbackValid_ = false;
+    ensureReadbackResources(sc.extent.width, sc.extent.height);
+    if (!readback_.stagingBuf || !readback_.mappedPtr) return false;
+
+    VkImage srcImage = sc.images[imageIndex];
+
+    vkResetCommandBuffer(readback_.cmdBuf, 0);
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(readback_.cmdBuf, &beginInfo);
+
+    // Transition swapchain image: PRESENT_SRC → TRANSFER_SRC
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.image = srcImage;
+    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdPipelineBarrier(readback_.cmdBuf, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+    // Copy image to staging buffer
+    VkBufferImageCopy copy{};
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.imageExtent = {sc.extent.width, sc.extent.height, 1};
+    vkCmdCopyImageToBuffer(readback_.cmdBuf, srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           readback_.stagingBuf, 1, &copy);
+
+    // Transition back: TRANSFER_SRC → PRESENT_SRC
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    vkCmdPipelineBarrier(readback_.cmdBuf, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+    vkEndCommandBuffer(readback_.cmdBuf);
+
+    VkSubmitInfo submit{};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &readback_.cmdBuf;
+    vkQueueSubmit(graphicsQueue_, 1, &submit, VK_NULL_HANDLE);
+    vkQueueWaitIdle(graphicsQueue_);
+
+    readbackValid_ = true;
     return true;
 }

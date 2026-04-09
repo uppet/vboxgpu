@@ -117,13 +117,68 @@ bool IcdState::sendAndRecv(uint32_t* imageIndexOut) {
     encoder.w_ = VnStreamWriter();
     if (!ok) return false;
 
-    // Receive host response
-    uint8_t resp[64];
-    size_t n = transport.recv(resp, sizeof(resp));
+    // Receive host response: [imageIndex(4)][width(4)][height(4)][frameSize(4)][pixels...]
+    // Ensure receive buffer is large enough (4MB for 1080p BGRA + header)
+    constexpr size_t RECV_BUF_SIZE = 8 * 1024 * 1024;
+    if (frameRecvBuf.size() < RECV_BUF_SIZE) frameRecvBuf.resize(RECV_BUF_SIZE);
+
+    size_t n = transport.recv(frameRecvBuf.data(), frameRecvBuf.size());
+    frameValid = false;
     if (n >= 4 && imageIndexOut) {
-        memcpy(imageIndexOut, resp, 4);
+        memcpy(imageIndexOut, frameRecvBuf.data(), 4);
+    }
+    // Parse frame header if present
+    if (n >= 16) {
+        uint32_t w, h, sz;
+        memcpy(&w,  frameRecvBuf.data() + 4, 4);
+        memcpy(&h,  frameRecvBuf.data() + 8, 4);
+        memcpy(&sz, frameRecvBuf.data() + 12, 4);
+        if (sz > 0 && n >= 16 + sz) {
+            frameWidth = w;
+            frameHeight = h;
+            framePixels.resize(sz);
+            memcpy(framePixels.data(), frameRecvBuf.data() + 16, sz);
+            frameValid = true;
+        }
     }
     return true;
+}
+
+void IcdState::blitFrameToWindow() {
+    if (!frameValid || !presentHwnd || framePixels.empty()) return;
+
+    HDC hdc = GetDC(presentHwnd);
+    if (!hdc) return;
+
+    // BITMAPINFO for top-down BGRA (negative height = top-down)
+    BITMAPINFO bmi{};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = static_cast<LONG>(frameWidth);
+    bmi.bmiHeader.biHeight = -static_cast<LONG>(frameHeight); // top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    // Get client rect for potential stretching
+    RECT rc;
+    GetClientRect(presentHwnd, &rc);
+    int dstW = rc.right - rc.left;
+    int dstH = rc.bottom - rc.top;
+
+    if (dstW == (int)frameWidth && dstH == (int)frameHeight) {
+        // Exact match: fast path
+        SetDIBitsToDevice(hdc, 0, 0, frameWidth, frameHeight,
+                          0, 0, 0, frameHeight,
+                          framePixels.data(), &bmi, DIB_RGB_COLORS);
+    } else {
+        // Stretch to fit
+        SetStretchBltMode(hdc, COLORONCOLOR);
+        StretchDIBits(hdc, 0, 0, dstW, dstH,
+                      0, 0, frameWidth, frameHeight,
+                      framePixels.data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
+    }
+
+    ReleaseDC(presentHwnd, hdc);
 }
 
 // =============================================================
@@ -444,9 +499,12 @@ static void VKAPI_CALL icd_vkGetPhysicalDeviceFormatProperties2(
 
 // --- Surface ---
 static VkResult VKAPI_CALL icd_vkCreateWin32SurfaceKHR(
-    VkInstance, const VkWin32SurfaceCreateInfoKHR*, const VkAllocationCallbacks*, VkSurfaceKHR* p)
+    VkInstance, const VkWin32SurfaceCreateInfoKHR* pInfo, const VkAllocationCallbacks*, VkSurfaceKHR* p)
 {
     *p = (VkSurfaceKHR)g_icd.handles.alloc();
+    if (pInfo && pInfo->hwnd) {
+        g_icd.presentHwnd = pInfo->hwnd;
+    }
     return VK_SUCCESS;
 }
 
@@ -953,6 +1011,36 @@ static VkResult VKAPI_CALL icd_vkQueuePresentKHR(VkQueue q, const VkPresentInfoK
     uint32_t nextIdx = 0;
     g_icd.sendAndRecv(&nextIdx);
     g_icd.currentImageIndex = nextIdx;
+
+    // Blit returned frame to guest window via GDI
+    g_icd.blitFrameToWindow();
+
+    // Debug: save first few returned frames to BMP for verification
+    static int dbgFrameCount = 0;
+    dbgFrameCount++;
+    if (g_icd.frameValid && (dbgFrameCount == 5 || dbgFrameCount == 30)) {
+        char path[256];
+        snprintf(path, sizeof(path), "S:\\bld\\vboxgpu\\guest_frame%d.bmp", dbgFrameCount);
+        FILE* f = fopen(path, "wb");
+        if (f) {
+            uint32_t w = g_icd.frameWidth, h = g_icd.frameHeight;
+            uint32_t rowStride = (w * 4 + 3u) & ~3u;
+            uint32_t pixelDataSize = rowStride * h;
+            uint32_t fileSize = 14 + 40 + pixelDataSize;
+            uint8_t fh[14] = {}; fh[0]='B'; fh[1]='M';
+            *(uint32_t*)(fh+2) = fileSize; *(uint32_t*)(fh+10) = 54;
+            fwrite(fh, 1, 14, f);
+            uint8_t dh[40] = {};
+            *(uint32_t*)(dh+0) = 40;
+            *(int32_t*)(dh+4) = w;
+            *(int32_t*)(dh+8) = -(int32_t)h;
+            *(uint16_t*)(dh+12) = 1; *(uint16_t*)(dh+14) = 32;
+            *(uint32_t*)(dh+20) = pixelDataSize;
+            fwrite(dh, 1, 40, f);
+            fwrite(g_icd.framePixels.data(), 1, w * h * 4, f);
+            fclose(f);
+        }
+    }
 
     return VK_SUCCESS;
 }
