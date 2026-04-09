@@ -1848,6 +1848,7 @@ void VnDecoder::flushPendingPresents() {
 
         uint32_t presentIdx = it->second.currentImageIndex;
 
+#ifdef VBOXGPU_DEBUG_SCREENSHOTS
         // Capture screenshots at specific frames for animation debugging
         static int dbgFr2 = 0;
         dbgFr2++;
@@ -1860,6 +1861,7 @@ void VnDecoder::flushPendingPresents() {
             lastPresentedImageIndex_ = savedLPI;
             fprintf(stderr, "[Decoder] Screenshot saved: %s (presentIdx=%u)\n", path, presentIdx);
         }
+#endif
 
         // Readback frame for TCP return (before present, image in PRESENT_SRC layout)
         readbackFrame(presentIdx, it->second);

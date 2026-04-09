@@ -72,7 +72,7 @@ set(SERVER_SOURCES
 
 add_executable(vbox_host_server ${SERVER_SOURCES})
 target_include_directories(vbox_host_server PRIVATE src)
-target_link_libraries(vbox_host_server PRIVATE Vulkan::Vulkan ws2_32 windowsapp)
+target_link_libraries(vbox_host_server PRIVATE Vulkan::Vulkan ws2_32 windowsapp lz4)
 add_dependencies(vbox_host_server shaders)
 target_compile_definitions(vbox_host_server PRIVATE
     VK_USE_PLATFORM_WIN32_KHR

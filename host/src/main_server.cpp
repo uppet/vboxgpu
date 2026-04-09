@@ -4,6 +4,7 @@
 #include "vn_decoder.h"
 #include "win_capture.h"
 #include "../../common/transport/tcp_transport.h"
+#include <lz4.h>
 #include <cstdio>
 #include <vector>
 #include <thread>
@@ -328,6 +329,8 @@ int main(int argc, char* argv[]) {
     std::thread workerThread([&]() {
         constexpr size_t BUF_SIZE = 64 * 1024 * 1024; // 64 MB max per message
         std::vector<uint8_t> recvBuf(BUF_SIZE);
+        // Persistent send buffer — avoids per-frame allocation
+        std::vector<uint8_t> sendBuf;
         while (g_running) {
             // Receive a command stream message (blocking)
             size_t bytesRead = 0;
@@ -356,27 +359,52 @@ int main(int argc, char* argv[]) {
                 break;
             }
 
-            // Send response to guest: [imageIndex][width][height][frameSize][pixel data]
+            // Send response: [imageIndex(4)][width(4)][height(4)][compressedSize(4)][LZ4 data]
             auto* sc = decoder.getFirstSwapchain();
             uint32_t imageIndex = sc ? sc->currentImageIndex : 0;
 
             if (decoder.hasReadback()) {
                 uint32_t w = decoder.getReadbackWidth();
                 uint32_t h = decoder.getReadbackHeight();
-                uint32_t sz = decoder.getReadbackSize();
-                // Pack header + pixel data into one framed message
-                std::vector<uint8_t> resp(16 + sz);
-                memcpy(resp.data(),      &imageIndex, 4);
-                memcpy(resp.data() + 4,  &w, 4);
-                memcpy(resp.data() + 8,  &h, 4);
-                memcpy(resp.data() + 12, &sz, 4);
-                memcpy(resp.data() + 16, decoder.getReadbackData(), sz);
-                server.send(resp.data(), resp.size());
+                uint32_t rawSize = decoder.getReadbackSize();
+                int maxCompressed = LZ4_compressBound(rawSize);
+
+                // Ensure send buffer is large enough: 16-byte header + compressed data
+                if (sendBuf.size() < 16 + (size_t)maxCompressed)
+                    sendBuf.resize(16 + maxCompressed);
+
+                int compressedSize = LZ4_compress_default(
+                    static_cast<const char*>(decoder.getReadbackData()),
+                    reinterpret_cast<char*>(sendBuf.data() + 16),
+                    rawSize, maxCompressed);
+
+                if (compressedSize > 0) {
+                    uint32_t csz = static_cast<uint32_t>(compressedSize);
+                    memcpy(sendBuf.data(),      &imageIndex, 4);
+                    memcpy(sendBuf.data() + 4,  &w, 4);
+                    memcpy(sendBuf.data() + 8,  &h, 4);
+                    memcpy(sendBuf.data() + 12, &csz, 4);
+                    server.send(sendBuf.data(), 16 + csz);
+
+                    static int logCount = 0;
+                    if (++logCount <= 3)
+                        fprintf(stderr, "[Host] Frame %ux%u: %u -> %u bytes (%.1fx)\n",
+                                w, h, rawSize, csz, (float)rawSize / csz);
+                } else {
+                    // Compression failed — send uncompressed as fallback
+                    fprintf(stderr, "[Host] LZ4 compress failed, sending raw\n");
+                    sendBuf.resize(16 + rawSize);
+                    memcpy(sendBuf.data(),      &imageIndex, 4);
+                    memcpy(sendBuf.data() + 4,  &w, 4);
+                    memcpy(sendBuf.data() + 8,  &h, 4);
+                    memcpy(sendBuf.data() + 12, &rawSize, 4);
+                    memcpy(sendBuf.data() + 16, decoder.getReadbackData(), rawSize);
+                    server.send(sendBuf.data(), 16 + rawSize);
+                }
             } else {
-                // No frame: send header with frameSize=0
+                // No frame: send header with compressedSize=0
                 uint8_t resp[16] = {};
-                memcpy(resp,     &imageIndex, 4);
-                // width, height, frameSize all zero
+                memcpy(resp, &imageIndex, 4);
                 server.send(resp, sizeof(resp));
             }
         }

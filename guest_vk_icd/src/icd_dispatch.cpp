@@ -2,6 +2,7 @@
 // Maps Vulkan function names to our proxy implementations.
 
 #include "icd_dispatch.h"
+#include <lz4.h>
 #include <cstring>
 #include <cstdio>
 #include <algorithm>
@@ -127,18 +128,24 @@ bool IcdState::sendAndRecv(uint32_t* imageIndexOut) {
     if (n >= 4 && imageIndexOut) {
         memcpy(imageIndexOut, frameRecvBuf.data(), 4);
     }
-    // Parse frame header if present
+    // Parse frame header if present: [width(4)][height(4)][compressedSize(4)][LZ4 data]
     if (n >= 16) {
-        uint32_t w, h, sz;
-        memcpy(&w,  frameRecvBuf.data() + 4, 4);
-        memcpy(&h,  frameRecvBuf.data() + 8, 4);
-        memcpy(&sz, frameRecvBuf.data() + 12, 4);
-        if (sz > 0 && n >= 16 + sz) {
-            frameWidth = w;
-            frameHeight = h;
-            framePixels.resize(sz);
-            memcpy(framePixels.data(), frameRecvBuf.data() + 16, sz);
-            frameValid = true;
+        uint32_t w, h, compressedSz;
+        memcpy(&w,            frameRecvBuf.data() + 4, 4);
+        memcpy(&h,            frameRecvBuf.data() + 8, 4);
+        memcpy(&compressedSz, frameRecvBuf.data() + 12, 4);
+        if (compressedSz > 0 && n >= 16 + compressedSz) {
+            uint32_t rawSize = w * h * 4;
+            framePixels.resize(rawSize);
+            int decompressed = LZ4_decompress_safe(
+                reinterpret_cast<const char*>(frameRecvBuf.data() + 16),
+                reinterpret_cast<char*>(framePixels.data()),
+                compressedSz, rawSize);
+            if (decompressed == (int)rawSize) {
+                frameWidth = w;
+                frameHeight = h;
+                frameValid = true;
+            }
         }
     }
     return true;
@@ -1015,6 +1022,7 @@ static VkResult VKAPI_CALL icd_vkQueuePresentKHR(VkQueue q, const VkPresentInfoK
     // Blit returned frame to guest window via GDI
     g_icd.blitFrameToWindow();
 
+#ifdef VBOXGPU_DEBUG_SCREENSHOTS
     // Debug: save first few returned frames to BMP for verification
     static int dbgFrameCount = 0;
     dbgFrameCount++;
@@ -1041,6 +1049,7 @@ static VkResult VKAPI_CALL icd_vkQueuePresentKHR(VkQueue q, const VkPresentInfoK
             fclose(f);
         }
     }
+#endif
 
     return VK_SUCCESS;
 }

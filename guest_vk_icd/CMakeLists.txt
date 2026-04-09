@@ -4,7 +4,7 @@ set(ICD_SOURCES
 )
 
 add_library(vbox_vk_icd SHARED ${ICD_SOURCES})
-target_link_libraries(vbox_vk_icd PRIVATE ws2_32)
+target_link_libraries(vbox_vk_icd PRIVATE ws2_32 lz4)
 target_compile_definitions(vbox_vk_icd PRIVATE
     WIN32_LEAN_AND_MEAN
     NOMINMAX

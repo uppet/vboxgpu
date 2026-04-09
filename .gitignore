@@ -5,6 +5,9 @@ CLAUDE.local.md
 *.for.agent.md
 *~
 third_party/
+!common/third_party/
+!common/third_party/lz4/
+!common/third_party/lz4/*
 tests/dx11_triangle/test_env/
 dumps/
 *.log
