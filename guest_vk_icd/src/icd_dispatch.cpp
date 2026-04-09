@@ -6,6 +6,7 @@
 #include <cstring>
 #include <cstdio>
 #include <algorithm>
+#include <string>
 
 IcdState g_icd;
 
@@ -127,7 +128,9 @@ void IcdState::flushMappedMemory() {
 bool IcdState::sendAndRecv(uint32_t* imageIndexOut) {
     std::lock_guard<std::mutex> lock(encoder.mutex_);
     encoder.cmdEndOfStreamUnlocked(); // called with lock held
-    bool ok = transport.send(encoder.data(), encoder.size());
+    size_t sendSize = encoder.size();
+    icdDbg((std::string("sendAndRecv: size=") + std::to_string(sendSize)).c_str());
+    bool ok = transport.send(encoder.data(), sendSize);
     // Reset encoder for next batch (keep mutex_)
     encoder.w_ = VnStreamWriter();
     if (!ok) return false;
@@ -1423,6 +1426,8 @@ static VkResult VKAPI_CALL icd_vkWaitForFences(VkDevice, uint32_t count, const V
         for (uint32_t i = 0; i < count; i++) fprintf(stderr, "%s%llu", i?",":"", (unsigned long long)(uint64_t)p[i]);
         fprintf(stderr, "] waitAll=%u\n", waitAll);
         g_icd.encoder.cmdWaitForFences(1, count, reinterpret_cast<const uint64_t*>(p), waitAll, timeout);
+        // Flush commands to Host and wait — DXVK depends on fence synchronization
+        g_icd.sendAndRecv();
     }
     return VK_SUCCESS;
 }

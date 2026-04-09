@@ -327,7 +327,7 @@ int main(int argc, char* argv[]) {
     // Runs on a separate thread so the main thread can pump window messages
     // without being blocked by vkWaitForFences or other long Vulkan operations.
     std::thread workerThread([&]() {
-        constexpr size_t BUF_SIZE = 64 * 1024 * 1024; // 64 MB max per message
+        constexpr size_t BUF_SIZE = 256 * 1024 * 1024; // 256 MB max per message
         std::vector<uint8_t> recvBuf(BUF_SIZE);
         // Persistent send buffer — avoids per-frame allocation
         std::vector<uint8_t> sendBuf;
