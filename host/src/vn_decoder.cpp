@@ -522,13 +522,15 @@ void VnDecoder::handleUpdateDescriptorSets(VnStreamReader& r) {
             allBufferInfos[i][j].buffer = lookup(buffers_, bufId);
             allBufferInfos[i][j].offset = bufOff;
             allBufferInfos[i][j].range = bufRange;
-            // Debug: log image descriptor bindings
-            static int descImgLog = 0;
-            if (descImgLog < 10 && (descType == 1 || descType == 2) && ivId != 0) {
-                fprintf(stderr, "[Decoder] DescImg: type=%u ivId=%llu view=%p samId=%llu sam=%p layout=%u\n",
+            // Debug: log ALL descriptor bindings for first few writes
+            static int descLog = 0;
+            if (descLog < 20) {
+                fprintf(stderr, "[Decoder] DescBind: type=%u iv=%llu(%p) sam=%llu(%p) buf=%llu(%p) off=%llu range=%llu\n",
                         descType, (unsigned long long)ivId, (void*)allImageInfos[i][j].imageView,
-                        (unsigned long long)samId, (void*)allImageInfos[i][j].sampler, imgLayout);
-                descImgLog++;
+                        (unsigned long long)samId, (void*)allImageInfos[i][j].sampler,
+                        (unsigned long long)bufId, (void*)allBufferInfos[i][j].buffer,
+                        (unsigned long long)bufOff, (unsigned long long)bufRange);
+                descLog++;
             }
         }
 
@@ -621,6 +623,12 @@ void VnDecoder::handleCmdPushDescriptorSet(VnStreamReader& r) {
             writes[i].pImageInfo = allImageInfos[i].data();
         }
     }
+
+    static int pushLog = 0;
+    if (pushLog < 5)
+        fprintf(stderr, "[Decoder] PushDescSet: cb=%p layout=%p set=%u writes=%u\n",
+                (void*)cb, (void*)layout, set, writeCount);
+    pushLog++;
 
     if (!cb || !layout) return;
 
@@ -1313,6 +1321,8 @@ void VnDecoder::handleCmdBeginRendering(VnStreamReader& r) {
     colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     colorAttachment.loadOp = static_cast<VkAttachmentLoadOp>(loadOp);
     colorAttachment.storeOp = static_cast<VkAttachmentStoreOp>(storeOp);
+    // // TEMP DEBUG: override internal RT clear to bright red
+    // if (!isSwapchain && loadOp == 1) { cr = 1.0f; cg = 0.0f; cb_ = 0.0f; ca = 1.0f; }
     colorAttachment.clearValue.color = {{cr, cg, cb_, ca}};
 
     // Clamp render area
@@ -1365,9 +1375,10 @@ void VnDecoder::handleCmdBeginRendering(VnStreamReader& r) {
             0, 0, nullptr, 0, nullptr, 1, &barrier);
     }
 
-    fprintf(stderr, "[Decoder] BeginRendering: cb=%p view=%p (ivId=%llu %s) area=%u,%u,%ux%u load=%u depth=%u\n",
+    fprintf(stderr, "[Decoder] BeginRendering: cb=%p view=%p (ivId=%llu %s) area=%u,%u,%ux%u load=%u depth=%u clear=(%.2f,%.2f,%.2f,%.2f)\n",
             (void*)cb, (void*)targetView, (unsigned long long)imageViewId,
-            isSwapchain ? "swapchain" : "internal", areaX, areaY, clampedW, clampedH, loadOp, hasDepth);
+            isSwapchain ? "swapchain" : "internal", areaX, areaY, clampedW, clampedH, loadOp, hasDepth,
+            cr, cg, cb_, ca);
     fflush(stderr);
     vkCmdBeginRendering(cb, &renderingInfo);
 
@@ -1459,6 +1470,8 @@ void VnDecoder::handleCmdSetCullMode(VnStreamReader& r) {
     if (cullLog++ < 5)
         fprintf(stderr, "[Decoder] SetCullMode: cb=%llu mode=%u (0=NONE,1=FRONT,2=BACK)\n",
                 (unsigned long long)cbId, cullMode);
+    // TEMP DEBUG: force no culling
+    cullMode = 0;
     if (cb) vkCmdSetCullMode(cb, static_cast<VkCullModeFlags>(cullMode));
 }
 
@@ -1477,6 +1490,8 @@ void VnDecoder::handleCmdSetDepthTestEnable(VnStreamReader& r) {
     if (dtLog++ < 5)
         fprintf(stderr, "[Decoder] SetDepthTestEnable: cb=%llu enable=%u\n",
                 (unsigned long long)cbId, enable);
+    // TEMP DEBUG: force disable depth test to check if draws are culled by depth
+    enable = 0;
     if (cb) vkCmdSetDepthTestEnable(cb, enable);
 }
 
@@ -1528,6 +1543,17 @@ void VnDecoder::handleCmdBindVertexBuffers(VnStreamReader& r) {
     }
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     if (!cb) return;
+    static int vbLog = 0;
+    if (vbLog < 5) {
+        fprintf(stderr, "[Decoder] BindVB: first=%u count=%u hasStrides=%d",
+                firstBinding, bindingCount, (int)hasStrides);
+        for (uint32_t i = 0; i < bindingCount; i++)
+            fprintf(stderr, " [%u: buf=%p off=%llu sz=%llu stride=%llu]", i,
+                    (void*)buffers[i], (unsigned long long)offsets[i],
+                    (unsigned long long)sizes[i], (unsigned long long)strides[i]);
+        fprintf(stderr, "\n");
+        vbLog++;
+    }
     if (hasStrides) {
         vkCmdBindVertexBuffers2(cb, firstBinding, bindingCount,
             buffers.data(), offsets.data(), sizes.data(), strides.data());
@@ -1557,7 +1583,12 @@ void VnDecoder::handleCmdDrawIndexed(VnStreamReader& r) {
     int32_t vertexOffset = r.readI32();
     uint32_t firstInstance = r.readU32();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
-    if (!cb || !activeRendering_) return;
+    if (!cb || !activeRendering_) {
+        static int diSkip = 0;
+        if (diSkip++ < 5)
+            fprintf(stderr, "[Decoder] DrawIndexed SKIP: cb=%p active=%d\n", (void*)cb, (int)activeRendering_);
+        return;
+    }
     vkCmdDrawIndexed(cb, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 }
 
@@ -1573,7 +1604,14 @@ void VnDecoder::handleCmdCopyBuffer(VnStreamReader& r) {
     }
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     VkBuffer src = lookup(buffers_, srcId), dst = lookup(buffers_, dstId);
-    if (!cb || !src || !dst) return;
+    if (!cb || !src || !dst) {
+        static int cpSkip = 0;
+        if (cpSkip++ < 5)
+            fprintf(stderr, "[Decoder] CopyBuffer SKIP: cb=%p src=%llu(%p) dst=%llu(%p)\n",
+                    (void*)cb, (unsigned long long)srcId, (void*)src,
+                    (unsigned long long)dstId, (void*)dst);
+        return;
+    }
     vkCmdCopyBuffer(cb, src, dst, regionCount, regions.data());
 }
 
@@ -1737,15 +1775,17 @@ void VnDecoder::handleQueueSubmit(VnStreamReader& r) {
         info.pSignalSemaphores = &sigSem;
     }
 
-    // Force-serialize all GPU work: ignore semaphore sync, use WaitIdle instead.
-    // This prevents DEVICE_LOST from unresolved semaphore dependencies.
+    // Force-serialize: WaitIdle before submit ensures all prior GPU work is done.
+    // Strip wait semaphores (unresolvable IDs), keep valid signal semaphores.
     vkDeviceWaitIdle(device_);
-    // Strip semaphore wait/signal — WaitIdle guarantees ordering
     info.waitSemaphoreCount = 0;
     info.pWaitSemaphores = nullptr;
     info.pWaitDstStageMask = nullptr;
-    info.signalSemaphoreCount = 0;
-    info.pSignalSemaphores = nullptr;
+    // Only keep signal semaphore if it resolved to a valid handle
+    if (!sigSem) {
+        info.signalSemaphoreCount = 0;
+        info.pSignalSemaphores = nullptr;
+    }
 
     VkResult submitResult = vkQueueSubmit(graphicsQueue_, 1, &info, fence);
     fprintf(stderr, "[Decoder] QueueSubmit result=%d cb=%p\n", (int)submitResult, (void*)cb);
@@ -2325,5 +2365,17 @@ bool VnDecoder::readbackFrame(uint32_t imageIndex, HostSwapchain& sc) {
     vkQueueWaitIdle(graphicsQueue_);
 
     readbackValid_ = true;
+    // Debug: dump first few pixels
+    static int rbDump = 0;
+    if (rbDump++ < 3) {
+        auto* px = static_cast<const uint8_t*>(readback_.mappedPtr);
+        fprintf(stderr, "[Readback] First 8 pixels (BGRA): ");
+        for (int i = 0; i < 32; i += 4)
+            fprintf(stderr, "(%u,%u,%u,%u) ", px[i], px[i+1], px[i+2], px[i+3]);
+        fprintf(stderr, "\n");
+        // Also dump middle row pixel
+        uint32_t mid = (sc.extent.height / 2) * sc.extent.width * 4 + (sc.extent.width / 2) * 4;
+        fprintf(stderr, "[Readback] Center pixel: (%u,%u,%u,%u)\n", px[mid], px[mid+1], px[mid+2], px[mid+3]);
+    }
     return true;
 }

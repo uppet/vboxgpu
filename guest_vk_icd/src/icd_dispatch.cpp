@@ -1205,18 +1205,30 @@ static VkResult VKAPI_CALL icd_vkCreateGraphicsPipelines(
         uint64_t id = g_icd.handles.alloc();
         pPipelines[i] = (VkPipeline)id;
 
+        fprintf(stderr, "[ICD] CreatePipeline: id=%llu flags=0x%x stages=%u rp=%llu pVIS=%p pRast=%p pBlend=%p\n",
+                (unsigned long long)id, pInfos[i].flags, pInfos[i].stageCount,
+                (unsigned long long)(uint64_t)pInfos[i].renderPass,
+                (void*)pInfos[i].pVertexInputState, (void*)pInfos[i].pRasterizationState,
+                (void*)pInfos[i].pColorBlendState);
+
         uint64_t vertMod = 0, fragMod = 0;
         if (pInfos[i].pStages) {
             for (uint32_t s = 0; s < pInfos[i].stageCount; s++) {
                 uint64_t mod = (uint64_t)pInfos[i].pStages[s].module;
 
-                // If module is null, DXVK may pass SPIR-V via pNext (shader_module_identifier path)
-                if (!mod) {
-                    auto* smci = findShaderModuleCreateInfo(pInfos[i].pStages[s].pNext);
-                    if (smci && smci->codeSize > 0) {
-                        mod = g_icd.handles.alloc();
-                        g_icd.encoder.cmdCreateShaderModule(1, mod, smci->pCode, smci->codeSize);
-                    }
+                // DXVK with graphics_pipeline_library may pass SPIR-V via pNext
+                // even when module is non-null (the module may be an empty placeholder).
+                // Always check pNext for real SPIR-V code.
+                auto* smci = findShaderModuleCreateInfo(pInfos[i].pStages[s].pNext);
+                fprintf(stderr, "[ICD] Pipeline stage %u: mod=%llu pNext=%p smci=%p codeSize=%zu\n",
+                        s, (unsigned long long)mod, pInfos[i].pStages[s].pNext,
+                        (void*)smci, smci ? smci->codeSize : 0);
+                if (smci && smci->codeSize > 4) {
+                    // pNext has real SPIR-V — create a proper shader module
+                    mod = g_icd.handles.alloc();
+                    g_icd.encoder.cmdCreateShaderModule(1, mod, smci->pCode, smci->codeSize);
+                } else if (!mod) {
+                    // No module and no pNext SPIR-V — nothing we can do
                 }
 
                 if (pInfos[i].pStages[s].stage == VK_SHADER_STAGE_VERTEX_BIT)

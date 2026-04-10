@@ -170,7 +170,7 @@ void IcdState::initDefaults() {
         "VK_KHR_shader_float_controls2",
         "VK_KHR_shader_subgroup_uniform_control_flow",
         "VK_EXT_graphics_pipeline_library", "VK_KHR_pipeline_library",
-        "VK_EXT_shader_module_identifier",
+        // "VK_EXT_shader_module_identifier",  // disabled: DXVK sends empty SPIR-V, host can't compile shaders
         // NV
         "VK_NV_descriptor_pool_overallocation", "VK_NV_low_latency2",
         "VK_NV_raw_access_chains", "VK_NVX_binary_import", "VK_NVX_image_view_handle",
