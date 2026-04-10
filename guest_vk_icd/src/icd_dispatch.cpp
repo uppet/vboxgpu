@@ -1781,7 +1781,38 @@ static void VKAPI_CALL icd_vkCmdCopyBufferToImage2(VkCommandBuffer cb, const voi
         bOff.data(), bRL.data(), bIH.data(), iAsp.data(), iMip.data(), iBL.data(), iLC.data(),
         iOX.data(), iOY.data(), iOZ.data(), iEW.data(), iEH.data(), iED.data());
 }
-static void VKAPI_CALL icd_vkCmdCopyImage(VkCommandBuffer, VkImage, VkImageLayout, VkImage, VkImageLayout, uint32_t, const VkImageCopy*) {}
+static void VKAPI_CALL icd_vkCmdCopyImage(VkCommandBuffer cb, VkImage srcImg, VkImageLayout srcLayout,
+    VkImage dstImg, VkImageLayout dstLayout, uint32_t regionCount, const VkImageCopy* pRegions)
+{
+    ENC_LOCK;
+    auto off = g_icd.encoder.w_.beginCommand(VN_CMD_vkCmdCopyImage);
+    g_icd.encoder.w_.writeU64(toId(cb));
+    g_icd.encoder.w_.writeU64((uint64_t)srcImg);
+    g_icd.encoder.w_.writeU32((uint32_t)srcLayout);
+    g_icd.encoder.w_.writeU64((uint64_t)dstImg);
+    g_icd.encoder.w_.writeU32((uint32_t)dstLayout);
+    g_icd.encoder.w_.writeU32(regionCount);
+    for (uint32_t i = 0; i < regionCount; i++) {
+        g_icd.encoder.w_.writeU32(pRegions[i].srcSubresource.aspectMask);
+        g_icd.encoder.w_.writeU32(pRegions[i].srcSubresource.mipLevel);
+        g_icd.encoder.w_.writeU32(pRegions[i].srcSubresource.baseArrayLayer);
+        g_icd.encoder.w_.writeU32(pRegions[i].srcSubresource.layerCount);
+        g_icd.encoder.w_.writeI32(pRegions[i].srcOffset.x);
+        g_icd.encoder.w_.writeI32(pRegions[i].srcOffset.y);
+        g_icd.encoder.w_.writeI32(pRegions[i].srcOffset.z);
+        g_icd.encoder.w_.writeU32(pRegions[i].dstSubresource.aspectMask);
+        g_icd.encoder.w_.writeU32(pRegions[i].dstSubresource.mipLevel);
+        g_icd.encoder.w_.writeU32(pRegions[i].dstSubresource.baseArrayLayer);
+        g_icd.encoder.w_.writeU32(pRegions[i].dstSubresource.layerCount);
+        g_icd.encoder.w_.writeI32(pRegions[i].dstOffset.x);
+        g_icd.encoder.w_.writeI32(pRegions[i].dstOffset.y);
+        g_icd.encoder.w_.writeI32(pRegions[i].dstOffset.z);
+        g_icd.encoder.w_.writeU32(pRegions[i].extent.width);
+        g_icd.encoder.w_.writeU32(pRegions[i].extent.height);
+        g_icd.encoder.w_.writeU32(pRegions[i].extent.depth);
+    }
+    g_icd.encoder.w_.endCommand(off);
+}
 static void VKAPI_CALL icd_vkCmdCopyBufferToImage(VkCommandBuffer cb, VkBuffer buf, VkImage img, VkImageLayout layout,
     uint32_t regionCount, const VkBufferImageCopy* pRegions) {
     // Flush source buffer memory for each region

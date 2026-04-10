@@ -90,6 +90,7 @@ enum VnCommandType : uint32_t {
     VN_CMD_vkCmdCopyBuffer                = 0x1010,
     VN_CMD_vkCmdCopyBufferToImage         = 0x1011,
     VN_CMD_vkCmdUpdateBuffer              = 117,   // Venus standard (was 0x1012)
+    VN_CMD_vkCmdCopyImage                 = 0x1013,
 
     // Extension: swapchain (handled specially by host)
     VN_CMD_BRIDGE_CreateSwapchain          = 0x10000,

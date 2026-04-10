@@ -113,6 +113,7 @@ private:
     void handleCmdBindIndexBuffer(VnStreamReader& r);
     void handleCmdDrawIndexed(VnStreamReader& r);
     void handleCmdCopyBuffer(VnStreamReader& r);
+    void handleCmdCopyImage(VnStreamReader& r);
     void handleCmdCopyBufferToImage(VnStreamReader& r);
     void handleCmdUpdateBuffer(VnStreamReader& r);
     void handleCmdPipelineBarrier(VnStreamReader& r);

@@ -108,6 +108,7 @@ void VnDecoder::dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdS
     case VN_CMD_vkCmdBindIndexBuffer:     handleCmdBindIndexBuffer(reader); break;
     case VN_CMD_vkCmdDrawIndexed:         handleCmdDrawIndexed(reader); break;
     case VN_CMD_vkCmdCopyBuffer:          handleCmdCopyBuffer(reader); break;
+    case VN_CMD_vkCmdCopyImage:           handleCmdCopyImage(reader); break;
     case VN_CMD_vkCmdCopyBufferToImage:   handleCmdCopyBufferToImage(reader); break;
     case VN_CMD_vkCmdUpdateBuffer:        handleCmdUpdateBuffer(reader); break;
     case VN_CMD_vkCmdDraw:                handleCmdDraw(reader); break;
@@ -522,9 +523,9 @@ void VnDecoder::handleUpdateDescriptorSets(VnStreamReader& r) {
             allBufferInfos[i][j].buffer = lookup(buffers_, bufId);
             allBufferInfos[i][j].offset = bufOff;
             allBufferInfos[i][j].range = bufRange;
-            // Debug: log ALL descriptor bindings for first few writes
+            // Debug: log image descriptor bindings (type 0=SAMPLER, 2=SAMPLED_IMAGE)
             static int descLog = 0;
-            if (descLog < 20) {
+            if (descLog < 50 && (descType == 0 || descType == 1 || descType == 2)) {
                 fprintf(stderr, "[Decoder] DescBind: type=%u iv=%llu(%p) sam=%llu(%p) buf=%llu(%p) off=%llu range=%llu\n",
                         descType, (unsigned long long)ivId, (void*)allImageInfos[i][j].imageView,
                         (unsigned long long)samId, (void*)allImageInfos[i][j].sampler,
@@ -1643,6 +1644,42 @@ void VnDecoder::handleCmdCopyBuffer(VnStreamReader& r) {
         return;
     }
     vkCmdCopyBuffer(cb, src, dst, regionCount, regions.data());
+}
+
+void VnDecoder::handleCmdCopyImage(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint64_t srcImgId = r.readU64();
+    uint32_t srcLayout = r.readU32();
+    uint64_t dstImgId = r.readU64();
+    uint32_t dstLayout = r.readU32();
+    uint32_t regionCount = r.readU32();
+    std::vector<VkImageCopy> regions(regionCount);
+    for (uint32_t i = 0; i < regionCount; i++) {
+        regions[i].srcSubresource.aspectMask = r.readU32();
+        regions[i].srcSubresource.mipLevel = r.readU32();
+        regions[i].srcSubresource.baseArrayLayer = r.readU32();
+        regions[i].srcSubresource.layerCount = r.readU32();
+        regions[i].srcOffset.x = r.readI32();
+        regions[i].srcOffset.y = r.readI32();
+        regions[i].srcOffset.z = r.readI32();
+        regions[i].dstSubresource.aspectMask = r.readU32();
+        regions[i].dstSubresource.mipLevel = r.readU32();
+        regions[i].dstSubresource.baseArrayLayer = r.readU32();
+        regions[i].dstSubresource.layerCount = r.readU32();
+        regions[i].dstOffset.x = r.readI32();
+        regions[i].dstOffset.y = r.readI32();
+        regions[i].dstOffset.z = r.readI32();
+        regions[i].extent.width = r.readU32();
+        regions[i].extent.height = r.readU32();
+        regions[i].extent.depth = r.readU32();
+    }
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    VkImage src = lookup(images_, srcImgId);
+    VkImage dst = lookup(images_, dstImgId);
+    if (!cb || !src || !dst) return;
+    vkCmdCopyImage(cb, src, static_cast<VkImageLayout>(srcLayout),
+                   dst, static_cast<VkImageLayout>(dstLayout),
+                   regionCount, regions.data());
 }
 
 void VnDecoder::handleCmdCopyBufferToImage(VnStreamReader& r) {
