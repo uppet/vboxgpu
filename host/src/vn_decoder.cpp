@@ -323,6 +323,7 @@ void VnDecoder::handleCreateImage(VnStreamReader& r) {
             (unsigned long long)imageId, w, h, format, usage, (int)vr);
     if (vr != VK_SUCCESS) return;
     store(images_, imageId, image);
+    imageFormats_[imageId] = static_cast<VkFormat>(format);
 }
 
 uint32_t VnDecoder_mapMemoryType(VkPhysicalDevice physDev, uint32_t icdType) {
@@ -397,9 +398,9 @@ void VnDecoder::handleCreateImageView(VnStreamReader& r) {
 
     VkImageView view;
     VkResult vr = vkCreateImageView(device_, &ci, nullptr, &view);
-    fprintf(stderr, "[Decoder] CreateImageView: id=%llu img=%llu fmt=%u type=%u result=%d\n",
+    fprintf(stderr, "[Decoder] CreateImageView: id=%llu img=%llu fmt=%u type=%u result=%d view=%p\n",
             (unsigned long long)a.pView, (unsigned long long)a.pCreateInfo_image,
-            a.pCreateInfo_format, a.pCreateInfo_viewType, (int)vr);
+            a.pCreateInfo_format, a.pCreateInfo_viewType, (int)vr, (void*)view);
     if (vr != VK_SUCCESS) return;
     store(imageViews_, a.pView, view);
 }
@@ -823,7 +824,19 @@ void VnDecoder::handleCmdPipelineBarrier(VnStreamReader& r) {
         barriers[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barriers[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barriers[i].image = lookup(images_, imgId);
-        barriers[i].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS };
+        // Determine correct aspect mask from image format
+        VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+        auto fmtIt = imageFormats_.find(imgId);
+        if (fmtIt != imageFormats_.end()) {
+            VkFormat fmt = fmtIt->second;
+            if (fmt >= VK_FORMAT_D16_UNORM && fmt <= VK_FORMAT_D32_SFLOAT_S8_UINT) {
+                aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+                if (fmt == VK_FORMAT_D16_UNORM_S8_UINT || fmt == VK_FORMAT_D24_UNORM_S8_UINT ||
+                    fmt == VK_FORMAT_D32_SFLOAT_S8_UINT)
+                    aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
+            }
+        }
+        barriers[i].subresourceRange = { aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS };
 
         // If image not found in our map, it might be a swapchain image — skip
         if (!barriers[i].image) {
@@ -1268,6 +1281,8 @@ void VnDecoder::handleCmdBeginRendering(VnStreamReader& r) {
 
     if (imageViewId != 0) {
         targetView = lookup(imageViews_, imageViewId);
+        fprintf(stderr, "[Decoder] BeginRendering lookup: ivId=%llu -> view=%p (map size=%zu)\n",
+                (unsigned long long)imageViewId, (void*)targetView, imageViews_.size());
     }
     // Only redirect to swapchain when the target is the swapchain itself
     // (imageViewId=0, i.e. DXVK's present/blit pass targeting the swapchain backbuffer).

@@ -9,9 +9,8 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     void* /*pUserData*/)
 {
     if (severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
-        OutputDebugStringA("[Vulkan] ");
-        OutputDebugStringA(pCallbackData->pMessage);
-        OutputDebugStringA("\n");
+        fprintf(stderr, "[Vulkan] %s\n", pCallbackData->pMessage);
+        fflush(stderr);
     }
     return VK_FALSE;
 }
@@ -44,7 +43,7 @@ void createInstance(VulkanContext& ctx) {
 
     // Disable validation layer for host server — the proxy ICD sends commands
     // that may reference objects in unusual ways, causing false validation errors.
-    bool enableValidation = false;
+    bool enableValidation = true;  // TEMP: debugging SortTheCourt black screen
 
     const char* validationLayer = "VK_LAYER_KHRONOS_validation";
 

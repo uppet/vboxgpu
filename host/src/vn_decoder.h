@@ -163,6 +163,7 @@ private:
     std::unordered_map<uint64_t, VkShaderModule> shaderModules_;
     std::unordered_map<uint64_t, VkBuffer> buffers_;
     std::unordered_map<uint64_t, VkImage> images_;
+    std::unordered_map<uint64_t, VkFormat> imageFormats_; // image ID → format
     std::unordered_map<uint64_t, VkDeviceMemory> deviceMemories_;
     std::unordered_map<uint64_t, VkSampler> samplers_;
     std::unordered_map<uint64_t, VkDescriptorPool> descriptorPools_;
