@@ -9,31 +9,49 @@ Each batch contains: [u32 cmd_type][u32 cmd_size][payload...] repeated until End
 
 import struct, sys, os, subprocess, tempfile
 
+# Updated to match current Venus command IDs from vn_command.h
 CMD_NAMES = {
     0: "CreateInstance", 1: "DestroyInstance", 2: "EnumPhysDevices",
     6: "GetPhysDevProps", 7: "GetQueueFamilyProps", 8: "GetMemProps",
     11: "CreateDevice", 12: "DestroyDevice", 17: "GetDeviceQueue",
     18: "QueueSubmit", 20: "DeviceWaitIdle",
     21: "AllocMemory", 22: "FreeMemory", 23: "MapMemory", 24: "UnmapMemory",
-    33: "CreateFence", 34: "DestroyFence", 35: "ResetFences", 37: "WaitForFences",
-    38: "CreateSemaphore", 39: "DestroySemaphore",
-    44: "BindBufferMemory", 46: "CreateBuffer", 47: "DestroyBuffer",
-    48: "BindImageMemory", 50: "CreateImage", 51: "DestroyImage",
-    52: "CreateImageView", 53: "DestroyImageView",
-    54: "CreateShaderModule", 55: "DestroyShaderModule",
-    56: "CreateDescriptorSetLayout",
-    58: "CreatePipelineLayout", 59: "DestroyPipelineLayout",
-    61: "CreateGraphicsPipelines", 63: "DestroyPipeline",
-    67: "CreateRenderPass", 68: "DestroyRenderPass",
-    69: "CreateFramebuffer", 70: "DestroyFramebuffer",
-    71: "CreateCommandPool", 72: "DestroyCommandPool",
-    73: "AllocCommandBuffers", 75: "BeginCommandBuffer", 76: "EndCommandBuffer",
-    78: "CmdBindPipeline", 79: "CmdSetViewport", 80: "CmdSetScissor",
-    86: "CmdDraw", 87: "CmdPushConstants",
-    94: "CmdBeginRenderPass", 96: "CmdEndRenderPass",
-    0x1000: "CmdBeginRendering", 0x1001: "CmdEndRendering",
+    28: "BindBufferMemory", 29: "BindImageMemory",
+    33: "CreateFence", 36: "DestroyFence", 37: "ResetFences",
+    39: "WaitForFences", 40: "CreateSemaphore", 41: "DestroySemaphore",
+    50: "CreateBuffer", 51: "DestroyBuffer",
+    54: "CreateImage", 55: "DestroyImage",
+    57: "CreateImageView", 58: "DestroyImageView",
+    59: "CreateShaderModule", 60: "DestroyShaderModule",
+    65: "CreateGraphicsPipelines", 67: "DestroyPipeline",
+    68: "CreatePipelineLayout", 69: "DestroyPipelineLayout",
+    70: "CreateSampler", 71: "DestroySampler",
+    72: "CreateDescriptorSetLayout", 73: "DestroyDescriptorSetLayout",
+    74: "CreateDescriptorPool", 75: "DestroyDescriptorPool",
+    80: "CreateFramebuffer", 81: "DestroyFramebuffer",
+    82: "CreateRenderPass", 83: "DestroyRenderPass",
+    85: "CreateCommandPool", 86: "DestroyCommandPool",
+    88: "AllocCommandBuffers",
+    90: "BeginCommandBuffer", 91: "EndCommandBuffer",
+    93: "CmdBindPipeline", 94: "CmdSetViewport", 95: "CmdSetScissor",
+    103: "CmdBindDescriptorSets", 104: "CmdBindIndexBuffer",
+    106: "CmdDraw", 107: "CmdDrawIndexed",
+    117: "CmdUpdateBuffer",
+    132: "CmdPushConstants", 133: "CmdBeginRenderPass", 135: "CmdEndRenderPass",
+    214: "CmdEndRendering",
+    215: "CmdSetCullMode", 216: "CmdSetFrontFace",
+    221: "CmdSetDepthTestEnable", 222: "CmdSetDepthWriteEnable",
+    223: "CmdSetDepthCompareOp", 224: "CmdSetDepthBoundsTestEnable",
+    228: "CmdSetDepthBiasEnable",
+    0x1000: "CmdBeginRendering",
+    0x1004: "AllocDescriptorSets", 0x1005: "UpdateDescriptorSets",
+    0x1007: "CmdPushDescriptorSet",
+    0x1008: "CmdPipelineBarrier2", 0x1009: "CmdClearAttachments",
+    0x100A: "CmdClearColorImage", 0x100D: "CmdBindVertexBuffers",
+    0x1010: "CmdCopyBuffer", 0x1011: "CmdCopyBufferToImage",
     0x10000: "BRIDGE_CreateSwapchain", 0x10001: "BRIDGE_AcquireNextImage",
-    0x10002: "BRIDGE_QueuePresent", 0x1FFFF: "EndOfStream",
+    0x10002: "BRIDGE_QueuePresent", 0x10003: "BRIDGE_WriteMemory",
+    0x1FFFF: "EndOfStream",
 }
 
 def u32(data, off): return struct.unpack_from('<I', data, off)[0]
@@ -53,23 +71,23 @@ def disasm_payload(cmd, data, off, size, spirv_dis=False, spirv_dir=None):
         nonlocal p; v = f32(data, p); p += 4; return v
 
     try:
-        if cmd == 38:  # CreateSemaphore
+        if cmd == 40:  # CreateSemaphore
             return f"dev={rd64()} id={rd64()}"
         elif cmd == 33:  # CreateFence
             return f"dev={rd64()} id={rd64()} flags={rd32()}"
-        elif cmd == 35:  # ResetFences
+        elif cmd == 37:  # ResetFences
             return f"dev={rd64()} fence={rd64()}"
-        elif cmd == 37:  # WaitForFences
+        elif cmd == 39:  # WaitForFences
             return f"dev={rd64()} fence={rd64()}"
-        elif cmd == 71:  # CreateCommandPool
+        elif cmd == 85:  # CreateCommandPool
             return f"dev={rd64()} id={rd64()} family={rd32()}"
-        elif cmd == 73:  # AllocCommandBuffers
+        elif cmd == 88:  # AllocCommandBuffers
             return f"dev={rd64()} pool={rd64()} cb={rd64()}"
-        elif cmd == 75:  # BeginCommandBuffer
+        elif cmd == 90:  # BeginCommandBuffer
             return f"cb=0x{rd64():x}"
-        elif cmd == 76:  # EndCommandBuffer
+        elif cmd == 91:  # EndCommandBuffer
             return f"cb=0x{rd64():x}"
-        elif cmd == 54:  # CreateShaderModule
+        elif cmd == 59:  # CreateShaderModule
             dev = rd64(); mid = rd64(); code_size = rd32()
             spirv_data = data[p:p+code_size]
             extra = ""
@@ -99,14 +117,14 @@ def disasm_payload(cmd, data, off, size, spirv_dis=False, spirv_dir=None):
             # Check SPIR-V magic
             magic = u32(spirv_data, 0) if code_size >= 4 else 0
             return f"dev={dev} id={mid} codeSize={code_size} magic=0x{magic:08x}{extra}"
-        elif cmd == 56:  # CreateDescriptorSetLayout
+        elif cmd == 72:  # CreateDescriptorSetLayout
             dev = rd64(); lid = rd64(); bc = rd32()
             bindings = []
             for i in range(bc):
                 b, dt, dc, sf = rd32(), rd32(), rd32(), rd32()
                 bindings.append(f"({b}:type={dt},cnt={dc},stage=0x{sf:x})")
             return f"dev={dev} id={lid} bindings=[{', '.join(bindings)}]"
-        elif cmd == 58:  # CreatePipelineLayout
+        elif cmd == 68:  # CreatePipelineLayout
             dev = rd64(); lid = rd64()
             slc = rd32()
             sets = [str(rd64()) for _ in range(slc)]
@@ -116,26 +134,26 @@ def disasm_payload(cmd, data, off, size, spirv_dis=False, spirv_dir=None):
                 sf, off, sz = rd32(), rd32(), rd32()
                 pushes.append(f"(stage=0x{sf:x},off={off},sz={sz})")
             return f"dev={dev} id={lid} setLayouts=[{','.join(sets)}] pushRanges=[{','.join(pushes)}]"
-        elif cmd == 61:  # CreateGraphicsPipelines
+        elif cmd == 65:  # CreateGraphicsPipelines
             dev = rd64(); pid = rd64(); rp = rd64(); lay = rd64()
             vm = rd64(); fm = rd64(); w = rd32(); h = rd32(); cfmt = rd32()
             dynR = "dynRender" if (rp == 0 and cfmt != 0) else "renderPass"
             return f"dev={dev} id={pid} rp={rp} layout={lay} vert={vm} frag={fm} {w}x{h} colorFmt={cfmt} [{dynR}]"
-        elif cmd == 78:  # CmdBindPipeline
+        elif cmd == 93:  # CmdBindPipeline
             return f"cb=0x{rd64():x} pipeline={rd64()}"
-        elif cmd == 79:  # CmdSetViewport
+        elif cmd == 94:  # CmdSetViewport
             cb = rd64()
             x,y,w,h,mind,maxd = rdf(),rdf(),rdf(),rdf(),rdf(),rdf()
             return f"cb=0x{cb:x} ({x},{y},{w},{h}) depth=[{mind},{maxd}]"
-        elif cmd == 80:  # CmdSetScissor
+        elif cmd == 95:  # CmdSetScissor
             cb = rd64()
             x,y = struct.unpack_from('<ii', data, p); p += 8
             w,h = rd32(), rd32()
             return f"cb=0x{cb:x} ({x},{y},{w},{h})"
-        elif cmd == 86:  # CmdDraw
+        elif cmd == 106:  # CmdDraw
             cb = rd64(); vc = rd32(); ic = rd32(); fv = rd32(); fi = rd32()
             return f"cb=0x{cb:x} verts={vc} instances={ic} firstVert={fv} firstInst={fi}"
-        elif cmd == 87:  # CmdPushConstants
+        elif cmd == 132:  # CmdPushConstants
             cb = rd64(); lay = rd64(); sf = rd32(); off = rd32(); sz = rd32()
             vals = data[p:p+sz]
             hex_preview = vals[:32].hex()
@@ -148,7 +166,7 @@ def disasm_payload(cmd, data, off, size, spirv_dis=False, spirv_dir=None):
             load_names = {0:"LOAD", 1:"CLEAR", 2:"DONT_CARE"}
             target = "swapchain" if ivId == 0 else f"view={ivId}"
             return f"cb=0x{cb:x} area=({ax},{ay},{aw}x{ah}) load={load_names.get(lo,str(lo))} [{target}] clear=({cr:.1f},{cg:.1f},{cb_:.1f},{ca:.1f})"
-        elif cmd == 0x1001:  # CmdEndRendering
+        elif cmd == 214:  # CmdEndRendering
             return f"cb=0x{rd64():x}"
         elif cmd == 18:  # QueueSubmit
             q = rd64(); cb = rd64(); ws = rd64(); ss = rd64(); f = rd64()

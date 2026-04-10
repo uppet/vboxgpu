@@ -105,7 +105,7 @@ static int replayMode(const char* dumpPath) {
     VnDecoder decoder;
     decoder.init(vk.physicalDevice, vk.device, vk.graphicsQueue, vk.graphicsFamily, vk.surface);
 
-    // Execute all batches once
+    // Execute all batches once, screenshot every 5 batches for debugging
     for (size_t i = 0; i < batches.size() && g_running; i++) {
         MSG msg{};
         while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -116,6 +116,13 @@ static int replayMode(const char* dumpPath) {
         if (!decoder.execute(batches[i].data.data(), batches[i].data.size())) {
             fprintf(stderr, "[Replay] Batch %zu failed\n", i);
             break;
+        }
+        // Save per-batch screenshots for first few batches
+        if (i < 5) {
+            char path[256];
+            snprintf(path, sizeof(path), "%s_batch%zu.bmp", dumpPath, i);
+            decoder.captureScreenshot(path);
+            fprintf(stderr, "[Replay] Batch %zu done, screenshot: %s\n", i, path);
         }
     }
 
