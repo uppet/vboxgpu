@@ -1965,6 +1965,51 @@ struct FuncEntry {
 
 #define ENTRY(fn) { #fn, reinterpret_cast<PFN_vkVoidFunction>(icd_##fn) }
 
+// --- Proper mocks for display/debug query functions ---
+// Return well-defined "not available" results instead of leaving output uninitialized.
+static void VKAPI_CALL icd_vkDebugReportMessageEXT(VkInstance, VkDebugReportFlagsEXT, VkDebugReportObjectTypeEXT,
+    uint64_t, size_t, int32_t, const char*, const char*) {}
+static void VKAPI_CALL icd_vkDestroyDebugReportCallbackEXT(VkInstance, VkDebugReportCallbackEXT, const VkAllocationCallbacks*) {}
+static VkResult VKAPI_CALL icd_vkCreateDebugReportCallbackEXT(VkInstance, const void*, const VkAllocationCallbacks*, VkDebugReportCallbackEXT* p) {
+    *p = (VkDebugReportCallbackEXT)1; return VK_SUCCESS;
+}
+static VkResult VKAPI_CALL icd_vkGetDisplayPlaneSupportedDisplaysKHR(VkPhysicalDevice, uint32_t, uint32_t* pCount, VkDisplayKHR*) {
+    *pCount = 0; return VK_SUCCESS;
+}
+static VkResult VKAPI_CALL icd_vkGetDisplayModePropertiesKHR(VkPhysicalDevice, VkDisplayKHR, uint32_t* pCount, void*) {
+    *pCount = 0; return VK_SUCCESS;
+}
+static VkResult VKAPI_CALL icd_vkGetDisplayPlaneCapabilitiesKHR(VkPhysicalDevice, VkDisplayModeKHR, uint32_t, VkDisplayPlaneCapabilitiesKHR* p) {
+    memset(p, 0, sizeof(*p)); return VK_SUCCESS;
+}
+static VkResult VKAPI_CALL icd_vkGetDisplayModeProperties2KHR(VkPhysicalDevice, VkDisplayKHR, uint32_t* pCount, void*) {
+    *pCount = 0; return VK_SUCCESS;
+}
+static VkResult VKAPI_CALL icd_vkGetDisplayPlaneCapabilities2KHR(VkPhysicalDevice, const void*, VkDisplayPlaneCapabilities2KHR* p) {
+    memset(p, 0, sizeof(*p)); p->sType = VK_STRUCTURE_TYPE_DISPLAY_PLANE_CAPABILITIES_2_KHR; return VK_SUCCESS;
+}
+static VkResult VKAPI_CALL icd_vkReleaseDisplayEXT(VkPhysicalDevice, VkDisplayKHR) { return VK_SUCCESS; }
+static VkResult VKAPI_CALL icd_vkGetPhysicalDeviceSurfaceCapabilities2EXT(VkPhysicalDevice, VkSurfaceKHR, void* pCaps) {
+    memset(pCaps, 0, sizeof(VkSurfaceCapabilities2EXT));
+    auto* c = static_cast<VkSurfaceCapabilities2EXT*>(pCaps);
+    c->sType = VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_2_EXT;
+    c->minImageCount = 2; c->maxImageCount = 3;
+    c->currentExtent = {800, 600}; c->minImageExtent = {1,1}; c->maxImageExtent = {4096,4096};
+    c->maxImageArrayLayers = 1; c->supportedTransforms = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    c->currentTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    c->supportedCompositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    c->supportedUsageFlags = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    return VK_SUCCESS;
+}
+static VkResult VKAPI_CALL icd_vkGetDrmDisplayEXT(VkPhysicalDevice, int32_t, uint32_t, VkDisplayKHR* p) {
+    *p = VK_NULL_HANDLE; return VK_ERROR_INITIALIZATION_FAILED;
+}
+static VkResult VKAPI_CALL icd_vkGetWinrtDisplayNV(VkPhysicalDevice, uint32_t, VkDisplayKHR* p) {
+    *p = VK_NULL_HANDLE; return VK_ERROR_INITIALIZATION_FAILED;
+}
+static void VKAPI_CALL icd_vkGetPhysicalDeviceQueueFamilyPerformanceQueryPassesKHR(
+    VkPhysicalDevice, const void*, uint32_t* pNumPasses) { *pNumPasses = 0; }
+
 static const FuncEntry g_funcTable[] = {
     // Instance
     ENTRY(vkCreateInstance),
@@ -2102,6 +2147,21 @@ static const FuncEntry g_funcTable[] = {
     ENTRY(vkCmdBindIndexBuffer),
     ENTRY(vkCmdBindIndexBuffer2),
     {"vkCmdBindIndexBuffer2KHR", (PFN_vkVoidFunction)icd_vkCmdBindIndexBuffer2},
+
+    // Proper mocks for display/debug query functions
+    ENTRY(vkDebugReportMessageEXT),
+    ENTRY(vkDestroyDebugReportCallbackEXT),
+    ENTRY(vkCreateDebugReportCallbackEXT),
+    ENTRY(vkGetDisplayPlaneSupportedDisplaysKHR),
+    ENTRY(vkGetDisplayModePropertiesKHR),
+    ENTRY(vkGetDisplayPlaneCapabilitiesKHR),
+    ENTRY(vkGetDisplayModeProperties2KHR),
+    ENTRY(vkGetDisplayPlaneCapabilities2KHR),
+    ENTRY(vkReleaseDisplayEXT),
+    ENTRY(vkGetPhysicalDeviceSurfaceCapabilities2EXT),
+    ENTRY(vkGetDrmDisplayEXT),
+    ENTRY(vkGetWinrtDisplayNV),
+    ENTRY(vkGetPhysicalDeviceQueueFamilyPerformanceQueryPassesKHR),
     ENTRY(vkCmdCopyBuffer),
     {"vkCmdCopyBuffer2", (PFN_vkVoidFunction)icd_vkCmdCopyBuffer2},
     {"vkCmdCopyBuffer2KHR", (PFN_vkVoidFunction)icd_vkCmdCopyBuffer2},
@@ -2271,7 +2331,7 @@ static PFN_vkVoidFunction lookupFunc(const char* pName) {
         "vkGetPhysicalDeviceExternal", "vkGetPhysicalDevicePresent",
         "vkGetPhysicalDeviceTool", "vkGetPhysicalDeviceFragment",
         "vkGetPhysicalDeviceSupported",
-        "vkCreateDisplay", "vkCreateHeadless", "vkCreateDebugReport",
+        "vkCreateDisplay", "vkCreateHeadless",
         "vkAcquireDrm", "vkAcquireWinrt",
         nullptr
     };
