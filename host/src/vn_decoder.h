@@ -192,6 +192,10 @@ private:
     std::vector<PendingPresent> pendingPresents_;
     void flushPendingPresents();
 
+    // Deferred destroy: collect during batch, execute after GPU is idle
+    std::vector<std::function<void()>> pendingDestroys_;
+    void flushPendingDestroys();
+
     // Frame readback infrastructure (persistent, reused per frame)
     struct FrameReadback {
         VkBuffer stagingBuf = VK_NULL_HANDLE;

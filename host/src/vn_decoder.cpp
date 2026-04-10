@@ -49,6 +49,8 @@ bool VnDecoder::execute(const uint8_t* data, size_t size) {
     // All QueueSubmits in this batch have been executed.
     // Now flush deferred Presents so the GPU work is done before presenting.
     flushPendingPresents();
+    // Flush deferred destroys AFTER GPU is idle (presents do WaitIdle).
+    flushPendingDestroys();
     return !error_;
 }
 
@@ -737,8 +739,8 @@ void VnDecoder::HandlerName(VnStreamReader& r) { \
     (void)deviceId; \
     VkType obj = lookup(mapName, objId); \
     if (obj) { \
-        vkDestroyFn(device_, obj, nullptr); \
         mapName.erase(objId); \
+        pendingDestroys_.push_back([this, obj]() { vkDestroyFn(device_, obj, nullptr); }); \
     } \
 }
 
@@ -763,8 +765,8 @@ void VnDecoder::handleFreeMemory(VnStreamReader& r) {
     (void)deviceId;
     VkDeviceMemory mem = lookup(deviceMemories_, memId);
     if (mem) {
-        vkFreeMemory(device_, mem, nullptr);
         deviceMemories_.erase(memId);
+        pendingDestroys_.push_back([this, mem]() { vkFreeMemory(device_, mem, nullptr); });
     }
 }
 
@@ -1689,9 +1691,15 @@ void VnDecoder::handleQueueSubmit(VnStreamReader& r) {
         info.pSignalSemaphores = &sigSem;
     }
 
-    // Brute-force sync: wait for all GPU work before every submit.
-    // This eliminates DEVICE_LOST caused by missing semaphore synchronization.
+    // Force-serialize all GPU work: ignore semaphore sync, use WaitIdle instead.
+    // This prevents DEVICE_LOST from unresolved semaphore dependencies.
     vkDeviceWaitIdle(device_);
+    // Strip semaphore wait/signal — WaitIdle guarantees ordering
+    info.waitSemaphoreCount = 0;
+    info.pWaitSemaphores = nullptr;
+    info.pWaitDstStageMask = nullptr;
+    info.signalSemaphoreCount = 0;
+    info.pSignalSemaphores = nullptr;
 
     VkResult submitResult = vkQueueSubmit(graphicsQueue_, 1, &info, fence);
     fprintf(stderr, "[Decoder] QueueSubmit result=%d cb=%p\n", (int)submitResult, (void*)cb);
@@ -1894,6 +1902,13 @@ void VnDecoder::flushPendingPresents() {
                 oldIdx, it->second.currentImageIndex);
     }
     pendingPresents_.clear();
+}
+
+void VnDecoder::flushPendingDestroys() {
+    if (pendingDestroys_.empty()) return;
+    vkDeviceWaitIdle(device_);
+    for (auto& fn : pendingDestroys_) fn();
+    pendingDestroys_.clear();
 }
 
 HostSwapchain* VnDecoder::getSwapchain(uint64_t id) {
