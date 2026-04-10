@@ -402,6 +402,11 @@ static void VKAPI_CALL icd_vkGetPhysicalDeviceFeatures2(VkPhysicalDevice pd, VkP
         }
         #undef FB
         for (size_t i = 0; i < numBools; i++) bools[i] = VK_TRUE;
+        // Disable host image copy — we can't forward CPU→GPU image copies over TCP
+        #ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES
+        if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES)
+            bools[0] = VK_FALSE; // hostImageCopy = false
+        #endif
         // Verify critical feature
         if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES) {
             auto* f = reinterpret_cast<VkPhysicalDeviceVulkan11Features*>(next);
@@ -1836,6 +1841,40 @@ static void VKAPI_CALL icd_vkCmdCopyBufferToImage(VkCommandBuffer cb, VkBuffer b
         bOff.data(), bRL.data(), bIH.data(), iAsp.data(), iMip.data(), iBL.data(), iLC.data(),
         iOX.data(), iOY.data(), iOZ.data(), iEW.data(), iEH.data(), iED.data());
 }
+// vkCmdCopyImage2 / vkCmdCopyImage2KHR (Vulkan 1.3)
+static void VKAPI_CALL icd_vkCmdCopyImage2(VkCommandBuffer cb, const VkCopyImageInfo2* pInfo) {
+    // Convert VkCopyImageInfo2 → encode as CmdCopyImage
+    ENC_LOCK;
+    auto off = g_icd.encoder.w_.beginCommand(VN_CMD_vkCmdCopyImage);
+    g_icd.encoder.w_.writeU64(toId(cb));
+    g_icd.encoder.w_.writeU64((uint64_t)pInfo->srcImage);
+    g_icd.encoder.w_.writeU32((uint32_t)pInfo->srcImageLayout);
+    g_icd.encoder.w_.writeU64((uint64_t)pInfo->dstImage);
+    g_icd.encoder.w_.writeU32((uint32_t)pInfo->dstImageLayout);
+    g_icd.encoder.w_.writeU32(pInfo->regionCount);
+    for (uint32_t i = 0; i < pInfo->regionCount; i++) {
+        const auto& r = pInfo->pRegions[i];
+        g_icd.encoder.w_.writeU32(r.srcSubresource.aspectMask);
+        g_icd.encoder.w_.writeU32(r.srcSubresource.mipLevel);
+        g_icd.encoder.w_.writeU32(r.srcSubresource.baseArrayLayer);
+        g_icd.encoder.w_.writeU32(r.srcSubresource.layerCount);
+        g_icd.encoder.w_.writeI32(r.srcOffset.x);
+        g_icd.encoder.w_.writeI32(r.srcOffset.y);
+        g_icd.encoder.w_.writeI32(r.srcOffset.z);
+        g_icd.encoder.w_.writeU32(r.dstSubresource.aspectMask);
+        g_icd.encoder.w_.writeU32(r.dstSubresource.mipLevel);
+        g_icd.encoder.w_.writeU32(r.dstSubresource.baseArrayLayer);
+        g_icd.encoder.w_.writeU32(r.dstSubresource.layerCount);
+        g_icd.encoder.w_.writeI32(r.dstOffset.x);
+        g_icd.encoder.w_.writeI32(r.dstOffset.y);
+        g_icd.encoder.w_.writeI32(r.dstOffset.z);
+        g_icd.encoder.w_.writeU32(r.extent.width);
+        g_icd.encoder.w_.writeU32(r.extent.height);
+        g_icd.encoder.w_.writeU32(r.extent.depth);
+    }
+    g_icd.encoder.w_.endCommand(off);
+}
+
 static void VKAPI_CALL icd_vkCmdCopyImageToBuffer(VkCommandBuffer, VkImage, VkImageLayout, VkBuffer, uint32_t, const VkBufferImageCopy*) {}
 static void VKAPI_CALL icd_vkCmdPipelineBarrier(VkCommandBuffer cb, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage,
     VkDependencyFlags, uint32_t, const VkMemoryBarrier*, uint32_t, const VkBufferMemoryBarrier*,
@@ -2209,6 +2248,8 @@ static const FuncEntry g_funcTable[] = {
     {"vkCmdCopyBuffer2", (PFN_vkVoidFunction)icd_vkCmdCopyBuffer2},
     {"vkCmdCopyBuffer2KHR", (PFN_vkVoidFunction)icd_vkCmdCopyBuffer2},
     ENTRY(vkCmdCopyImage),
+    ENTRY(vkCmdCopyImage2),
+    {"vkCmdCopyImage2KHR", (PFN_vkVoidFunction)icd_vkCmdCopyImage2},
     ENTRY(vkCmdCopyBufferToImage),
     {"vkCmdCopyBufferToImage2", (PFN_vkVoidFunction)icd_vkCmdCopyBufferToImage2},
     {"vkCmdCopyBufferToImage2KHR", (PFN_vkVoidFunction)icd_vkCmdCopyBufferToImage2},
@@ -2376,6 +2417,9 @@ static PFN_vkVoidFunction lookupFunc(const char* pName) {
         "vkGetPhysicalDeviceSupported",
         "vkCreateDisplay", "vkCreateHeadless",
         "vkAcquireDrm", "vkAcquireWinrt",
+        // Host image copy (Vulkan 1.4) — not supported, force DXVK to use CmdCopyBufferToImage
+        "vkCopyMemoryToImage", "vkCopyImageToMemory", "vkCopyImageToImage",
+        "vkTransitionImageLayout",
         nullptr
     };
     for (const char** p = nullPrefixes; *p; p++) {

@@ -1334,8 +1334,6 @@ void VnDecoder::handleCmdBeginRendering(VnStreamReader& r) {
     colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     colorAttachment.loadOp = static_cast<VkAttachmentLoadOp>(loadOp);
     colorAttachment.storeOp = static_cast<VkAttachmentStoreOp>(storeOp);
-    // // TEMP DEBUG: override internal RT clear to bright red
-    // if (!isSwapchain && loadOp == 1) { cr = 1.0f; cg = 0.0f; cb_ = 0.0f; ca = 1.0f; }
     colorAttachment.clearValue.color = {{cr, cg, cb_, ca}};
 
     // Clamp render area
@@ -1487,8 +1485,6 @@ void VnDecoder::handleCmdSetCullMode(VnStreamReader& r) {
     if (cullLog++ < 5)
         fprintf(stderr, "[Decoder] SetCullMode: cb=%llu mode=%u (0=NONE,1=FRONT,2=BACK)\n",
                 (unsigned long long)cbId, cullMode);
-    // TEMP DEBUG: force no culling
-    cullMode = 0;
     if (cb) vkCmdSetCullMode(cb, static_cast<VkCullModeFlags>(cullMode));
 }
 
@@ -1507,8 +1503,6 @@ void VnDecoder::handleCmdSetDepthTestEnable(VnStreamReader& r) {
     if (dtLog++ < 5)
         fprintf(stderr, "[Decoder] SetDepthTestEnable: cb=%llu enable=%u\n",
                 (unsigned long long)cbId, enable);
-    // TEMP DEBUG: force disable depth test to check if draws are culled by depth
-    enable = 0;
     if (cb) vkCmdSetDepthTestEnable(cb, enable);
 }
 
@@ -1611,16 +1605,6 @@ void VnDecoder::handleCmdDrawIndexed(VnStreamReader& r) {
         fprintf(stderr, "[Decoder] DrawIndexed: cb=%p idx=%u inst=%u first=%u vtxOff=%d swapchain=%d\n",
                 (void*)cb, indexCount, instanceCount, firstIndex, vertexOffset, (int)activeRenderingIsSwapchain_);
     vkCmdDrawIndexed(cb, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
-
-    // TEMP: After first scene DrawIndexed, inject red clear to verify render pass is active
-    static bool diInjected = false;
-    if (!diInjected && !activeRenderingIsSwapchain_) {
-        diInjected = true;
-        VkClearAttachment clr{}; clr.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        clr.clearValue.color = {{1.0f, 0.0f, 0.0f, 1.0f}};
-        VkClearRect rect{}; rect.rect = {{200, 200}, {200, 200}}; rect.layerCount = 1;
-        vkCmdClearAttachments(cb, 1, &clr, 1, &rect);
-    }
 }
 
 void VnDecoder::handleCmdCopyBuffer(VnStreamReader& r) {
@@ -1676,7 +1660,18 @@ void VnDecoder::handleCmdCopyImage(VnStreamReader& r) {
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     VkImage src = lookup(images_, srcImgId);
     VkImage dst = lookup(images_, dstImgId);
-    if (!cb || !src || !dst) return;
+    static int ciLog = 0;
+    if (ciLog++ < 10)
+        fprintf(stderr, "[Decoder] CopyImage: src=%llu(%p) dst=%llu(%p) regions=%u %ux%u\n",
+                (unsigned long long)srcImgId, (void*)src,
+                (unsigned long long)dstImgId, (void*)dst, regionCount,
+                regionCount>0 ? regions[0].extent.width : 0,
+                regionCount>0 ? regions[0].extent.height : 0);
+    if (!cb || !src || !dst) {
+        if (ciLog <= 10)
+            fprintf(stderr, "[Decoder] CopyImage SKIP: cb=%p src=%p dst=%p\n", (void*)cb, (void*)src, (void*)dst);
+        return;
+    }
     vkCmdCopyImage(cb, src, static_cast<VkImageLayout>(srcLayout),
                    dst, static_cast<VkImageLayout>(dstLayout),
                    regionCount, regions.data());
@@ -1707,7 +1702,7 @@ void VnDecoder::handleCmdCopyBufferToImage(VnStreamReader& r) {
     VkBuffer srcBuf = lookup(buffers_, srcBufId);
     VkImage dstImg = lookup(images_, dstImgId);
     static int copyLog = 0;
-    if (copyLog < 5) {
+    if (copyLog < 30) {
         fprintf(stderr, "[Decoder] CopyBufToImg: srcBuf=%llu(%p) dstImg=%llu(%p) regions=%u %ux%u\n",
                 (unsigned long long)srcBufId, (void*)srcBuf,
                 (unsigned long long)dstImgId, (void*)dstImg, regionCount,

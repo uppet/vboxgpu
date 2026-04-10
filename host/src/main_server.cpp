@@ -117,8 +117,8 @@ static int replayMode(const char* dumpPath) {
             fprintf(stderr, "[Replay] Batch %zu failed\n", i);
             break;
         }
-        // Save per-batch screenshots for first few batches
-        if (i < 5) {
+        // Save screenshots at key batches
+        if (i < 5 || i == 10 || i == 50 || i == 100 || i == 150) {
             char path[256];
             snprintf(path, sizeof(path), "%s_batch%zu.bmp", dumpPath, i);
             decoder.captureScreenshot(path);
