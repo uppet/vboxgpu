@@ -1698,6 +1698,10 @@ static void VKAPI_CALL icd_vkCmdBindVertexBuffers(VkCommandBuffer cb, uint32_t f
 static void VKAPI_CALL icd_vkCmdBindIndexBuffer(VkCommandBuffer cb, VkBuffer buf, VkDeviceSize offset, VkIndexType indexType) {
     g_icd.encoder.cmdBindIndexBuffer(toId(cb), (uint64_t)buf, offset, indexType);
 }
+static void VKAPI_CALL icd_vkCmdBindIndexBuffer2(VkCommandBuffer cb, VkBuffer buf, VkDeviceSize offset, VkDeviceSize size, VkIndexType indexType) {
+    (void)size; // size parameter ignored — host uses full buffer
+    g_icd.encoder.cmdBindIndexBuffer(toId(cb), (uint64_t)buf, offset, indexType);
+}
 static void VKAPI_CALL icd_vkCmdDrawIndexed(VkCommandBuffer cb, uint32_t indexCount, uint32_t instanceCount,
     uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) {
     g_icd.encoder.cmdDrawIndexed(toId(cb), indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
@@ -2096,6 +2100,8 @@ static const FuncEntry g_funcTable[] = {
     ENTRY(vkCmdBindDescriptorSets),
     ENTRY(vkCmdBindVertexBuffers),
     ENTRY(vkCmdBindIndexBuffer),
+    ENTRY(vkCmdBindIndexBuffer2),
+    {"vkCmdBindIndexBuffer2KHR", (PFN_vkVoidFunction)icd_vkCmdBindIndexBuffer2},
     ENTRY(vkCmdCopyBuffer),
     {"vkCmdCopyBuffer2", (PFN_vkVoidFunction)icd_vkCmdCopyBuffer2},
     {"vkCmdCopyBuffer2KHR", (PFN_vkVoidFunction)icd_vkCmdCopyBuffer2},

@@ -1454,6 +1454,10 @@ void VnDecoder::handleCmdSetCullMode(VnStreamReader& r) {
     uint64_t cbId = r.readU64();
     uint32_t cullMode = r.readU32();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    static int cullLog = 0;
+    if (cullLog++ < 5)
+        fprintf(stderr, "[Decoder] SetCullMode: cb=%llu mode=%u (0=NONE,1=FRONT,2=BACK)\n",
+                (unsigned long long)cbId, cullMode);
     if (cb) vkCmdSetCullMode(cb, static_cast<VkCullModeFlags>(cullMode));
 }
 
@@ -1468,6 +1472,10 @@ void VnDecoder::handleCmdSetDepthTestEnable(VnStreamReader& r) {
     uint64_t cbId = r.readU64();
     uint32_t enable = r.readU32();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    static int dtLog = 0;
+    if (dtLog++ < 5)
+        fprintf(stderr, "[Decoder] SetDepthTestEnable: cb=%llu enable=%u\n",
+                (unsigned long long)cbId, enable);
     if (cb) vkCmdSetDepthTestEnable(cb, enable);
 }
 
@@ -1482,6 +1490,10 @@ void VnDecoder::handleCmdSetDepthCompareOp(VnStreamReader& r) {
     uint64_t cbId = r.readU64();
     uint32_t compareOp = r.readU32();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    static int depthLog = 0;
+    if (depthLog++ < 5)
+        fprintf(stderr, "[Decoder] SetDepthCompareOp: cb=%llu op=%u\n",
+                (unsigned long long)cbId, compareOp);
     if (cb) vkCmdSetDepthCompareOp(cb, static_cast<VkCompareOp>(compareOp));
 }
 
@@ -1530,6 +1542,9 @@ void VnDecoder::handleCmdBindIndexBuffer(VnStreamReader& r) {
     uint32_t indexType = r.readU32();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     VkBuffer buf = lookup(buffers_, bufId);
+    fprintf(stderr, "[Decoder] BindIndexBuffer: cbId=%llu bufId=%llu buf=%p off=%llu type=%u\n",
+            (unsigned long long)cbId, (unsigned long long)bufId, (void*)buf,
+            (unsigned long long)offset, indexType);
     if (!cb || !buf) return;
     vkCmdBindIndexBuffer(cb, buf, offset, static_cast<VkIndexType>(indexType));
 }
