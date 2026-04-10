@@ -571,6 +571,15 @@ void VnDecoder::handleCmdBindDescriptorSets(VnStreamReader& r) {
     VkPipelineLayout layout = lookup(pipelineLayouts_, layoutId);
     if (!cb || !layout) return;
 
+    // Check for null descriptor sets
+    static int dsLog = 0;
+    for (uint32_t i = 0; i < setCount; i++) {
+        if (!sets[i] && dsLog < 5) {
+            fprintf(stderr, "[Decoder] BindDescSets: NULL set at index %u (firstSet=%u)\n", i, firstSet);
+            dsLog++;
+        }
+    }
+
     vkCmdBindDescriptorSets(cb, static_cast<VkPipelineBindPoint>(bindPoint), layout,
         firstSet, setCount, sets.data(), dynOffCount, dynOffs.data());
 }
@@ -1090,6 +1099,9 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
         pInfo.subpass = 0;
     }
 
+    fprintf(stderr, "[Decoder] CreatePipeline PRE: layout=%p vertMod=%p fragMod=%p dynState=%p raster=%p\n",
+            (void*)pInfo.layout, (void*)(stages[0].module), (void*)(stageCount>1?stages[1].module:VK_NULL_HANDLE),
+            (void*)pInfo.pDynamicState, (void*)pInfo.pRasterizationState);
     VkPipeline pipeline;
     VkResult vr = vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pInfo, nullptr, &pipeline);
     fprintf(stderr, "[Decoder] CreatePipeline result=%d\n", (int)vr);
@@ -1459,6 +1471,10 @@ void VnDecoder::handleCmdSetScissor(VnStreamReader& r) {
     VkRect2D sc;
     sc.offset.x = r.readI32(); sc.offset.y = r.readI32();
     sc.extent.width = r.readU32(); sc.extent.height = r.readU32();
+    static int scLog = 0;
+    if (scLog++ < 5)
+        fprintf(stderr, "[Decoder] SetScissor: cb=%llu (%d,%d,%u,%u)\n",
+                (unsigned long long)cbId, sc.offset.x, sc.offset.y, sc.extent.width, sc.extent.height);
     vkCmdSetScissor(lookup(commandBuffers_, cbId), 0, 1, &sc);
 }
 
@@ -1589,7 +1605,21 @@ void VnDecoder::handleCmdDrawIndexed(VnStreamReader& r) {
             fprintf(stderr, "[Decoder] DrawIndexed SKIP: cb=%p active=%d\n", (void*)cb, (int)activeRendering_);
         return;
     }
+    static int diLog = 0;
+    if (diLog++ < 3)
+        fprintf(stderr, "[Decoder] DrawIndexed: cb=%p idx=%u inst=%u first=%u vtxOff=%d swapchain=%d\n",
+                (void*)cb, indexCount, instanceCount, firstIndex, vertexOffset, (int)activeRenderingIsSwapchain_);
     vkCmdDrawIndexed(cb, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+
+    // TEMP: After first scene DrawIndexed, inject red clear to verify render pass is active
+    static bool diInjected = false;
+    if (!diInjected && !activeRenderingIsSwapchain_) {
+        diInjected = true;
+        VkClearAttachment clr{}; clr.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        clr.clearValue.color = {{1.0f, 0.0f, 0.0f, 1.0f}};
+        VkClearRect rect{}; rect.rect = {{200, 200}, {200, 200}}; rect.layerCount = 1;
+        vkCmdClearAttachments(cb, 1, &clr, 1, &rect);
+    }
 }
 
 void VnDecoder::handleCmdCopyBuffer(VnStreamReader& r) {
