@@ -157,7 +157,7 @@ void IcdState::initDefaults() {
         "VK_EXT_fragment_shader_interlock",
         "VK_EXT_border_color_swizzle",
         "VK_EXT_sample_locations",
-        "VK_EXT_multi_draw",
+        // "VK_EXT_multi_draw",  // disabled: ICD has no implementation, DXVK falls back to individual draws
         "VK_EXT_non_seamless_cube_map",
         "VK_EXT_line_rasterization",
         "VK_EXT_pageable_device_local_memory",

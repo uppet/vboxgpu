@@ -522,11 +522,12 @@ void VnDecoder::handleUpdateDescriptorSets(VnStreamReader& r) {
             allBufferInfos[i][j].buffer = lookup(buffers_, bufId);
             allBufferInfos[i][j].offset = bufOff;
             allBufferInfos[i][j].range = bufRange;
-            // Debug: log missing image views for SAMPLED_IMAGE descriptors
+            // Debug: log image descriptor bindings
             static int descImgLog = 0;
-            if (descImgLog < 5 && descType == 2 && ivId != 0 && !allImageInfos[i][j].imageView) {
-                fprintf(stderr, "[Decoder] UpdateDescSets: SAMPLED_IMAGE ivId=%llu NOT FOUND!\n",
-                        (unsigned long long)ivId);
+            if (descImgLog < 10 && (descType == 1 || descType == 2) && ivId != 0) {
+                fprintf(stderr, "[Decoder] DescImg: type=%u ivId=%llu view=%p samId=%llu sam=%p layout=%u\n",
+                        descType, (unsigned long long)ivId, (void*)allImageInfos[i][j].imageView,
+                        (unsigned long long)samId, (void*)allImageInfos[i][j].sampler, imgLayout);
                 descImgLog++;
             }
         }
@@ -1600,7 +1601,22 @@ void VnDecoder::handleCmdCopyBufferToImage(VnStreamReader& r) {
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     VkBuffer srcBuf = lookup(buffers_, srcBufId);
     VkImage dstImg = lookup(images_, dstImgId);
-    if (!cb || !srcBuf || !dstImg) return;
+    static int copyLog = 0;
+    if (copyLog < 5) {
+        fprintf(stderr, "[Decoder] CopyBufToImg: srcBuf=%llu(%p) dstImg=%llu(%p) regions=%u %ux%u\n",
+                (unsigned long long)srcBufId, (void*)srcBuf,
+                (unsigned long long)dstImgId, (void*)dstImg, regionCount,
+                regionCount>0 ? regions[0].imageExtent.width : 0,
+                regionCount>0 ? regions[0].imageExtent.height : 0);
+        copyLog++;
+    }
+    if (!cb || !srcBuf || !dstImg) {
+        static int copyErrLog = 0;
+        if (copyErrLog++ < 5)
+            fprintf(stderr, "[Decoder] CopyBufToImg SKIP: cb=%p srcBuf=%p dstImg=%p\n",
+                    (void*)cb, (void*)srcBuf, (void*)dstImg);
+        return;
+    }
     vkCmdCopyBufferToImage(cb, srcBuf, dstImg, static_cast<VkImageLayout>(dstLayout),
                            regionCount, regions.data());
 }
