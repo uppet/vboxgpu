@@ -1081,11 +1081,27 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
                    state == VK_DYNAMIC_STATE_STENCIL_OP;
         }), dynStates.end());
 
-    fprintf(stderr, "[Decoder] CreatePipeline vtxInput: %zu bindings, %zu attrs depthFmt=%u blend=%d (en=%u src=%u dst=%u op=%u mask=0x%x) topology=%u cull=%u front=%u depthTest=%u depthWrite=%u dyn=%zu\n",
+    // Ensure VERTEX_INPUT_BINDING_STRIDE is always dynamic when using dynamic rendering.
+    // DXVK uses vkCmdBindVertexBuffers2 with explicit strides but may not declare this
+    // dynamic state — the pipeline's static stride=0 would cause all vertices to overlap.
+    if (dynamicRendering) {
+        auto hasState = [&](VkDynamicState s) {
+            return std::find(dynStates.begin(), dynStates.end(), s) != dynStates.end();
+        };
+        if (!hasState(VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE))
+            dynStates.push_back(VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE);
+        if (!hasState(VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE))
+            dynStates.push_back(VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE);
+    }
+
+    fprintf(stderr, "[Decoder] CreatePipeline vtxInput: %zu bindings, %zu attrs depthFmt=%u blend=%d (en=%u src=%u dst=%u op=%u mask=0x%x) topo=%u cull=%u front=%u dt=%u dw=%u rastDiscard=%u dyn=%zu dynVals=[",
             vtxBindings.size(), vtxAttrs.size(), depthFmt, (int)hasBlendState,
             blendAtt.blendEnable, blendAtt.srcColorBlendFactor, blendAtt.dstColorBlendFactor,
             blendAtt.colorBlendOp, blendAtt.colorWriteMask, topology, cullMode, frontFace,
-            depthTestEnable, depthWriteEnable, dynStates.size());
+            depthTestEnable, depthWriteEnable, rasterizerDiscardEnable, dynStates.size());
+    for (size_t i = 0; i < dynStates.size(); i++)
+        fprintf(stderr, "%s%u", i?",":"", (unsigned)dynStates[i]);
+    fprintf(stderr, "]\n");
     for (size_t i = 0; i < vtxBindings.size(); i++)
         fprintf(stderr, "  binding[%zu]: slot=%u stride=%u rate=%u\n", i,
                 vtxBindings[i].binding, vtxBindings[i].stride, vtxBindings[i].inputRate);
@@ -1493,11 +1509,7 @@ void VnDecoder::handleCmdBeginRendering(VnStreamReader& r) {
     fflush(stderr);
     vkCmdBeginRendering(cb, &renderingInfo);
 
-    // Set viewport/scissor
-    VkViewport vp{0.0f, 0.0f, (float)clampedW, (float)clampedH, 0.0f, 1.0f};
-    VkRect2D sc2{{0, 0}, {clampedW, clampedH}};
-    vkCmdSetViewport(cb, 0, 1, &vp);
-    vkCmdSetScissor(cb, 0, 1, &sc2);
+    // Removed — DXVK sets viewport/scissor via dynamic state commands
 }
 
 void VnDecoder::handleCmdEndRendering(VnStreamReader& r) {
@@ -1564,12 +1576,11 @@ void VnDecoder::handleCmdSetViewport(VnStreamReader& r) {
     fprintf(stderr, "[Decoder] SetViewport: x=%.1f y=%.1f w=%.1f h=%.1f\n", vp.x, vp.y, vp.width, vp.height);
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     if (!cb) return;
-    vkCmdSetViewport(cb, 0, 1, &vp);
-    static PFN_vkCmdSetViewportWithCount pfnSetViewportWithCount = nullptr;
-    if (!pfnSetViewportWithCount)
-        pfnSetViewportWithCount = (PFN_vkCmdSetViewportWithCount)vkGetDeviceProcAddr(device_, "vkCmdSetViewportWithCount");
-    if (pfnSetViewportWithCount)
-        pfnSetViewportWithCount(cb, 1, &vp);
+    // Use WithCount — pipeline declares VIEWPORT_WITH_COUNT for dynamic rendering
+    static PFN_vkCmdSetViewportWithCount pfn = nullptr;
+    if (!pfn) pfn = (PFN_vkCmdSetViewportWithCount)vkGetDeviceProcAddr(device_, "vkCmdSetViewportWithCount");
+    if (pfn) pfn(cb, 1, &vp);
+    else vkCmdSetViewport(cb, 0, 1, &vp);
 }
 
 void VnDecoder::handleCmdSetScissor(VnStreamReader& r) {
@@ -1583,12 +1594,11 @@ void VnDecoder::handleCmdSetScissor(VnStreamReader& r) {
                 (unsigned long long)cbId, sc.offset.x, sc.offset.y, sc.extent.width, sc.extent.height);
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     if (!cb) return;
-    vkCmdSetScissor(cb, 0, 1, &sc);
-    static PFN_vkCmdSetScissorWithCount pfnSetScissorWithCount = nullptr;
-    if (!pfnSetScissorWithCount)
-        pfnSetScissorWithCount = (PFN_vkCmdSetScissorWithCount)vkGetDeviceProcAddr(device_, "vkCmdSetScissorWithCount");
-    if (pfnSetScissorWithCount)
-        pfnSetScissorWithCount(cb, 1, &sc);
+    // Use WithCount — pipeline declares SCISSOR_WITH_COUNT for dynamic rendering
+    static PFN_vkCmdSetScissorWithCount pfn = nullptr;
+    if (!pfn) pfn = (PFN_vkCmdSetScissorWithCount)vkGetDeviceProcAddr(device_, "vkCmdSetScissorWithCount");
+    if (pfn) pfn(cb, 1, &sc);
+    else vkCmdSetScissor(cb, 0, 1, &sc);
 }
 
 void VnDecoder::handleCmdSetCullMode(VnStreamReader& r) {
