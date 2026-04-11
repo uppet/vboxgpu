@@ -25,7 +25,8 @@ static void icdDbg(const char* msg) {
 }
 
 // Lock guard for encoder — DXVK is multithreaded, encoder is not thread-safe
-#define ENC_LOCK std::lock_guard<std::mutex> _enc_lock(g_icd.encoderMutex)
+// All encoder access uses encoder.mutex_ — unified single mutex
+#define ENC_LOCK std::lock_guard<std::mutex> _enc_lock(g_icd.encoder.mutex_)
 
 // --- Crash dump generation ---
 #include <dbghelp.h>

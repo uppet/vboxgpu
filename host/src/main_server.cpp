@@ -10,10 +10,12 @@
 #include <thread>
 #include <atomic>
 #include <cstring>
+#include <csignal>
+#include <crtdbg.h>
 #include <dbghelp.h>
 #pragma comment(lib, "dbghelp.lib")
 
-static LONG WINAPI hostCrashHandler(EXCEPTION_POINTERS* ep) {
+static void writeDump(EXCEPTION_POINTERS* ep) {
     CreateDirectoryA("S:\\bld\\vboxgpu\\dumps", NULL);
     HANDLE hFile = CreateFileA("S:\\bld\\vboxgpu\\dumps\\host_crash.dmp",
         GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -23,11 +25,24 @@ static LONG WINAPI hostCrashHandler(EXCEPTION_POINTERS* ep) {
         mei.ExceptionPointers = ep;
         mei.ClientPointers = FALSE;
         MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), hFile,
-            MiniDumpNormal, &mei, NULL, NULL);
+            (MINIDUMP_TYPE)(MiniDumpNormal | MiniDumpWithDataSegs | MiniDumpWithHandleData),
+            ep ? &mei : NULL, NULL, NULL);
         CloseHandle(hFile);
         fprintf(stderr, "[Host] Crash dump: S:\\bld\\vboxgpu\\dumps\\host_crash.dmp\n");
+        fflush(stderr);
     }
+}
+
+static LONG WINAPI hostCrashHandler(EXCEPTION_POINTERS* ep) {
+    writeDump(ep);
     return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// Catch abort() from assert failures — write dump without exception context
+static void hostAbortHandler(int) {
+    fprintf(stderr, "[Host] ABORT signal — writing crash dump\n"); fflush(stderr);
+    writeDump(nullptr);
+    _exit(99);
 }
 
 static constexpr uint32_t WINDOW_WIDTH = 800;
@@ -153,6 +168,11 @@ static int replayMode(const char* dumpPath) {
 
 int main(int argc, char* argv[]) {
     SetUnhandledExceptionFilter(hostCrashHandler);
+    signal(SIGABRT, hostAbortHandler);
+    // Suppress assert dialog in Debug builds — go straight to abort handler
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTHOOK);
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
     setvbuf(stderr, NULL, _IONBF, 0);  // Force unbuffered stderr
 
     // Check --replay mode first
