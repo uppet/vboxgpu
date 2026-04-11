@@ -875,6 +875,15 @@ public:
         w_.endCommand(off);
     }
 
+    // Sync query: request host-side vkGetBufferDeviceAddress result
+    void cmdGetBufferDeviceAddress(uint64_t deviceId, uint64_t bufferId) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_BRIDGE_GetBufferDeviceAddress);
+        w_.writeU64(deviceId);
+        w_.writeU64(bufferId);
+        w_.endCommand(off);
+    }
+
     // Unlocked version — caller must hold mutex_
     void cmdEndOfStreamUnlocked() {
         auto off = w_.beginCommand(VN_CMD_BRIDGE_EndOfStream);

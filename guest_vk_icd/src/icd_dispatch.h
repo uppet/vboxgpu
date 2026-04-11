@@ -97,6 +97,10 @@ struct IcdState {
     struct BufferBinding { uint64_t memoryId; VkDeviceSize memoryOffset; };
     std::unordered_map<uint64_t, BufferBinding> bufferBindings;
 
+    // BDA forwarding: cache of host-side buffer device addresses
+    std::unordered_map<uint64_t, uint64_t> bdaCache;
+    size_t lastRecvSize = 0;
+
     // Flush all small mapped memory data to encoder (call before QueueSubmit)
     void flushMappedMemory();
 
@@ -110,6 +114,7 @@ struct IcdState {
     void initDefaults();
     bool connectToHost(const char* host, uint16_t port);
     bool sendAndRecv(uint32_t* imageIndexOut = nullptr);
+    uint64_t syncGetBufferDeviceAddress(uint64_t bufferId);
     void blitFrameToWindow();
 };
 
