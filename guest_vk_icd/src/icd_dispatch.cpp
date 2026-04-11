@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <string>
 #include <cstddef>
+#include <stdexcept>
 
 IcdState g_icd;
 
@@ -33,7 +34,8 @@ static void icdDbg(const char* msg) {
 #pragma comment(lib, "dbghelp.lib")
 
 static LONG WINAPI crashDumpHandler(EXCEPTION_POINTERS* ep) {
-    HANDLE hFile = CreateFileA("S:\\bld\\vboxgpu\\dumps\\crash.dmp",
+    // Write to icd_crash.dmp (distinct from host dump)
+    HANDLE hFile = CreateFileA("S:\\bld\\vboxgpu\\dumps\\icd_crash.dmp",
         GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile != INVALID_HANDLE_VALUE) {
         MINIDUMP_EXCEPTION_INFORMATION mei;
@@ -41,17 +43,48 @@ static LONG WINAPI crashDumpHandler(EXCEPTION_POINTERS* ep) {
         mei.ExceptionPointers = ep;
         mei.ClientPointers = FALSE;
         MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), hFile,
-            MiniDumpNormal, &mei, NULL, NULL);
+            (MINIDUMP_TYPE)(MiniDumpNormal | MiniDumpWithDataSegs),
+            &mei, NULL, NULL);
         CloseHandle(hFile);
-        fprintf(stderr, "[ICD] Crash dump written to S:\\bld\\vboxgpu\\dumps\\crash.dmp\n");
     }
+    // Also log exception code to debug log
+    char buf[256];
+    wsprintfA(buf, "[ICD] CRASH: ExceptionCode=0x%08X", ep ? ep->ExceptionRecord->ExceptionCode : 0);
+    icdDbg(buf);
     return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static void writeDumpIcd(EXCEPTION_POINTERS* ep) {
+    CreateDirectoryA("S:\\bld\\vboxgpu\\dumps", NULL);
+    HANDLE hFile = CreateFileA("S:\\bld\\vboxgpu\\dumps\\icd_crash.dmp",
+        GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        MINIDUMP_EXCEPTION_INFORMATION mei;
+        if (ep) { mei.ThreadId = GetCurrentThreadId(); mei.ExceptionPointers = ep; mei.ClientPointers = FALSE; }
+        MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), hFile,
+            (MINIDUMP_TYPE)(MiniDumpNormal | MiniDumpWithDataSegs),
+            ep ? &mei : NULL, NULL, NULL);
+        CloseHandle(hFile);
+    }
+}
+
+static void icdTerminateHandler() {
+    icdDbg("[ICD] TERMINATE called (uncaught C++ exception?)");
+    try { throw; } catch (const std::exception& e) {
+        std::string msg = "[ICD] exception: "; msg += e.what();
+        icdDbg(msg.c_str());
+    } catch (...) {
+        icdDbg("[ICD] unknown exception");
+    }
+    writeDumpIcd(nullptr);
+    _exit(42);
 }
 
 struct CrashHandlerInstaller {
     CrashHandlerInstaller() {
         CreateDirectoryA("S:\\bld\\vboxgpu\\dumps", NULL);
         SetUnhandledExceptionFilter(crashDumpHandler);
+        std::set_terminate(icdTerminateHandler);
         icdDbg("ICD DLL loaded, crash handler installed");
     }
 } g_crashHandler;
