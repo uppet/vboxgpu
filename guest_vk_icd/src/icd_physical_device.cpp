@@ -128,7 +128,8 @@ void IcdState::initDefaults() {
         "VK_KHR_external_memory_win32", "VK_KHR_external_semaphore_win32",
         "VK_KHR_load_store_op_none", "VK_KHR_present_id", "VK_KHR_present_wait",
         "VK_KHR_swapchain_mutable_format", "VK_KHR_win32_keyed_mutex",
-        "VK_KHR_buffer_device_address", "VK_KHR_dynamic_rendering",
+        // "VK_KHR_buffer_device_address",  // disabled: guest/host BDA mismatch, DXVK falls back to descriptors
+        "VK_KHR_dynamic_rendering",
         "VK_KHR_depth_stencil_resolve", "VK_KHR_timeline_semaphore",
         "VK_KHR_descriptor_update_template", "VK_KHR_shader_draw_parameters",
         "VK_KHR_draw_indirect_count", "VK_KHR_uniform_buffer_standard_layout",

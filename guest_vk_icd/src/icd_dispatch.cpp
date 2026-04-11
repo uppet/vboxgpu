@@ -415,6 +415,15 @@ static void VKAPI_CALL icd_vkGetPhysicalDeviceFeatures2(VkPhysicalDevice pd, VkP
         }
         #undef FB
         for (size_t i = 0; i < numBools; i++) bools[i] = VK_TRUE;
+        // Disable bufferDeviceAddress — guest/host BDA mismatch makes it unusable
+        if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES)
+            bools[0] = VK_FALSE; // bufferDeviceAddress = false
+        if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES) {
+            // VkPhysicalDeviceVulkan12Features has bufferDeviceAddress at a specific offset
+            // It's the 3rd-to-last bool. For safety, scan by name isn't possible here.
+            // The struct has 47 bools; bufferDeviceAddress is bool index 44 (0-based).
+            if (numBools >= 47) bools[44] = VK_FALSE; // bufferDeviceAddress
+        }
         // Note: hostImageCopy feature kept TRUE (DXVK requires it for Vulkan 1.4).
         // The actual vkCopyMemoryToImage functions return nullptr via nullPrefixes,
         // forcing DXVK to fallback to CmdCopyBufferToImage at runtime.

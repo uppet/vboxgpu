@@ -378,8 +378,14 @@ void VnDecoder::handleAllocateMemory(VnStreamReader& r) {
 
     uint32_t hostType = VnDecoder_mapMemoryType(physDevice_, a.pAllocateInfo_memoryTypeIndex);
 
+    // Enable buffer device address for all allocations — DXVK shaders use BDA
+    VkMemoryAllocateFlagsInfo allocFlags{};
+    allocFlags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+    allocFlags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+
     VkMemoryAllocateInfo ai{};
     ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    ai.pNext = &allocFlags;
     ai.allocationSize = a.pAllocateInfo_allocationSize;
     ai.memoryTypeIndex = hostType;
 
@@ -702,8 +708,8 @@ void VnDecoder::handleCreateBuffer(VnStreamReader& r) {
     VnDecode_vkCreateBuffer a;
     vn_decode_vkCreateBuffer(&r, &a);
 
-    // Strip SHADER_DEVICE_ADDRESS — host uses descriptors, not BDA
-    uint32_t usage = a.pCreateInfo_usage & ~(uint32_t)VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    // Keep all usage flags including SHADER_DEVICE_ADDRESS — DXVK shaders use BDA
+    uint32_t usage = a.pCreateInfo_usage;
 
     VkBufferCreateInfo ci{};
     ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
