@@ -98,7 +98,11 @@ bool IcdState::connectToHost(const char* host, uint16_t port) {
 
 void IcdState::flushBufferRange(uint64_t bufferId, VkDeviceSize offset, VkDeviceSize range) {
     auto bit = bufferBindings.find(bufferId);
-    if (bit == bufferBindings.end()) return;
+    if (bit == bufferBindings.end()) {
+        static int miss = 0;
+        if (miss++ < 10) icdDbg(("[ICD] flushBufRange MISS: buf=" + std::to_string(bufferId) + " NOT in bufferBindings").c_str());
+        return;
+    }
     uint64_t memId = bit->second.memoryId;
     VkDeviceSize memBase = bit->second.memoryOffset;
     std::lock_guard<std::mutex> lock(mappedMutex);
@@ -115,6 +119,12 @@ void IcdState::flushBufferRange(uint64_t bufferId, VkDeviceSize offset, VkDevice
             return;
         }
     }
+    // Fell through — buffer binding found but no matching mapped region
+    static int mapMiss = 0;
+    if (mapMiss++ < 10)
+        icdDbg(("[ICD] flushBufRange MAP MISS: buf=" + std::to_string(bufferId)
+                + " mem=" + std::to_string(memId) + " off=" + std::to_string(offset)
+                + " range=" + std::to_string(range) + " mappedCount=" + std::to_string(mappedRegions.size())).c_str());
 }
 
 void IcdState::flushMappedMemory() {
@@ -633,8 +643,26 @@ static void VKAPI_CALL icd_vkGetDeviceQueue2(VkDevice, const VkDeviceQueueInfo2*
 }
 
 // Vulkan 1.2+ device functions DXVK needs
-static VkResult VKAPI_CALL icd_vkBindBufferMemory2(VkDevice, uint32_t, const VkBindBufferMemoryInfo*) { return VK_SUCCESS; }
-static VkResult VKAPI_CALL icd_vkBindImageMemory2(VkDevice, uint32_t, const VkBindImageMemoryInfo*) { return VK_SUCCESS; }
+static VkResult VKAPI_CALL icd_vkBindBufferMemory2(VkDevice, uint32_t bindInfoCount, const VkBindBufferMemoryInfo* pBindInfos) {
+    if (!pBindInfos) return VK_SUCCESS;
+    for (uint32_t i = 0; i < bindInfoCount; i++) {
+        g_icd.bufferBindings[(uint64_t)pBindInfos[i].buffer] = {
+            (uint64_t)pBindInfos[i].memory,
+            pBindInfos[i].memoryOffset
+        };
+        g_icd.encoder.cmdBindBufferMemory(1, (uint64_t)pBindInfos[i].buffer,
+            (uint64_t)pBindInfos[i].memory, pBindInfos[i].memoryOffset);
+    }
+    return VK_SUCCESS;
+}
+static VkResult VKAPI_CALL icd_vkBindImageMemory2(VkDevice, uint32_t bindInfoCount, const VkBindImageMemoryInfo* pBindInfos) {
+    if (!pBindInfos) return VK_SUCCESS;
+    for (uint32_t i = 0; i < bindInfoCount; i++) {
+        g_icd.encoder.cmdBindImageMemory(1, (uint64_t)pBindInfos[i].image,
+            (uint64_t)pBindInfos[i].memory, pBindInfos[i].memoryOffset);
+    }
+    return VK_SUCCESS;
+}
 static VkDeviceAddress VKAPI_CALL icd_vkGetBufferDeviceAddress(VkDevice, const VkBufferDeviceAddressInfo*) { return 0x1000; }
 static uint64_t VKAPI_CALL icd_vkGetBufferOpaqueCaptureAddress(VkDevice, const VkBufferDeviceAddressInfo*) { return 0; }
 static uint64_t VKAPI_CALL icd_vkGetDeviceMemoryOpaqueCaptureAddress(VkDevice, const VkDeviceMemoryOpaqueCaptureAddressInfo*) { return 0; }
@@ -696,7 +724,9 @@ static void VKAPI_CALL icd_vkCmdSetCullMode(VkCommandBuffer cb, VkCullModeFlags 
 static void VKAPI_CALL icd_vkCmdSetFrontFace(VkCommandBuffer cb, VkFrontFace face) {
     g_icd.encoder.cmdSetFrontFace(toId(cb), face);
 }
-static void VKAPI_CALL icd_vkCmdSetPrimitiveTopology(VkCommandBuffer, VkPrimitiveTopology) {}
+static void VKAPI_CALL icd_vkCmdSetPrimitiveTopology(VkCommandBuffer cb, VkPrimitiveTopology topology) {
+    g_icd.encoder.cmdSetPrimitiveTopology(toId(cb), (uint32_t)topology);
+}
 static void VKAPI_CALL icd_vkCmdSetViewportWithCount(VkCommandBuffer cb, uint32_t count, const VkViewport* vps) {
     if (count > 0 && vps)
         g_icd.encoder.cmdSetViewport(toId(cb), vps[0].x, vps[0].y, vps[0].width, vps[0].height, vps[0].minDepth, vps[0].maxDepth);
@@ -1299,11 +1329,50 @@ static VkResult VKAPI_CALL icd_vkCreateGraphicsPipelines(
             pBlend = &blendAtt;
         }
 
+        std::vector<uint32_t> dynamicStates;
+        if (pInfos[i].pDynamicState) {
+            auto* dyn = pInfos[i].pDynamicState;
+            for (uint32_t d = 0; d < dyn->dynamicStateCount; d++)
+                dynamicStates.push_back((uint32_t)dyn->pDynamicStates[d]);
+        }
+
+        VnEncoder::PipelineState pipelineState{};
+        pipelineState.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        pipelineState.polygonMode = VK_POLYGON_MODE_FILL;
+        pipelineState.cullMode = VK_CULL_MODE_NONE;
+        pipelineState.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        pipelineState.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+        if (pInfos[i].pInputAssemblyState) {
+            auto* ia = pInfos[i].pInputAssemblyState;
+            pipelineState.topology = (uint32_t)ia->topology;
+            pipelineState.primitiveRestartEnable = ia->primitiveRestartEnable;
+        }
+        if (pInfos[i].pRasterizationState) {
+            auto* rs = pInfos[i].pRasterizationState;
+            pipelineState.depthClampEnable = rs->depthClampEnable;
+            pipelineState.rasterizerDiscardEnable = rs->rasterizerDiscardEnable;
+            pipelineState.polygonMode = (uint32_t)rs->polygonMode;
+            pipelineState.cullMode = (uint32_t)rs->cullMode;
+            pipelineState.frontFace = (uint32_t)rs->frontFace;
+            pipelineState.depthBiasEnable = rs->depthBiasEnable;
+        }
+        if (pInfos[i].pDepthStencilState) {
+            auto* ds = pInfos[i].pDepthStencilState;
+            pipelineState.depthTestEnable = ds->depthTestEnable;
+            pipelineState.depthWriteEnable = ds->depthWriteEnable;
+            pipelineState.depthCompareOp = (uint32_t)ds->depthCompareOp;
+            pipelineState.depthBoundsTestEnable = ds->depthBoundsTestEnable;
+            pipelineState.stencilTestEnable = ds->stencilTestEnable;
+        }
+        pipelineState.dynamicStateCount = (uint32_t)dynamicStates.size();
+        pipelineState.dynamicStates = dynamicStates.data();
+
         g_icd.encoder.cmdCreateGraphicsPipeline(1, id,
             (uint64_t)pInfos[i].renderPass, (uint64_t)pInfos[i].layout,
             vertMod, fragMod, w, h, colorFmt,
             (uint32_t)vtxBindings.size(), vtxBindings.data(),
-            (uint32_t)vtxAttrs.size(), vtxAttrs.data(), depthFmt, pBlend);
+            (uint32_t)vtxAttrs.size(), vtxAttrs.data(), depthFmt, pBlend,
+            &pipelineState);
     }
     return VK_SUCCESS;
 }
@@ -1461,6 +1530,7 @@ static VkResult VKAPI_CALL icd_vkGetFenceStatus(VkDevice, VkFence) { return VK_S
 
 static VkResult VKAPI_CALL icd_vkQueueSubmit(VkQueue q, uint32_t count, const VkSubmitInfo* pSubmits, VkFence fence) {
     fprintf(stderr, "[ICD] QueueSubmit: count=%u fence=%llu\n", count, (unsigned long long)(uint64_t)fence);
+    g_icd.flushMappedMemory();
     for (uint32_t i = 0; i < count; i++) {
         uint32_t cbCount = pSubmits[i].commandBufferCount;
         uint64_t waitSem = pSubmits[i].waitSemaphoreCount > 0 ? (uint64_t)pSubmits[i].pWaitSemaphores[0] : 0;
@@ -1487,6 +1557,7 @@ static VkResult VKAPI_CALL icd_vkQueueSubmit(VkQueue q, uint32_t count, const Vk
 
 static VkResult VKAPI_CALL icd_vkQueueSubmit2(VkQueue q, uint32_t count, const VkSubmitInfo2* pSubmits, VkFence fence) {
     fprintf(stderr, "[ICD] QueueSubmit2: count=%u fence=%llu\n", count, (unsigned long long)(uint64_t)fence);
+    g_icd.flushMappedMemory();
     for (uint32_t i = 0; i < count; i++) {
         uint32_t cbCount = pSubmits[i].commandBufferInfoCount;
         fprintf(stderr, "[ICD]   submit[%u]: cbCount=%u waitSem=%u sigSem=%u\n",
@@ -1560,6 +1631,14 @@ static VkResult VKAPI_CALL icd_vkMapMemory(VkDevice, VkDeviceMemory memory, VkDe
     g_icd.mappedRegions.push_back({memId, offset, actualSize, *ppData, false});
     return VK_SUCCESS;
 }
+// vkMapMemory2 / vkMapMemory2KHR (Vulkan 1.4 / VK_KHR_map_memory2)
+static VkResult VKAPI_CALL icd_vkMapMemory2(VkDevice dev, const void* pMemoryMapInfo, void** ppData) {
+    // VkMemoryMapInfo: sType, pNext, flags, memory, offset, size
+    struct MemMapInfo { VkStructureType sType; const void* pNext; VkMemoryMapFlags flags; VkDeviceMemory memory; VkDeviceSize offset; VkDeviceSize size; };
+    auto* info = static_cast<const MemMapInfo*>(pMemoryMapInfo);
+    return icd_vkMapMemory(dev, info->memory, info->offset, info->size, info->flags, ppData);
+}
+
 static void VKAPI_CALL icd_vkUnmapMemory(VkDevice, VkDeviceMemory memory) {
     uint64_t memId = (uint64_t)memory;
     std::lock_guard<std::mutex> lock(g_icd.mappedMutex);
@@ -1573,6 +1652,13 @@ static void VKAPI_CALL icd_vkUnmapMemory(VkDevice, VkDeviceMemory memory) {
         }
     }
 }
+static VkResult VKAPI_CALL icd_vkUnmapMemory2(VkDevice dev, const void* pMemoryUnmapInfo) {
+    struct MemUnmapInfo { VkStructureType sType; const void* pNext; uint32_t flags; VkDeviceMemory memory; };
+    auto* info = static_cast<const MemUnmapInfo*>(pMemoryUnmapInfo);
+    icd_vkUnmapMemory(dev, info->memory);
+    return VK_SUCCESS;
+}
+
 static VkResult VKAPI_CALL icd_vkBindBufferMemory(VkDevice, VkBuffer buf, VkDeviceMemory mem, VkDeviceSize offset) {
     g_icd.bufferBindings[(uint64_t)buf] = {(uint64_t)mem, offset};
     g_icd.encoder.cmdBindBufferMemory(1, (uint64_t)buf, (uint64_t)mem, offset);
@@ -1875,6 +1961,78 @@ static void VKAPI_CALL icd_vkCmdCopyImage2(VkCommandBuffer cb, const VkCopyImage
     g_icd.encoder.w_.endCommand(off);
 }
 
+// vkCmdBlitImage (core 1.0)
+static void VKAPI_CALL icd_vkCmdBlitImage(VkCommandBuffer cb, VkImage srcImg, VkImageLayout srcLayout,
+    VkImage dstImg, VkImageLayout dstLayout, uint32_t regionCount, const VkImageBlit* pRegions, VkFilter filter)
+{
+    ENC_LOCK;
+    auto off = g_icd.encoder.w_.beginCommand(VN_CMD_vkCmdBlitImage);
+    g_icd.encoder.w_.writeU64(toId(cb));
+    g_icd.encoder.w_.writeU64((uint64_t)srcImg);
+    g_icd.encoder.w_.writeU32((uint32_t)srcLayout);
+    g_icd.encoder.w_.writeU64((uint64_t)dstImg);
+    g_icd.encoder.w_.writeU32((uint32_t)dstLayout);
+    g_icd.encoder.w_.writeU32(regionCount);
+    for (uint32_t i = 0; i < regionCount; i++) {
+        const auto& r = pRegions[i];
+        g_icd.encoder.w_.writeU32(r.srcSubresource.aspectMask);
+        g_icd.encoder.w_.writeU32(r.srcSubresource.mipLevel);
+        g_icd.encoder.w_.writeU32(r.srcSubresource.baseArrayLayer);
+        g_icd.encoder.w_.writeU32(r.srcSubresource.layerCount);
+        for (int j = 0; j < 2; j++) {
+            g_icd.encoder.w_.writeI32(r.srcOffsets[j].x);
+            g_icd.encoder.w_.writeI32(r.srcOffsets[j].y);
+            g_icd.encoder.w_.writeI32(r.srcOffsets[j].z);
+        }
+        g_icd.encoder.w_.writeU32(r.dstSubresource.aspectMask);
+        g_icd.encoder.w_.writeU32(r.dstSubresource.mipLevel);
+        g_icd.encoder.w_.writeU32(r.dstSubresource.baseArrayLayer);
+        g_icd.encoder.w_.writeU32(r.dstSubresource.layerCount);
+        for (int j = 0; j < 2; j++) {
+            g_icd.encoder.w_.writeI32(r.dstOffsets[j].x);
+            g_icd.encoder.w_.writeI32(r.dstOffsets[j].y);
+            g_icd.encoder.w_.writeI32(r.dstOffsets[j].z);
+        }
+    }
+    g_icd.encoder.w_.writeU32((uint32_t)filter);
+    g_icd.encoder.w_.endCommand(off);
+}
+
+// vkCmdBlitImage2 / vkCmdBlitImage2KHR (Vulkan 1.3)
+static void VKAPI_CALL icd_vkCmdBlitImage2(VkCommandBuffer cb, const VkBlitImageInfo2* pInfo) {
+    ENC_LOCK;
+    auto off = g_icd.encoder.w_.beginCommand(VN_CMD_vkCmdBlitImage);
+    g_icd.encoder.w_.writeU64(toId(cb));
+    g_icd.encoder.w_.writeU64((uint64_t)pInfo->srcImage);
+    g_icd.encoder.w_.writeU32((uint32_t)pInfo->srcImageLayout);
+    g_icd.encoder.w_.writeU64((uint64_t)pInfo->dstImage);
+    g_icd.encoder.w_.writeU32((uint32_t)pInfo->dstImageLayout);
+    g_icd.encoder.w_.writeU32(pInfo->regionCount);
+    for (uint32_t i = 0; i < pInfo->regionCount; i++) {
+        const auto& r = pInfo->pRegions[i];
+        g_icd.encoder.w_.writeU32(r.srcSubresource.aspectMask);
+        g_icd.encoder.w_.writeU32(r.srcSubresource.mipLevel);
+        g_icd.encoder.w_.writeU32(r.srcSubresource.baseArrayLayer);
+        g_icd.encoder.w_.writeU32(r.srcSubresource.layerCount);
+        for (int j = 0; j < 2; j++) {
+            g_icd.encoder.w_.writeI32(r.srcOffsets[j].x);
+            g_icd.encoder.w_.writeI32(r.srcOffsets[j].y);
+            g_icd.encoder.w_.writeI32(r.srcOffsets[j].z);
+        }
+        g_icd.encoder.w_.writeU32(r.dstSubresource.aspectMask);
+        g_icd.encoder.w_.writeU32(r.dstSubresource.mipLevel);
+        g_icd.encoder.w_.writeU32(r.dstSubresource.baseArrayLayer);
+        g_icd.encoder.w_.writeU32(r.dstSubresource.layerCount);
+        for (int j = 0; j < 2; j++) {
+            g_icd.encoder.w_.writeI32(r.dstOffsets[j].x);
+            g_icd.encoder.w_.writeI32(r.dstOffsets[j].y);
+            g_icd.encoder.w_.writeI32(r.dstOffsets[j].z);
+        }
+    }
+    g_icd.encoder.w_.writeU32((uint32_t)pInfo->filter);
+    g_icd.encoder.w_.endCommand(off);
+}
+
 static void VKAPI_CALL icd_vkCmdCopyImageToBuffer(VkCommandBuffer, VkImage, VkImageLayout, VkBuffer, uint32_t, const VkBufferImageCopy*) {}
 static void VKAPI_CALL icd_vkCmdPipelineBarrier(VkCommandBuffer cb, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage,
     VkDependencyFlags, uint32_t, const VkMemoryBarrier*, uint32_t, const VkBufferMemoryBarrier*,
@@ -2153,6 +2311,10 @@ static const FuncEntry g_funcTable[] = {
     ENTRY(vkAllocateMemory),
     ENTRY(vkFreeMemory),
     ENTRY(vkMapMemory),
+    ENTRY(vkMapMemory2),
+    {"vkMapMemory2KHR", (PFN_vkVoidFunction)icd_vkMapMemory2},
+    ENTRY(vkUnmapMemory2),
+    {"vkUnmapMemory2KHR", (PFN_vkVoidFunction)icd_vkUnmapMemory2},
     ENTRY(vkUnmapMemory),
     ENTRY(vkBindBufferMemory),
     ENTRY(vkBindImageMemory),
@@ -2250,6 +2412,9 @@ static const FuncEntry g_funcTable[] = {
     ENTRY(vkCmdCopyImage),
     ENTRY(vkCmdCopyImage2),
     {"vkCmdCopyImage2KHR", (PFN_vkVoidFunction)icd_vkCmdCopyImage2},
+    ENTRY(vkCmdBlitImage),
+    ENTRY(vkCmdBlitImage2),
+    {"vkCmdBlitImage2KHR", (PFN_vkVoidFunction)icd_vkCmdBlitImage2},
     ENTRY(vkCmdCopyBufferToImage),
     {"vkCmdCopyBufferToImage2", (PFN_vkVoidFunction)icd_vkCmdCopyBufferToImage2},
     {"vkCmdCopyBufferToImage2KHR", (PFN_vkVoidFunction)icd_vkCmdCopyBufferToImage2},
