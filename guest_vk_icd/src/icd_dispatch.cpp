@@ -114,6 +114,9 @@ void IcdState::flushBufferRange(uint64_t bufferId, VkDeviceSize offset, VkDevice
             VkDeviceSize localOff = dataStart - m.offset;
             uint32_t sz = (uint32_t)(dataEnd - dataStart);
             if (sz > m.size - localOff) sz = (uint32_t)(m.size - localOff);
+            static int flushOk = 0;
+            if (flushOk++ < 10 || sz > 100000)
+                icdDbg(("[ICD] flushBufRange OK: buf=" + std::to_string(bufferId) + " mem=" + std::to_string(memId) + " off=" + std::to_string(dataStart) + " sz=" + std::to_string(sz)).c_str());
             encoder.cmdWriteMemory(memId, dataStart, sz,
                                    (const uint8_t*)m.ptr + localOff);
             return;
