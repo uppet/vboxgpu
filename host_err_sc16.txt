@@ -1,0 +1,4 @@
+[Host] Dumping command stream to: S:/bld/vboxgpu/dumps/sc16.bin
+[TcpReceiver] Listening on port 19800...
+[TcpReceiver] Client connected.
+[Host] Connection established. Processing command streams.
