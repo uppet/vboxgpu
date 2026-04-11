@@ -1630,13 +1630,23 @@ static VkResult VKAPI_CALL icd_vkMapMemory(VkDevice, VkDeviceMemory memory, VkDe
     *ppData = (uint8_t*)it->second.ptr + offset;
     std::lock_guard<std::mutex> lock(g_icd.mappedMutex);
     g_icd.mappedRegions.push_back({memId, offset, actualSize, *ppData, false});
+    static int mapLog = 0;
+    if (mapLog++ < 5)
+        icdDbg(("[ICD] MapMemory: mem=" + std::to_string(memId) + " off=" + std::to_string(offset) + " sz=" + std::to_string(actualSize) + " total_mapped=" + std::to_string(g_icd.mappedRegions.size())).c_str());
     return VK_SUCCESS;
 }
 // vkMapMemory2 / vkMapMemory2KHR (Vulkan 1.4 / VK_KHR_map_memory2)
 static VkResult VKAPI_CALL icd_vkMapMemory2(VkDevice dev, const void* pMemoryMapInfo, void** ppData) {
-    // VkMemoryMapInfo: sType, pNext, flags, memory, offset, size
+    // VkMemoryMapInfoKHR: sType, pNext, flags, memory, offset, size
     struct MemMapInfo { VkStructureType sType; const void* pNext; VkMemoryMapFlags flags; VkDeviceMemory memory; VkDeviceSize offset; VkDeviceSize size; };
     auto* info = static_cast<const MemMapInfo*>(pMemoryMapInfo);
+    static int mm2Log = 0;
+    if (mm2Log++ < 5) {
+        icdDbg(("[ICD] MapMemory2: mem=" + std::to_string((uint64_t)info->memory)
+                + " off=" + std::to_string(info->offset) + " sz=" + std::to_string(info->size)
+                + " flags=" + std::to_string(info->flags)
+                + " sizeof=" + std::to_string(sizeof(MemMapInfo))).c_str());
+    }
     return icd_vkMapMemory(dev, info->memory, info->offset, info->size, info->flags, ppData);
 }
 
