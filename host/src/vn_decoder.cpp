@@ -23,6 +23,7 @@ void VnDecoder::init(VkPhysicalDevice physDevice, VkDevice device,
 
 bool VnDecoder::execute(const uint8_t* data, size_t size) {
     pendingPresents_.clear();
+    pendingBdaResults_.clear();
     VnStreamReader reader(data, size);
     while (reader.hasMore() && !error_) {
         // Record position before reading header
@@ -34,11 +35,17 @@ bool VnDecoder::execute(const uint8_t* data, size_t size) {
         if (cmdType == VN_CMD_BRIDGE_EndOfStream)
             break;
 
+        // Guard against corrupt stream: cmdSize must cover at least the 8-byte header
+        if (cmdSize < 8) {
+            fprintf(stderr, "[Decoder] ERROR: cmdSize=%u < 8 for cmd=%u, aborting batch\n",
+                    cmdSize, cmdType);
+            error_ = true;
+            break;
+        }
+
         dispatch(cmdType, reader, cmdSize);
 
         // Ensure reader is at the correct position for the next command.
-        // Only adjust if handler read LESS than expected (e.g. unknown command skipped).
-        // If handler read exactly right, reader is already positioned correctly.
         size_t cmdStartOff = cmdStart - data;
         size_t nextOff = cmdStartOff + cmdSize;
         size_t currentOff = reader.currentPtr() - data;
@@ -155,6 +162,7 @@ void VnDecoder::dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdS
     case VN_CMD_BRIDGE_CreateSwapchain:   handleBridgeCreateSwapchain(reader); break;
     case VN_CMD_BRIDGE_AcquireNextImage:  handleBridgeAcquireNextImage(reader); break;
     case VN_CMD_BRIDGE_QueuePresent:      handleBridgeQueuePresent(reader); break;
+    case VN_CMD_BRIDGE_GetBufferDeviceAddress: handleGetBufferDeviceAddress(reader); break;
     default:
         fprintf(stderr, "[Decoder] Unknown command type %u, skipping\n", cmdType);
         // Don't set error — just skip (cmdSize-based framing will advance past it)
@@ -2171,6 +2179,24 @@ void VnDecoder::handleBridgeQueuePresent(VnStreamReader& r) {
     pendingPresents_.push_back({queueId, scId, waitSemId});
     fprintf(stderr, "[Decoder] Present DEFERRED: sc=%llu waitSem=%llu (will flush at batch end)\n",
             (unsigned long long)scId, (unsigned long long)waitSemId);
+}
+
+void VnDecoder::handleGetBufferDeviceAddress(VnStreamReader& r) {
+    uint64_t deviceId = r.readU64();
+    uint64_t bufferId = r.readU64();
+    (void)deviceId;
+
+    VkBuffer buf = lookup(buffers_, bufferId);
+    VkDeviceAddress addr = 0;
+    if (buf) {
+        VkBufferDeviceAddressInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+        info.buffer = buf;
+        addr = vkGetBufferDeviceAddress(device_, &info);
+    }
+    fprintf(stderr, "[Decoder] GetBufferDeviceAddress: id=%llu buf=%p addr=0x%llx\n",
+            (unsigned long long)bufferId, (void*)buf, (unsigned long long)addr);
+    pendingBdaResults_.push_back({bufferId, addr});
 }
 
 void VnDecoder::flushPendingPresents() {

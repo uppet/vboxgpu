@@ -132,8 +132,16 @@ void IcdState::flushBufferRange(uint64_t bufferId, VkDeviceSize offset, VkDevice
 
 void IcdState::flushMappedMemory() {
     std::lock_guard<std::mutex> lock(mappedMutex);
+    static int flushLog = 0;
+    if (flushLog++ < 5) {
+        std::string msg = "[ICD] flushMappedMemory: regions=" + std::to_string(mappedRegions.size());
+        for (size_t i = 0; i < mappedRegions.size() && i < 10; i++)
+            msg += " [mem=" + std::to_string(mappedRegions[i].memoryId) + " sz=" + std::to_string(mappedRegions[i].size) + "]";
+        icdDbg(msg.c_str());
+    }
     for (auto& m : mappedRegions) {
-        if (m.size <= 65536) {
+        // Flush all mapped regions (BDA descriptor heaps can be 16MB+)
+        if (m.size <= 32 * 1024 * 1024) {
             encoder.cmdWriteMemory(m.memoryId, m.offset, (uint32_t)m.size, m.ptr);
         }
     }
@@ -155,6 +163,7 @@ bool IcdState::sendAndRecv(uint32_t* imageIndexOut) {
     if (frameRecvBuf.size() < RECV_BUF_SIZE) frameRecvBuf.resize(RECV_BUF_SIZE);
 
     size_t n = transport.recv(frameRecvBuf.data(), frameRecvBuf.size());
+    lastRecvSize = n;
     frameValid = false;
     if (n >= 4 && imageIndexOut) {
         memcpy(imageIndexOut, frameRecvBuf.data(), 4);
@@ -180,6 +189,42 @@ bool IcdState::sendAndRecv(uint32_t* imageIndexOut) {
         }
     }
     return true;
+}
+
+uint64_t IcdState::syncGetBufferDeviceAddress(uint64_t bufferId) {
+    // Check cache first
+    auto it = bdaCache.find(bufferId);
+    if (it != bdaCache.end()) return it->second;
+
+    // Encode BDA query — pending commands (CreateBuffer, AllocMem, BindBufMem)
+    // are already in encoder buffer and will be flushed together
+    encoder.cmdGetBufferDeviceAddress(1, bufferId);
+
+    // Sync flush + recv
+    sendAndRecv(nullptr);
+
+    // Parse BDA suffix from response: after [16-byte header][LZ4 data],
+    // there's [bdaCount(4)][{bufferId(8),address(8)}*N]
+    uint64_t result = 0;
+    if (lastRecvSize >= 16) {
+        uint32_t compressedSz = 0;
+        memcpy(&compressedSz, frameRecvBuf.data() + 12, 4);
+        size_t bdaOffset = 16 + compressedSz;
+        if (lastRecvSize >= bdaOffset + 4) {
+            uint32_t bdaCount = 0;
+            memcpy(&bdaCount, frameRecvBuf.data() + bdaOffset, 4);
+            for (uint32_t i = 0; i < bdaCount && bdaOffset + 4 + (i + 1) * 16 <= lastRecvSize; i++) {
+                uint64_t rBufId = 0, rAddr = 0;
+                memcpy(&rBufId, frameRecvBuf.data() + bdaOffset + 4 + i * 16, 8);
+                memcpy(&rAddr,  frameRecvBuf.data() + bdaOffset + 4 + i * 16 + 8, 8);
+                bdaCache[rBufId] = rAddr;
+                if (rBufId == bufferId) result = rAddr;
+            }
+        }
+    }
+    icdDbg(("[ICD] syncGetBDA: buf=" + std::to_string(bufferId)
+            + " addr=0x" + std::to_string(result)).c_str());
+    return result;
 }
 
 void IcdState::blitFrameToWindow() {
@@ -415,14 +460,17 @@ static void VKAPI_CALL icd_vkGetPhysicalDeviceFeatures2(VkPhysicalDevice pd, VkP
         }
         #undef FB
         for (size_t i = 0; i < numBools; i++) bools[i] = VK_TRUE;
-        // Disable bufferDeviceAddress — guest/host BDA mismatch makes it unusable
-        if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES)
-            bools[0] = VK_FALSE; // bufferDeviceAddress = false
+        // BDA (bufferDeviceAddress) is now forwarded: ICD queries host for real GPU addresses.
+        // CaptureReplay and MultiDevice are not supported — disable them.
+        if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES) {
+            bools[1] = VK_FALSE; // bufferDeviceAddressCaptureReplay
+            bools[2] = VK_FALSE; // bufferDeviceAddressMultiDevice
+        }
         if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES) {
-            // VkPhysicalDeviceVulkan12Features has bufferDeviceAddress at a specific offset
-            // It's the 3rd-to-last bool. For safety, scan by name isn't possible here.
-            // The struct has 47 bools; bufferDeviceAddress is bool index 44 (0-based).
-            if (numBools >= 47) bools[44] = VK_FALSE; // bufferDeviceAddress
+            if (numBools >= 47) {
+                bools[39] = VK_FALSE; // bufferDeviceAddressCaptureReplay
+                bools[40] = VK_FALSE; // bufferDeviceAddressMultiDevice
+            }
         }
         // Note: hostImageCopy feature kept TRUE (DXVK requires it for Vulkan 1.4).
         // The actual vkCopyMemoryToImage functions return nullptr via nullPrefixes,
@@ -673,7 +721,10 @@ static VkResult VKAPI_CALL icd_vkBindImageMemory2(VkDevice, uint32_t bindInfoCou
     }
     return VK_SUCCESS;
 }
-static VkDeviceAddress VKAPI_CALL icd_vkGetBufferDeviceAddress(VkDevice, const VkBufferDeviceAddressInfo*) { return 0x1000; }
+static VkDeviceAddress VKAPI_CALL icd_vkGetBufferDeviceAddress(VkDevice, const VkBufferDeviceAddressInfo* pInfo) {
+    if (!pInfo || !pInfo->buffer) return 0;
+    return g_icd.syncGetBufferDeviceAddress((uint64_t)pInfo->buffer);
+}
 static uint64_t VKAPI_CALL icd_vkGetBufferOpaqueCaptureAddress(VkDevice, const VkBufferDeviceAddressInfo*) { return 0; }
 static uint64_t VKAPI_CALL icd_vkGetDeviceMemoryOpaqueCaptureAddress(VkDevice, const VkDeviceMemoryOpaqueCaptureAddressInfo*) { return 0; }
 static VkResult VKAPI_CALL icd_vkGetSemaphoreCounterValue(VkDevice, VkSemaphore, uint64_t* p) { *p = 0; return VK_SUCCESS; }
@@ -1719,7 +1770,10 @@ static VkResult VKAPI_CALL icd_vkCreateBuffer(VkDevice, const VkBufferCreateInfo
     g_icd.encoder.cmdCreateBuffer(1, id, pInfo);
     return VK_SUCCESS;
 }
-static void VKAPI_CALL icd_vkDestroyBuffer(VkDevice, VkBuffer v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyBuffer(1, (uint64_t)v); }
+static void VKAPI_CALL icd_vkDestroyBuffer(VkDevice, VkBuffer v, const VkAllocationCallbacks*) {
+    g_icd.bdaCache.erase((uint64_t)v);
+    g_icd.encoder.cmdDestroyBuffer(1, (uint64_t)v);
+}
 static VkResult VKAPI_CALL icd_vkCreateImage(VkDevice, const VkImageCreateInfo* pInfo, const VkAllocationCallbacks*, VkImage* p) {
     uint64_t id = g_icd.handles.alloc();
     *p = (VkImage)id;

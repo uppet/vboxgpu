@@ -366,9 +366,10 @@ int main(int argc, char* argv[]) {
                 break;
             }
 
-            // Send response: [imageIndex(4)][width(4)][height(4)][compressedSize(4)][LZ4 data]
+            // Build response: [header(16)][LZ4 frame][bdaCount(4)][{bufId(8),addr(8)}*N]
             auto* sc = decoder.getFirstSwapchain();
             uint32_t imageIndex = sc ? sc->currentImageIndex : 0;
+            size_t payloadSize = 16; // minimum: 16-byte header
 
             if (decoder.hasReadback()) {
                 uint32_t w = decoder.getReadbackWidth();
@@ -376,9 +377,9 @@ int main(int argc, char* argv[]) {
                 uint32_t rawSize = decoder.getReadbackSize();
                 int maxCompressed = LZ4_compressBound(rawSize);
 
-                // Ensure send buffer is large enough: 16-byte header + compressed data
-                if (sendBuf.size() < 16 + (size_t)maxCompressed)
-                    sendBuf.resize(16 + maxCompressed);
+                size_t bdaBytes = 4 + decoder.pendingBdaResults_.size() * 16;
+                if (sendBuf.size() < 16 + (size_t)maxCompressed + bdaBytes)
+                    sendBuf.resize(16 + maxCompressed + bdaBytes);
 
                 int compressedSize = LZ4_compress_default(
                     static_cast<const char*>(decoder.getReadbackData()),
@@ -391,29 +392,44 @@ int main(int argc, char* argv[]) {
                     memcpy(sendBuf.data() + 4,  &w, 4);
                     memcpy(sendBuf.data() + 8,  &h, 4);
                     memcpy(sendBuf.data() + 12, &csz, 4);
-                    server.send(sendBuf.data(), 16 + csz);
+                    payloadSize = 16 + csz;
 
                     static int logCount = 0;
                     if (++logCount <= 3)
                         fprintf(stderr, "[Host] Frame %ux%u: %u -> %u bytes (%.1fx)\n",
                                 w, h, rawSize, csz, (float)rawSize / csz);
                 } else {
-                    // Compression failed — send uncompressed as fallback
                     fprintf(stderr, "[Host] LZ4 compress failed, sending raw\n");
-                    sendBuf.resize(16 + rawSize);
+                    if (sendBuf.size() < 16 + rawSize + bdaBytes)
+                        sendBuf.resize(16 + rawSize + bdaBytes);
                     memcpy(sendBuf.data(),      &imageIndex, 4);
                     memcpy(sendBuf.data() + 4,  &w, 4);
                     memcpy(sendBuf.data() + 8,  &h, 4);
                     memcpy(sendBuf.data() + 12, &rawSize, 4);
                     memcpy(sendBuf.data() + 16, decoder.getReadbackData(), rawSize);
-                    server.send(sendBuf.data(), 16 + rawSize);
+                    payloadSize = 16 + rawSize;
                 }
             } else {
-                // No frame: send header with compressedSize=0
-                uint8_t resp[16] = {};
-                memcpy(resp, &imageIndex, 4);
-                server.send(resp, sizeof(resp));
+                size_t bdaBytes = 4 + decoder.pendingBdaResults_.size() * 16;
+                if (sendBuf.size() < 16 + bdaBytes)
+                    sendBuf.resize(16 + bdaBytes);
+                memset(sendBuf.data(), 0, 16);
+                memcpy(sendBuf.data(), &imageIndex, 4);
+                payloadSize = 16;
             }
+
+            // Append BDA query results
+            uint32_t bdaCount = static_cast<uint32_t>(decoder.pendingBdaResults_.size());
+            memcpy(sendBuf.data() + payloadSize, &bdaCount, 4);
+            for (uint32_t i = 0; i < bdaCount; i++) {
+                memcpy(sendBuf.data() + payloadSize + 4 + i * 16,
+                       &decoder.pendingBdaResults_[i].bufferId, 8);
+                memcpy(sendBuf.data() + payloadSize + 4 + i * 16 + 8,
+                       &decoder.pendingBdaResults_[i].address, 8);
+            }
+            payloadSize += 4 + bdaCount * 16;
+
+            server.send(sendBuf.data(), payloadSize);
         }
     });
 

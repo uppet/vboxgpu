@@ -144,6 +144,7 @@ private:
     void handleBridgeCreateSwapchain(VnStreamReader& r);
     void handleBridgeAcquireNextImage(VnStreamReader& r);
     void handleBridgeQueuePresent(VnStreamReader& r);
+    void handleGetBufferDeviceAddress(VnStreamReader& r);
 
     // Handle maps: stream ID → real Vulkan object
     template<typename T>
@@ -217,4 +218,9 @@ private:
     bool readbackFrame(uint32_t imageIndex, HostSwapchain& sc);
 
     bool error_ = false;
+
+public:
+    // BDA query results: accumulated during execute(), consumed by server
+    struct BdaResult { uint64_t bufferId; uint64_t address; };
+    std::vector<BdaResult> pendingBdaResults_;
 };
