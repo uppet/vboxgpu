@@ -40,18 +40,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 深度测试全链路（5 个 depth 动态状态命令 + BeginRendering depth attachment + pipeline depth/stencil state）
 - Alpha blend 支持（pipeline blend state 转发，blend enable/factors/op/mask）
 - 多物体渲染（per-object constant buffer update between draws）
+- BDA (BufferDeviceAddress) 地址转发（同步查询 Host 真实 GPU 地址，DXVK 2.7.1 必需）
+- 32-bit ICD 构建支持（build32 目录，PE32 游戏可加载）
+- 画面回传（Host→Guest LZ4 压缩帧 + GDI StretchDIBits 贴图）
+- 大 mapped memory 传输（descriptor heap 等 16MB+ 区域全量 flush）
 
-当前状态：
-- 深度测试 + 多物体 + alpha blend（含 blend state 动态切换）在 Host 窗口正确渲染
-- 59/67 命令可 codegen 自动生成，7 个已集成（Stage 3 结构体序列化完成）
-- 3 个测试用例全部通过（dx11_triangle, dx11_depth_test, dx11_multi_blend）
+当前状态（M1.6 进行中）：
+- **SortTheCourt（Unity 5.3 真实游戏）在 Host 窗口正确渲染** ✓
+- BDA (BufferDeviceAddress) 地址转发：ICD 向 Host 同步查询真实 GPU 地址
+- 32-bit ICD 支持（build32 目录，SortTheCourt 等 32-bit 游戏需要）
+- 画面回传：Host→Guest LZ4 压缩帧回传 + GDI 贴图已工作
+- 大 mapped memory flush（16MB descriptor heap 全量传输，待优化为增量）
+- 既有测试用例全部通过（dx11_triangle, dx11_depth_test, dx11_multi_blend）
 
-M1.6 目标：
-- 画面回传：Host 渲染结果通过 TCP 压缩回传 Guest 窗口（方案 A）
+已完成里程碑：
+- M1.5：深度测试 + 多物体 + alpha blend + codegen Stage 3 ✓
+- M1.6 部分：真实游戏画面渲染 + 画面回传 ✓
+
+M1.6 剩余目标：
+- Mapped memory 增量传输（dirty tracking，当前 16MB 全量 flush 性能差）
 - Stencil test 支持
 - Mipmap 支持
 - 多 Render Target (MRT)
-- 目标：能运行简单的真实 DX11 游戏
+- 更多游戏兼容性测试
 
 ## 架构要点
 
