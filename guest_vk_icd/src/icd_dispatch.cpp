@@ -415,11 +415,9 @@ static void VKAPI_CALL icd_vkGetPhysicalDeviceFeatures2(VkPhysicalDevice pd, VkP
         }
         #undef FB
         for (size_t i = 0; i < numBools; i++) bools[i] = VK_TRUE;
-        // Disable host image copy — we can't forward CPU→GPU image copies over TCP
-        #ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES
-        if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES)
-            bools[0] = VK_FALSE; // hostImageCopy = false
-        #endif
+        // Note: hostImageCopy feature kept TRUE (DXVK requires it for Vulkan 1.4).
+        // The actual vkCopyMemoryToImage functions return nullptr via nullPrefixes,
+        // forcing DXVK to fallback to CmdCopyBufferToImage at runtime.
         // Verify critical feature
         if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES) {
             auto* f = reinterpret_cast<VkPhysicalDeviceVulkan11Features*>(next);
