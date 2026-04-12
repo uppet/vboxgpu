@@ -78,6 +78,18 @@ public:
             fprintf(stderr, "[TcpSender] Connect failed: %d\n", WSAGetLastError());
             return false;
         }
+
+        // Disable Nagle's algorithm — send commands immediately
+        int flag = 1;
+        setsockopt(sock_, IPPROTO_TCP, TCP_NODELAY,
+                   reinterpret_cast<const char*>(&flag), sizeof(flag));
+        // Larger send/recv buffers for large mapped memory transfers
+        int bufsz = 4 * 1024 * 1024; // 4 MB
+        setsockopt(sock_, SOL_SOCKET, SO_SNDBUF,
+                   reinterpret_cast<const char*>(&bufsz), sizeof(bufsz));
+        setsockopt(sock_, SOL_SOCKET, SO_RCVBUF,
+                   reinterpret_cast<const char*>(&bufsz), sizeof(bufsz));
+
         fprintf(stderr, "[TcpSender] Connected to %s:%u\n", host, port);
         return true;
     }
@@ -136,6 +148,17 @@ public:
     bool accept() {
         clientSock_ = ::accept(listenSock_, nullptr, nullptr);
         if (clientSock_ == INVALID_SOCKET) return false;
+
+        // Match client-side socket settings
+        int flag = 1;
+        setsockopt(clientSock_, IPPROTO_TCP, TCP_NODELAY,
+                   reinterpret_cast<const char*>(&flag), sizeof(flag));
+        int bufsz = 4 * 1024 * 1024;
+        setsockopt(clientSock_, SOL_SOCKET, SO_SNDBUF,
+                   reinterpret_cast<const char*>(&bufsz), sizeof(bufsz));
+        setsockopt(clientSock_, SOL_SOCKET, SO_RCVBUF,
+                   reinterpret_cast<const char*>(&bufsz), sizeof(bufsz));
+
         fprintf(stderr, "[TcpReceiver] Client connected.\n");
         return true;
     }

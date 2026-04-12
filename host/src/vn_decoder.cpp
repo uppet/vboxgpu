@@ -27,6 +27,23 @@ void VnDecoder::init(VkPhysicalDevice physDevice, VkDevice device,
 #endif
 }
 
+VkFence VnDecoder::allocateFence() {
+    if (!fencePool_.empty()) {
+        VkFence f = fencePool_.back();
+        fencePool_.pop_back();
+        vkResetFences(device_, 1, &f);
+        return f;
+    }
+    VkFence f;
+    VkFenceCreateInfo fi{}; fi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    vkCreateFence(device_, &fi, nullptr, &f);
+    return f;
+}
+
+void VnDecoder::recycleFence(VkFence f) {
+    fencePool_.push_back(f);
+}
+
 bool VnDecoder::execute(const uint8_t* data, size_t size) {
     pendingPresents_.clear();
     pendingBdaResults_.clear();
@@ -1348,8 +1365,15 @@ void VnDecoder::handleBeginCommandBuffer(VnStreamReader& r) {
 #endif
     if (!cb) { error_ = true; return; }
 
-    // Ensure CB is idle before resetting — it may still be executing on GPU.
-    vkDeviceWaitIdle(device_);
+    // Ensure CB is idle before resetting.
+    // Wait on per-CB fence (from last QueueSubmit with this CB) instead of
+    // vkDeviceWaitIdle — only blocks until THIS CB finishes, not all GPU work.
+    {
+        auto it = cbLastFence_.find(cbId);
+        if (it != cbLastFence_.end() && it->second != VK_NULL_HANDLE) {
+            vkWaitForFences(device_, 1, &it->second, VK_TRUE, UINT64_MAX);
+        }
+    }
     vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo info{};
     info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -2049,7 +2073,18 @@ void VnDecoder::handleQueueSubmit(VnStreamReader& r) {
         info.pSignalSemaphores = nullptr;
     }
 
-    VkResult submitResult = vkQueueSubmit(graphicsQueue_, 1, &info, fence);
+    // Use internal fence for per-CB tracking if CB is present
+    VkFence submitFence = fence;
+    if (cb) {
+        // Recycle previous fence for this CB if any
+        auto it = cbLastFence_.find(cbId);
+        if (it != cbLastFence_.end()) recycleFence(it->second);
+        VkFence cbFence = allocateFence();
+        cbLastFence_[cbId] = cbFence;
+        submitFence = cbFence;
+    }
+
+    VkResult submitResult = vkQueueSubmit(graphicsQueue_, 1, &info, submitFence);
 #ifdef VBOXGPU_VERBOSE
     fprintf(stderr, "[Decoder] QueueSubmit result=%d cb=%p\n", (int)submitResult, (void*)cb);
     fflush(stderr);
@@ -2246,7 +2281,9 @@ void VnDecoder::flushPendingPresents() {
 #endif
 
         // Readback frame for TCP return (before present, image in PRESENT_SRC layout)
-        readbackFrame(presentIdx, it->second);
+        // Skip if no_readback mode (saves GPU copy + LZ4 + bandwidth)
+        if (!noReadback_)
+            readbackFrame(presentIdx, it->second);
 
         VkResult vr = vkQueuePresentKHR(graphicsQueue_, &info);
 
@@ -2286,6 +2323,11 @@ HostSwapchain* VnDecoder::getSwapchain(uint64_t id) {
 void VnDecoder::cleanup() {
     fprintf(stderr, "[Decoder] cleanup() starting\n"); fflush(stderr);
     vkDeviceWaitIdle(device_);
+    // Cleanup per-CB fence pool
+    for (auto& [id, f] : cbLastFence_) if (f) vkDestroyFence(device_, f, nullptr);
+    cbLastFence_.clear();
+    for (auto f : fencePool_) vkDestroyFence(device_, f, nullptr);
+    fencePool_.clear();
     // Cleanup frame readback resources
     if (readback_.mappedPtr) { vkUnmapMemory(device_, readback_.stagingMem); readback_.mappedPtr = nullptr; }
     if (readback_.cmdBuf) vkFreeCommandBuffers(device_, readback_.cmdPool, 1, &readback_.cmdBuf);

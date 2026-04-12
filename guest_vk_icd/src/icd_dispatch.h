@@ -84,8 +84,18 @@ struct IcdState {
     std::mutex mappedMutex;
 
     // Shadow memory per VkDeviceMemory: memory_id → {ptr, size}
-    struct MemoryShadow { void* ptr; VkDeviceSize size; };
+    struct MemoryShadow {
+        void* ptr;
+        VkDeviceSize size;
+        uint32_t* dirtyPages;  // bitmap: 1 bit per 4KB page
+        uint32_t pageCount;    // number of 4KB pages
+    };
     std::unordered_map<uint64_t, MemoryShadow> memoryShadows;
+
+    // VEH handle for dirty page tracking
+    void* vehHandle_ = nullptr;
+    void protectAllShadows();   // Set all shadow pages to PAGE_READONLY
+    void unprotectAllShadows(); // Set all shadow pages to PAGE_READWRITE
 
     // ImageView → Image mapping (to detect swapchain targets in BeginRendering)
     std::unordered_map<uint64_t, uint64_t> imageViewToImage;

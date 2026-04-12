@@ -15,6 +15,54 @@
 #include <cstddef>
 #include <stdexcept>
 
+#if VBOXGPU_PERF_DIRTY_TRACK
+// VEH handler for dirty page tracking.
+// When shadow pages are PAGE_READONLY, any write triggers this handler.
+// It marks the page dirty and restores PAGE_READWRITE for that page.
+static IcdState* g_icd_for_veh = nullptr;
+
+static LONG WINAPI icdDirtyPageVEH(PEXCEPTION_POINTERS ep) {
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+        return EXCEPTION_CONTINUE_SEARCH;
+    if (ep->ExceptionRecord->NumberParameters < 2) return EXCEPTION_CONTINUE_SEARCH;
+    if (ep->ExceptionRecord->ExceptionInformation[0] != 1) return EXCEPTION_CONTINUE_SEARCH;
+
+    uintptr_t faultAddr = ep->ExceptionRecord->ExceptionInformation[1];
+    for (auto& [id, shadow] : g_icd_for_veh->memoryShadows) {
+        uintptr_t base = (uintptr_t)shadow.ptr;
+        if (faultAddr >= base && faultAddr < base + shadow.size) {
+            uint32_t pageIdx = (uint32_t)((faultAddr - base) / 4096);
+            uint32_t word = pageIdx / 32;
+            uint32_t bit = pageIdx % 32;
+            if (word < (shadow.pageCount + 31) / 32)
+                shadow.dirtyPages[word] |= (1u << bit);
+            DWORD oldProt;
+            VirtualProtect((void*)(base + (uintptr_t)pageIdx * 4096), 4096, PAGE_READWRITE, &oldProt);
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
+void IcdState::protectAllShadows() {
+    for (auto& [id, shadow] : memoryShadows) {
+        if (!shadow.ptr || shadow.size == 0) continue;
+        DWORD oldProt;
+        VirtualProtect(shadow.ptr, (SIZE_T)shadow.size, PAGE_READONLY, &oldProt);
+        if (shadow.dirtyPages)
+            memset(shadow.dirtyPages, 0, ((shadow.pageCount + 31) / 32) * 4);
+    }
+}
+
+void IcdState::unprotectAllShadows() {
+    for (auto& [id, shadow] : memoryShadows) {
+        if (!shadow.ptr || shadow.size == 0) continue;
+        DWORD oldProt;
+        VirtualProtect(shadow.ptr, (SIZE_T)shadow.size, PAGE_READWRITE, &oldProt);
+    }
+}
+
 IcdState g_icd;
 
 // Quick debug log to file via Win32 API (static CRT fopen unreliable)
@@ -177,29 +225,54 @@ void IcdState::flushBufferRange(uint64_t bufferId, VkDeviceSize offset, VkDevice
 
 void IcdState::flushMappedMemory() {
     std::lock_guard<std::mutex> lock(mappedMutex);
-#ifdef VBOXGPU_VERBOSE
-    static int flushLog = 0;
-    if (flushLog++ < 5) {
-        std::string msg = "[ICD] flushMappedMemory: regions=" + std::to_string(mappedRegions.size());
-        for (size_t i = 0; i < mappedRegions.size() && i < 10; i++)
-            msg += " [mem=" + std::to_string(mappedRegions[i].memoryId) + " sz=" + std::to_string(mappedRegions[i].size) + "]";
-        icdDbg(msg.c_str());
-    }
-#endif
-    for (auto& m : mappedRegions) {
 #if VBOXGPU_PERF_DIRTY_TRACK
-        // Only flush dirty regions — avoids re-sending unchanged 16MB heaps
-        if (m.dirty && m.size <= 32 * 1024 * 1024) {
-            encoder.cmdWriteMemory(m.memoryId, m.offset, (uint32_t)m.size, m.ptr);
-            m.dirty = false;
+    // Page-level dirty tracking: only send pages that were written since last flush.
+    // 1. Unprotect all shadows so we can read them safely
+    unprotectAllShadows();
+    // 2. For each mapped region, scan dirty bitmap and send dirty pages
+    for (auto& m : mappedRegions) {
+        if (m.size > 32 * 1024 * 1024) continue;
+        // Find the shadow for this memory
+        auto sit = memoryShadows.find(m.memoryId);
+        if (sit == memoryShadows.end()) continue;
+        auto& shadow = sit->second;
+        if (!shadow.dirtyPages) continue;
+
+        uint32_t firstPage = (uint32_t)(m.offset / 4096);
+        uint32_t lastPage = (uint32_t)((m.offset + m.size - 1) / 4096);
+        if (lastPage >= shadow.pageCount) lastPage = shadow.pageCount - 1;
+
+        // Batch consecutive dirty pages into single WriteMemory calls
+        uint32_t runStart = UINT32_MAX;
+        for (uint32_t pg = firstPage; pg <= lastPage + 1; pg++) {
+            bool dirty = (pg <= lastPage) &&
+                (shadow.dirtyPages[pg / 32] & (1u << (pg % 32)));
+            if (dirty && runStart == UINT32_MAX) {
+                runStart = pg;
+            } else if (!dirty && runStart != UINT32_MAX) {
+                // Flush run [runStart, pg)
+                VkDeviceSize runOff = (VkDeviceSize)runStart * 4096;
+                VkDeviceSize runSize = (VkDeviceSize)(pg - runStart) * 4096;
+                // Clamp to mapped region bounds
+                if (runOff < m.offset) { runSize -= (m.offset - runOff); runOff = m.offset; }
+                VkDeviceSize runEnd = (VkDeviceSize)pg * 4096;
+                if (runEnd > m.offset + m.size) runSize = m.offset + m.size - runOff;
+                if (runSize > 0)
+                    encoder.cmdWriteMemory(m.memoryId, runOff, (uint32_t)runSize,
+                                           (const uint8_t*)m.ptr + (runOff - m.offset));
+                runStart = UINT32_MAX;
+            }
         }
+    }
+    // 3. Re-protect for next frame's write detection
+    protectAllShadows();
 #else
-        // Flush all mapped regions (BDA descriptor heaps can be 16MB+)
+    for (auto& m : mappedRegions) {
         if (m.size <= 32 * 1024 * 1024) {
             encoder.cmdWriteMemory(m.memoryId, m.offset, (uint32_t)m.size, m.ptr);
         }
-#endif
     }
+#endif
 }
 
 bool IcdState::sendAndRecv(uint32_t* imageIndexOut) {
@@ -331,6 +404,13 @@ static VkResult VKAPI_CALL icd_vkCreateInstance(
 {
     icdDbg("vkCreateInstance: enter");
     g_icd.initDefaults();
+#if VBOXGPU_PERF_DIRTY_TRACK
+    // Register VEH handler for dirty page tracking (once)
+    if (!g_icd.vehHandle_) {
+        g_icd_for_veh = &g_icd;
+        g_icd.vehHandle_ = AddVectoredExceptionHandler(1, icdDirtyPageVEH);
+    }
+#endif
     icdDbg("vkCreateInstance: initDefaults done");
     uint64_t id = g_icd.handles.alloc();
     *pInstance = reinterpret_cast<VkInstance>(makeDispatchable(id));
@@ -1647,12 +1727,6 @@ static VkResult VKAPI_CALL icd_vkGetFenceStatus(VkDevice, VkFence) { return VK_S
 // --- Queue submit ---
 
 static VkResult VKAPI_CALL icd_vkQueueSubmit(VkQueue q, uint32_t count, const VkSubmitInfo* pSubmits, VkFence fence) {
-#if VBOXGPU_PERF_DIRTY_TRACK
-    // Conservative: mark all mapped regions dirty before flush
-    // (DXVK writes via mapped pointer without explicit flush calls)
-    { std::lock_guard<std::mutex> lock(g_icd.mappedMutex);
-      for (auto& m : g_icd.mappedRegions) m.dirty = true; }
-#endif
     g_icd.flushMappedMemory();
     for (uint32_t i = 0; i < count; i++) {
         uint32_t cbCount = pSubmits[i].commandBufferCount;
@@ -1679,11 +1753,6 @@ static VkResult VKAPI_CALL icd_vkQueueSubmit(VkQueue q, uint32_t count, const Vk
 }
 
 static VkResult VKAPI_CALL icd_vkQueueSubmit2(VkQueue q, uint32_t count, const VkSubmitInfo2* pSubmits, VkFence fence) {
-#if VBOXGPU_PERF_DIRTY_TRACK
-    // Conservative: mark all mapped regions dirty before flush
-    { std::lock_guard<std::mutex> lock(g_icd.mappedMutex);
-      for (auto& m : g_icd.mappedRegions) m.dirty = true; }
-#endif
     g_icd.flushMappedMemory();
     for (uint32_t i = 0; i < count; i++) {
         uint32_t cbCount = pSubmits[i].commandBufferInfoCount;
@@ -1722,9 +1791,13 @@ static VkResult VKAPI_CALL icd_vkQueueWaitIdle(VkQueue) { return VK_SUCCESS; }
 static VkResult VKAPI_CALL icd_vkAllocateMemory(VkDevice, const VkMemoryAllocateInfo* pInfo, const VkAllocationCallbacks*, VkDeviceMemory* p) {
     uint64_t id = g_icd.handles.alloc();
     *p = (VkDeviceMemory)id;
-    // Allocate a full shadow buffer so persistent mappings share one backing store
-    void* shadow = calloc(1, (size_t)pInfo->allocationSize);
-    g_icd.memoryShadows[id] = {shadow, pInfo->allocationSize};
+    // Allocate shadow with VirtualAlloc for page-level protection support
+    VkDeviceSize allocSize = pInfo->allocationSize;
+    void* shadow = VirtualAlloc(nullptr, (SIZE_T)allocSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!shadow) shadow = VirtualAlloc(nullptr, (SIZE_T)allocSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE); // retry
+    uint32_t pageCount = (uint32_t)((allocSize + 4095) / 4096);
+    uint32_t* dirtyPages = (uint32_t*)calloc((pageCount + 31) / 32, 4);
+    g_icd.memoryShadows[id] = {shadow, allocSize, dirtyPages, pageCount};
     g_icd.encoder.cmdAllocateMemory(1, id, pInfo->allocationSize, pInfo->memoryTypeIndex);
     return VK_SUCCESS;
 }
@@ -1732,7 +1805,8 @@ static void VKAPI_CALL icd_vkFreeMemory(VkDevice, VkDeviceMemory mem, const VkAl
     uint64_t id = (uint64_t)mem;
     auto it = g_icd.memoryShadows.find(id);
     if (it != g_icd.memoryShadows.end()) {
-        free(it->second.ptr);
+        if (it->second.ptr) VirtualFree(it->second.ptr, 0, MEM_RELEASE);
+        free(it->second.dirtyPages);
         g_icd.memoryShadows.erase(it);
     }
     // Also remove any mapped regions referencing this memory
