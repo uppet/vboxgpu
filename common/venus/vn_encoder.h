@@ -61,6 +61,12 @@ public:
             w_.writeU32(pBindings[i].descriptorType);
             w_.writeU32(pBindings[i].descriptorCount);
             w_.writeU32(pBindings[i].stageFlags);
+            // Encode immutable sampler IDs (if any)
+            uint32_t immCount = (pBindings[i].pImmutableSamplers && pBindings[i].descriptorCount > 0)
+                                ? pBindings[i].descriptorCount : 0;
+            w_.writeU32(immCount);
+            for (uint32_t s = 0; s < immCount; s++)
+                w_.writeU64((uint64_t)pBindings[i].pImmutableSamplers[s]);
         }
         w_.endCommand(off);
     }
@@ -98,6 +104,23 @@ public:
         uint32_t srcAlphaBlendFactor, dstAlphaBlendFactor, alphaBlendOp;
         uint32_t colorWriteMask;
     };
+    struct PipelineState {
+        uint32_t topology;
+        uint32_t primitiveRestartEnable;
+        uint32_t depthClampEnable;
+        uint32_t rasterizerDiscardEnable;
+        uint32_t polygonMode;
+        uint32_t cullMode;
+        uint32_t frontFace;
+        uint32_t depthBiasEnable;
+        uint32_t depthTestEnable;
+        uint32_t depthWriteEnable;
+        uint32_t depthCompareOp;
+        uint32_t depthBoundsTestEnable;
+        uint32_t stencilTestEnable;
+        uint32_t dynamicStateCount;
+        const uint32_t* dynamicStates;
+    };
 
     // Legacy overload (no vertex input) for guest_sim / host_cmd compatibility
     void cmdCreateGraphicsPipeline(uint64_t deviceId, uint64_t pipelineId,
@@ -118,7 +141,8 @@ public:
                                    uint32_t bindingCount, const VertexBinding* bindings,
                                    uint32_t attributeCount, const VertexAttribute* attributes,
                                    uint32_t depthAttachmentFormat = 0,
-                                   const BlendAttachment* blendAtt = nullptr) {
+                                   const BlendAttachment* blendAtt = nullptr,
+                                   const PipelineState* pipelineState = nullptr) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCreateGraphicsPipelines);
         w_.writeU64(deviceId);
@@ -158,6 +182,25 @@ public:
             w_.writeU32(blendAtt->dstAlphaBlendFactor);
             w_.writeU32(blendAtt->alphaBlendOp);
             w_.writeU32(blendAtt->colorWriteMask);
+        }
+        w_.writeU32(pipelineState ? 1 : 0);
+        if (pipelineState) {
+            w_.writeU32(pipelineState->topology);
+            w_.writeU32(pipelineState->primitiveRestartEnable);
+            w_.writeU32(pipelineState->depthClampEnable);
+            w_.writeU32(pipelineState->rasterizerDiscardEnable);
+            w_.writeU32(pipelineState->polygonMode);
+            w_.writeU32(pipelineState->cullMode);
+            w_.writeU32(pipelineState->frontFace);
+            w_.writeU32(pipelineState->depthBiasEnable);
+            w_.writeU32(pipelineState->depthTestEnable);
+            w_.writeU32(pipelineState->depthWriteEnable);
+            w_.writeU32(pipelineState->depthCompareOp);
+            w_.writeU32(pipelineState->depthBoundsTestEnable);
+            w_.writeU32(pipelineState->stencilTestEnable);
+            w_.writeU32(pipelineState->dynamicStateCount);
+            for (uint32_t i = 0; i < pipelineState->dynamicStateCount; i++)
+                w_.writeU32(pipelineState->dynamicStates[i]);
         }
         w_.endCommand(off);
     }
@@ -582,6 +625,14 @@ public:
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdSetFrontFace);
         vn_encode_vkCmdSetFrontFace(&w_, cmdBufferId, frontFace);
+        w_.endCommand(off);
+    }
+
+    void cmdSetPrimitiveTopology(uint64_t cmdBufferId, uint32_t topology) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdSetPrimitiveTopology);
+        w_.writeU64(cmdBufferId);
+        w_.writeU32(topology);
         w_.endCommand(off);
     }
 

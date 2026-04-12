@@ -70,7 +70,7 @@ private:
     // Command handlers
     void handleCreateRenderPass(VnStreamReader& r);
     void handleCreateShaderModule(VnStreamReader& r);
-    void handleCreateDescriptorSetLayout(VnStreamReader& r);
+    void handleCreateDescriptorSetLayout(VnStreamReader& r, uint32_t cmdSize);
     void handleCreatePipelineLayout(VnStreamReader& r);
     void handleCreateGraphicsPipeline(VnStreamReader& r);
     void handleCreateFramebuffer(VnStreamReader& r);
@@ -104,6 +104,7 @@ private:
     void handleCmdPushDescriptorSet(VnStreamReader& r);
     void handleCmdSetCullMode(VnStreamReader& r);
     void handleCmdSetFrontFace(VnStreamReader& r);
+    void handleCmdSetPrimitiveTopology(VnStreamReader& r);
     void handleCmdSetDepthTestEnable(VnStreamReader& r);
     void handleCmdSetDepthWriteEnable(VnStreamReader& r);
     void handleCmdSetDepthCompareOp(VnStreamReader& r);
@@ -114,6 +115,7 @@ private:
     void handleCmdDrawIndexed(VnStreamReader& r);
     void handleCmdCopyBuffer(VnStreamReader& r);
     void handleCmdCopyImage(VnStreamReader& r);
+    void handleCmdBlitImage(VnStreamReader& r);
     void handleCmdCopyBufferToImage(VnStreamReader& r);
     void handleCmdUpdateBuffer(VnStreamReader& r);
     void handleCmdPipelineBarrier(VnStreamReader& r);
