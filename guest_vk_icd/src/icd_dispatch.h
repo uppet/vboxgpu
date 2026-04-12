@@ -18,6 +18,9 @@
 #include <unordered_map>
 #include <vector>
 #include <mutex>
+#include <condition_variable>
+#include <thread>
+#include <queue>
 #include <atomic>
 #include <chrono>
 
@@ -58,12 +61,11 @@ struct IcdState {
     // Surface HWND for frame display (GDI blit)
     HWND presentHwnd = nullptr;
 
-    // Per-frame sync: image index returned by Host
+    // Per-frame sync: image index returned by Host (written by recv thread)
     uint32_t currentImageIndex = 0;
 
-    // Frame return: pixel data received from Host
-    std::vector<uint8_t> frameRecvBuf;    // reusable TCP receive buffer
-    std::vector<uint8_t> framePixels;     // last received frame (BGRA)
+    // Frame data: pixel data received from Host (written only by recv thread)
+    std::vector<uint8_t> framePixels;
     uint32_t frameWidth = 0, frameHeight = 0;
     bool frameValid = false;
 
@@ -108,14 +110,12 @@ struct IcdState {
     struct BufferBinding { uint64_t memoryId; VkDeviceSize memoryOffset; };
     std::unordered_map<uint64_t, BufferBinding> bufferBindings;
 
-    // BDA forwarding: cache of host-side buffer device addresses
+    // BDA forwarding: cache of host-side buffer device addresses (protected by bdaMutex_)
     std::unordered_map<uint64_t, uint64_t> bdaCache;
-    size_t lastRecvSize = 0;
 
-    // GDI blit rate limiter: skip blit if < BLIT_INTERVAL_MS since last blit
-    // 5ms cap (~200 FPS): at typical game visual FPS (~64-86), every frame passes
-    // (15ms > 5ms). Only kicks in at very high FPS (>200) to avoid GDI saturation.
-    static constexpr int BLIT_INTERVAL_MS = 5;
+    // GDI blit rate limiter: blit is driven by recv thread (actual rendered frames).
+    // Cap at 60 FPS to avoid GDI saturation when game runs very fast.
+    static constexpr int BLIT_INTERVAL_MS = 16;
     std::chrono::steady_clock::time_point lastBlitTime{};
 
     // Flush all small mapped memory data to encoder (call before QueueSubmit)
@@ -128,11 +128,40 @@ struct IcdState {
     VnEncoder encoder;
     std::mutex encoderMutex;
 
-    void initDefaults();
-    bool connectToHost(const char* host, uint16_t port);
-    bool sendAndRecv(uint32_t* imageIndexOut = nullptr);
+    // --- Async recv thread ---
+    // sendBatch() sends the current encoder buffer to host (non-blocking).
+    // recvLoop() runs in background and receives host responses:
+    //   - Updates frame pixels and blits to window
+    //   - Signals acquireCV_ for vkAcquireNextImageKHR
+    //   - Signals bdaCV_ for syncGetBufferDeviceAddress
+    std::thread recvThread_;
+    std::atomic<bool> recvRunning_{false};
+
+    // Ordered queue of send types — recv thread pops to know how to dispatch response.
+    // true = present batch (signal acquireCV_), false = BDA query (signal bdaCV_).
+    std::queue<bool> pendingResponseQueue_; // guarded by pendingQueueMutex_
+    std::mutex pendingQueueMutex_;
+
+    // AcquireNextImageKHR waits here for the imageIndex from the last present's response.
+    std::mutex acquireMutex_;
+    std::condition_variable acquireCV_;
+    bool imageIndexReady_ = false;
+    bool firstPresented_ = false; // true after first QueuePresent — first acquire returns 0
+
+    // syncGetBufferDeviceAddress waits here for BDA results (also guards bdaCache).
+    std::mutex bdaMutex_;
+    std::condition_variable bdaCV_;
+
+    void startRecvThread();
+    void stopRecvThread();
+    void recvLoop();
+    bool sendBatch(bool isPresent); // send encoder buffer; isPresent=true for QueuePresent
+
     uint64_t syncGetBufferDeviceAddress(uint64_t bufferId);
     void blitFrameToWindow();
+
+    void initDefaults();
+    bool connectToHost(const char* host, uint16_t port);
 };
 
 extern IcdState g_icd;
