@@ -113,7 +113,9 @@ struct IcdState {
     size_t lastRecvSize = 0;
 
     // GDI blit rate limiter: skip blit if < BLIT_INTERVAL_MS since last blit
-    static constexpr int BLIT_INTERVAL_MS = 16; // ~60 FPS cap
+    // 5ms cap (~200 FPS): at typical game visual FPS (~64-86), every frame passes
+    // (15ms > 5ms). Only kicks in at very high FPS (>200) to avoid GDI saturation.
+    static constexpr int BLIT_INTERVAL_MS = 5;
     std::chrono::steady_clock::time_point lastBlitTime{};
 
     // Flush all small mapped memory data to encoder (call before QueueSubmit)
