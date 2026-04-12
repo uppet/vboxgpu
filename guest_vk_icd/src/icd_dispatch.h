@@ -19,6 +19,7 @@
 #include <vector>
 #include <mutex>
 #include <atomic>
+#include <chrono>
 
 #include "../../common/venus/vn_encoder.h"
 #include "../../common/transport/tcp_transport.h"
@@ -110,6 +111,10 @@ struct IcdState {
     // BDA forwarding: cache of host-side buffer device addresses
     std::unordered_map<uint64_t, uint64_t> bdaCache;
     size_t lastRecvSize = 0;
+
+    // GDI blit rate limiter: skip blit if < BLIT_INTERVAL_MS since last blit
+    static constexpr int BLIT_INTERVAL_MS = 16; // ~60 FPS cap
+    std::chrono::steady_clock::time_point lastBlitTime{};
 
     // Flush all small mapped memory data to encoder (call before QueueSubmit)
     void flushMappedMemory();
