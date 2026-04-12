@@ -36,6 +36,9 @@ public:
               VkQueue graphicsQueue, uint32_t graphicsFamily,
               VkSurfaceKHR surface);
 
+    // Set to true to skip GPU readback (saves ~5ms/frame, no frame return to guest)
+    bool noReadback_ = false;
+
     // Execute all commands in the stream. Returns false on error.
     bool execute(const uint8_t* data, size_t size);
 
@@ -193,6 +196,13 @@ private:
     VkFence acquireFence_ = VK_NULL_HANDLE;
     VkFence readbackFence_ = VK_NULL_HANDLE; // sync for frame readback copies
     uint32_t lastPresentedImageIndex_ = 0; // for screenshot fidelity
+
+    // Per-CB fence tracking: maps CB stream ID → last submit fence
+    std::unordered_map<uint64_t, VkFence> cbLastFence_;
+    // Fence pool: reusable fences for per-CB tracking
+    std::vector<VkFence> fencePool_;
+    VkFence allocateFence();
+    void recycleFence(VkFence f);
 
     // Deferred present: collect during batch, execute after all QueueSubmits
     struct PendingPresent {

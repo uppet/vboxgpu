@@ -9,6 +9,7 @@
 #include <vector>
 #include <thread>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <csignal>
 #include <crtdbg.h>
@@ -350,9 +351,20 @@ int main(int argc, char* argv[]) {
 
     fprintf(stderr, "[Host] Connection established. Processing command streams.\n");
 
+    // Check if frame readback is disabled (saves bandwidth for sortcourt etc.)
+    bool disableReadback = (getenv("VBOXGPU_NO_READBACK") != nullptr);
+    decoder.noReadback_ = disableReadback;
+    if (disableReadback)
+        fprintf(stderr, "[Host] Frame readback DISABLED (VBOXGPU_NO_READBACK)\n");
+
     // --- Worker thread: recv → decode → execute → send response ---
     // Runs on a separate thread so the main thread can pump window messages
     // without being blocked by vkWaitForFences or other long Vulkan operations.
+
+    // FPS counter
+    int fpsFrameCount = 0;
+    auto fpsLastTime = std::chrono::steady_clock::now();
+
     std::thread workerThread([&]() {
         constexpr size_t BUF_SIZE = 256 * 1024 * 1024; // 256 MB max per message
         std::vector<uint8_t> recvBuf(BUF_SIZE);
@@ -393,7 +405,17 @@ int main(int argc, char* argv[]) {
             uint32_t imageIndex = sc ? sc->currentImageIndex : 0;
             size_t payloadSize = 16; // minimum: 16-byte header
 
-            if (decoder.hasReadback()) {
+            // FPS counter — print once per second
+            fpsFrameCount++;
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - fpsLastTime).count();
+            if (elapsed >= 1000) {
+                fprintf(stderr, "[Host] FPS: %.1f\n", fpsFrameCount * 1000.0 / elapsed);
+                fpsFrameCount = 0;
+                fpsLastTime = now;
+            }
+
+            if (!disableReadback && decoder.hasReadback()) {
                 uint32_t w = decoder.getReadbackWidth();
                 uint32_t h = decoder.getReadbackHeight();
                 uint32_t rawSize = decoder.getReadbackSize();
