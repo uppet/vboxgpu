@@ -180,6 +180,7 @@ static VkResult VKAPI_CALL icd_vkGetImageViewAddressNVX(VkDevice, VkImageView, v
 bool IcdState::connectToHost(const char* host, uint16_t port) {
     if (!transport.connect(host, port)) return false;
     connected = true;
+    startRecvThread();
     return true;
 }
 
@@ -275,82 +276,129 @@ void IcdState::flushMappedMemory() {
 #endif
 }
 
-bool IcdState::sendAndRecv(uint32_t* imageIndexOut) {
-    std::lock_guard<std::mutex> lock(encoder.mutex_);
-    encoder.cmdEndOfStreamUnlocked(); // called with lock held
-    size_t sendSize = encoder.size();
-#ifdef VBOXGPU_VERBOSE
-    icdDbg((std::string("sendAndRecv: size=") + std::to_string(sendSize)).c_str());
-#endif
-    bool ok = transport.send(encoder.data(), sendSize);
-    // Reset encoder for next batch (keep mutex_)
-    encoder.w_ = VnStreamWriter();
-    if (!ok) return false;
-
-    // Receive host response: [imageIndex(4)][width(4)][height(4)][frameSize(4)][pixels...]
-    // Ensure receive buffer is large enough (4MB for 1080p BGRA + header)
-    constexpr size_t RECV_BUF_SIZE = 8 * 1024 * 1024;
-    if (frameRecvBuf.size() < RECV_BUF_SIZE) frameRecvBuf.resize(RECV_BUF_SIZE);
-
-    size_t n = transport.recv(frameRecvBuf.data(), frameRecvBuf.size());
-    lastRecvSize = n;
-    frameValid = false;
-    if (n >= 4 && imageIndexOut) {
-        memcpy(imageIndexOut, frameRecvBuf.data(), 4);
+bool IcdState::sendBatch(bool isPresent) {
+    {
+        std::lock_guard<std::mutex> lock(encoder.mutex_);
+        encoder.cmdEndOfStreamUnlocked();
+        size_t sendSize = encoder.size();
+        bool ok = transport.send(encoder.data(), sendSize);
+        encoder.w_ = VnStreamWriter();
+        if (!ok) return false;
     }
-    // Parse frame header if present: [width(4)][height(4)][compressedSize(4)][LZ4 data]
-    if (n >= 16) {
-        uint32_t w, h, compressedSz;
-        memcpy(&w,            frameRecvBuf.data() + 4, 4);
-        memcpy(&h,            frameRecvBuf.data() + 8, 4);
-        memcpy(&compressedSz, frameRecvBuf.data() + 12, 4);
-        if (compressedSz > 0 && n >= 16 + compressedSz) {
-            uint32_t rawSize = w * h * 4;
-            framePixels.resize(rawSize);
-            int decompressed = LZ4_decompress_safe(
-                reinterpret_cast<const char*>(frameRecvBuf.data() + 16),
-                reinterpret_cast<char*>(framePixels.data()),
-                compressedSz, rawSize);
-            if (decompressed == (int)rawSize) {
-                frameWidth = w;
-                frameHeight = h;
-                frameValid = true;
-            }
-        }
+    // Record what type of response to expect (recv thread pops in order)
+    {
+        std::lock_guard<std::mutex> lock(pendingQueueMutex_);
+        pendingResponseQueue_.push(isPresent);
     }
     return true;
 }
 
-uint64_t IcdState::syncGetBufferDeviceAddress(uint64_t bufferId) {
-    // Check cache first
-    auto it = bdaCache.find(bufferId);
-    if (it != bdaCache.end()) return it->second;
+void IcdState::startRecvThread() {
+    recvRunning_ = true;
+    recvThread_ = std::thread([this]{ recvLoop(); });
+}
 
-    // Encode BDA query — pending commands (CreateBuffer, AllocMem, BindBufMem)
-    // are already in encoder buffer and will be flushed together
-    encoder.cmdGetBufferDeviceAddress(1, bufferId);
+void IcdState::stopRecvThread() {
+    recvRunning_ = false;
+    transport.close(); // unblocks any pending recv
+    if (recvThread_.joinable()) recvThread_.join();
+}
 
-    // Sync flush + recv
-    sendAndRecv(nullptr);
+void IcdState::recvLoop() {
+    constexpr size_t RECV_BUF_SIZE = 8 * 1024 * 1024;
+    std::vector<uint8_t> recvBuf(RECV_BUF_SIZE);
 
-    // Parse BDA suffix from response: after [16-byte header][LZ4 data],
-    // there's [bdaCount(4)][{bufferId(8),address(8)}*N]
-    uint64_t result = 0;
-    if (lastRecvSize >= 16) {
-        uint32_t compressedSz = 0;
-        memcpy(&compressedSz, frameRecvBuf.data() + 12, 4);
-        size_t bdaOffset = 16 + compressedSz;
-        if (lastRecvSize >= bdaOffset + 4) {
-            uint32_t bdaCount = 0;
-            memcpy(&bdaCount, frameRecvBuf.data() + bdaOffset, 4);
-            for (uint32_t i = 0; i < bdaCount && bdaOffset + 4 + (i + 1) * 16 <= lastRecvSize; i++) {
-                uint64_t rBufId = 0, rAddr = 0;
-                memcpy(&rBufId, frameRecvBuf.data() + bdaOffset + 4 + i * 16, 8);
-                memcpy(&rAddr,  frameRecvBuf.data() + bdaOffset + 4 + i * 16 + 8, 8);
-                bdaCache[rBufId] = rAddr;
-                if (rBufId == bufferId) result = rAddr;
+    while (recvRunning_) {
+        size_t n = transport.recv(recvBuf.data(), RECV_BUF_SIZE);
+        if (n == 0) break; // disconnected
+
+        // Determine response type from the ordered queue
+        bool isPresent = true;
+        {
+            std::lock_guard<std::mutex> lock(pendingQueueMutex_);
+            if (!pendingResponseQueue_.empty()) {
+                isPresent = pendingResponseQueue_.front();
+                pendingResponseQueue_.pop();
             }
         }
+
+        // Parse imageIndex
+        uint32_t imageIndex = 0;
+        if (n >= 4) memcpy(&imageIndex, recvBuf.data(), 4);
+
+        // Parse frame: [imageIndex(4)][w(4)][h(4)][compressedSize(4)][LZ4 data...]
+        uint32_t compressedSz = 0;
+        if (n >= 16) {
+            uint32_t w, h;
+            memcpy(&w,            recvBuf.data() + 4,  4);
+            memcpy(&h,            recvBuf.data() + 8,  4);
+            memcpy(&compressedSz, recvBuf.data() + 12, 4);
+            if (compressedSz > 0 && n >= 16 + compressedSz) {
+                uint32_t rawSize = w * h * 4;
+                std::vector<uint8_t> pixels(rawSize);
+                int dec = LZ4_decompress_safe(
+                    reinterpret_cast<const char*>(recvBuf.data() + 16),
+                    reinterpret_cast<char*>(pixels.data()),
+                    compressedSz, rawSize);
+                if (dec == (int)rawSize) {
+                    framePixels = std::move(pixels);
+                    frameWidth = w;
+                    frameHeight = h;
+                    frameValid = true;
+                    blitFrameToWindow(); // rate-limited to ~60 FPS
+                }
+            }
+        }
+
+        // Parse BDA results suffix: [bdaCount(4)][{bufId(8),addr(8)}*N]
+        size_t bdaOff = 16 + compressedSz;
+        if (n >= bdaOff + 4) {
+            uint32_t bdaCount = 0;
+            memcpy(&bdaCount, recvBuf.data() + bdaOff, 4);
+            if (bdaCount > 0) {
+                std::lock_guard<std::mutex> lock(bdaMutex_);
+                for (uint32_t i = 0; i < bdaCount && bdaOff + 4 + (i + 1) * 16 <= n; i++) {
+                    uint64_t rBufId = 0, rAddr = 0;
+                    memcpy(&rBufId, recvBuf.data() + bdaOff + 4 + i * 16,     8);
+                    memcpy(&rAddr,  recvBuf.data() + bdaOff + 4 + i * 16 + 8, 8);
+                    bdaCache[rBufId] = rAddr;
+                }
+                bdaCV_.notify_all();
+            }
+        }
+
+        // Signal the appropriate waiter
+        if (isPresent) {
+            std::lock_guard<std::mutex> lock(acquireMutex_);
+            currentImageIndex = imageIndex;
+            imageIndexReady_ = true;
+            acquireCV_.notify_one();
+        } else {
+            // BDA query response: bdaCV_ already notified above if results present
+        }
+    }
+}
+
+uint64_t IcdState::syncGetBufferDeviceAddress(uint64_t bufferId) {
+    // Check cache first (under bdaMutex_ since recv thread also writes bdaCache)
+    {
+        std::lock_guard<std::mutex> lock(bdaMutex_);
+        auto it = bdaCache.find(bufferId);
+        if (it != bdaCache.end()) return it->second;
+    }
+
+    // Encode BDA query + flush to host (BDA query batch, not a present)
+    encoder.cmdGetBufferDeviceAddress(1, bufferId);
+    sendBatch(false); // false = BDA query, recv thread signals bdaCV_
+
+    // Wait for recv thread to populate bdaCache with this buffer's address
+    uint64_t result = 0;
+    {
+        std::unique_lock<std::mutex> lock(bdaMutex_);
+        bdaCV_.wait_for(lock, std::chrono::seconds(5),
+            [this, bufferId]{ return bdaCache.count(bufferId) > 0; });
+        auto it = bdaCache.find(bufferId);
+        if (it != bdaCache.end()) result = it->second;
     }
     icdDbg(("[ICD] syncGetBDA: buf=" + std::to_string(bufferId)
             + " addr=0x" + std::to_string(result)).c_str());
@@ -828,6 +876,7 @@ static VkResult VKAPI_CALL icd_vkCreateDevice(
 }
 
 static void VKAPI_CALL icd_vkDestroyDevice(VkDevice device, const VkAllocationCallbacks*) {
+    g_icd.stopRecvThread();
     if (device) delete reinterpret_cast<DispatchableHandle*>(device);
 }
 
@@ -1246,9 +1295,21 @@ static VkResult VKAPI_CALL icd_vkGetSwapchainImagesKHR(
 }
 
 static VkResult VKAPI_CALL icd_vkAcquireNextImageKHR(
-    VkDevice, VkSwapchainKHR, uint64_t, VkSemaphore, VkFence, uint32_t* pIndex)
+    VkDevice, VkSwapchainKHR, uint64_t timeout, VkSemaphore, VkFence, uint32_t* pIndex)
 {
+    // First acquire (before any present): return image 0 immediately — no response yet.
+    if (!g_icd.firstPresented_) {
+        *pIndex = 0;
+        return VK_SUCCESS;
+    }
+    // Wait for recv thread to deliver imageIndex from the last QueuePresent response.
+    std::unique_lock<std::mutex> lock(g_icd.acquireMutex_);
+    auto waitMs = (timeout == UINT64_MAX)
+        ? std::chrono::milliseconds(5000)
+        : std::chrono::milliseconds(timeout / 1000000 + 1);
+    g_icd.acquireCV_.wait_for(lock, waitMs, []{ return g_icd.imageIndexReady_; });
     *pIndex = g_icd.currentImageIndex;
+    g_icd.imageIndexReady_ = false;
     return VK_SUCCESS;
 }
 
@@ -1277,13 +1338,10 @@ static VkResult VKAPI_CALL icd_vkQueuePresentKHR(VkQueue q, const VkPresentInfoK
         }
     }
 
-    // Send the accumulated frame to host and get next image index
-    uint32_t nextIdx = 0;
-    g_icd.sendAndRecv(&nextIdx);
-    g_icd.currentImageIndex = nextIdx;
-
-    // Blit returned frame to guest window via GDI
-    g_icd.blitFrameToWindow();
+    // Fire-and-forget: send batch to host. Recv thread will receive the response,
+    // update currentImageIndex, blit the frame, and signal acquireCV_.
+    g_icd.sendBatch(true); // true = present batch
+    g_icd.firstPresented_ = true;
 
 #ifdef VBOXGPU_DEBUG_SCREENSHOTS
     // Debug: save first few returned frames to BMP for verification
@@ -1715,14 +1773,12 @@ static VkResult VKAPI_CALL icd_vkCreateFence(VkDevice, const VkFenceCreateInfo* 
 
 static void VKAPI_CALL icd_vkDestroyFence(VkDevice, VkFence v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyFence(1, (uint64_t)v); }
 static VkResult VKAPI_CALL icd_vkWaitForFences(VkDevice, uint32_t count, const VkFence* p, VkBool32 waitAll, uint64_t timeout) {
-    if (count > 0 && p) {
-        fprintf(stderr, "[ICD] WaitForFences: count=%u fences=[", count);
-        for (uint32_t i = 0; i < count; i++) fprintf(stderr, "%s%llu", i?",":"", (unsigned long long)(uint64_t)p[i]);
-        fprintf(stderr, "] waitAll=%u\n", waitAll);
+    // Encode WaitForFences to be included in the next QueuePresent batch.
+    // Host handles actual GPU fence synchronization; guest fences are virtual.
+    // Returning VK_SUCCESS immediately is safe: guest resources (encoder buffers)
+    // are already in the TCP batch and the host processes them in order.
+    if (count > 0 && p)
         g_icd.encoder.cmdWaitForFences(1, count, reinterpret_cast<const uint64_t*>(p), waitAll, timeout);
-        // Flush commands to Host and wait — DXVK depends on fence synchronization
-        g_icd.sendAndRecv();
-    }
     return VK_SUCCESS;
 }
 static VkResult VKAPI_CALL icd_vkResetFences(VkDevice, uint32_t count, const VkFence* p) {
