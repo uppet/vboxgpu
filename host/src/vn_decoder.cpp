@@ -19,12 +19,11 @@ void VnDecoder::init(VkPhysicalDevice physDevice, VkDevice device,
     vkCreateSemaphore(device_, &si, nullptr, &acquireSemaphore_);
     VkFenceCreateInfo fi{}; fi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     vkCreateFence(device_, &fi, nullptr, &acquireFence_);
-#if VBOXGPU_PERF_READBACK_FENCE
-    // Readback fence: separate sync for frame readback copies
+    // Double-buffered readback fences: start SIGNALED so first reset is valid
     VkFenceCreateInfo fi3{}; fi3.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     fi3.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-    vkCreateFence(device_, &fi3, nullptr, &readbackFence_);
-#endif
+    vkCreateFence(device_, &fi3, nullptr, &readbackFences_[0]);
+    vkCreateFence(device_, &fi3, nullptr, &readbackFences_[1]);
 }
 
 VkFence VnDecoder::allocateFence() {
@@ -2249,13 +2248,16 @@ void VnDecoder::handleGetBufferDeviceAddress(VnStreamReader& r) {
 }
 
 void VnDecoder::flushPendingPresents() {
-    readbackValid_ = false;
     for (auto& pp : pendingPresents_) {
         auto it = swapchains_.find(pp.scId);
         if (it == swapchains_.end()) continue;
 
-        // Wait for all GPU work to complete before presenting.
-        vkDeviceWaitIdle(device_);
+        // No vkDeviceWaitIdle: render and readback are on the same queue.
+        // The pipeline barrier inside readbackFrameAsync ensures render finishes
+        // before the copy starts (ALL_COMMANDS_BIT → TRANSFER_BIT barrier).
+
+        int curSlot = rbCur_;
+        int prevSlot = 1 - rbCur_;
 
         VkPresentInfoKHR info{};
         info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -2280,10 +2282,12 @@ void VnDecoder::flushPendingPresents() {
         }
 #endif
 
-        // Readback frame for TCP return (before present, image in PRESENT_SRC layout)
-        // Skip if no_readback mode (saves GPU copy + LZ4 + bandwidth)
-        if (!noReadback_)
-            readbackFrame(presentIdx, it->second);
+        // Submit async readback to current slot (non-blocking).
+        // GPU copies swapchain image → readback_[curSlot] staging buffer.
+        // We will wait for this fence next frame when curSlot becomes prevSlot.
+        if (!noReadback_) {
+            readbackSubmitted_[curSlot] = readbackFrameAsync(presentIdx, it->second, curSlot);
+        }
 
         VkResult vr = vkQueuePresentKHR(graphicsQueue_, &info);
 
@@ -2304,6 +2308,19 @@ void VnDecoder::flushPendingPresents() {
         fprintf(stderr, "[Decoder] AutoAcquire: %u -> %u\n",
                 oldIdx, it->second.currentImageIndex);
 #endif
+
+        // Wait for the PREVIOUS slot's readback fence.
+        // By now present + acquire have completed, giving the GPU extra time to
+        // finish the copy from the frame before last — minimising stall.
+        rbReady_ = -1;
+        if (!noReadback_ && readbackSubmitted_[prevSlot]) {
+            vkWaitForFences(device_, 1, &readbackFences_[prevSlot], VK_TRUE, UINT64_MAX);
+            readbackSubmitted_[prevSlot] = false;
+            rbReady_ = prevSlot;
+        }
+
+        // Flip write slot for next frame
+        rbCur_ = 1 - rbCur_;
     }
     pendingPresents_.clear();
 }
@@ -2328,18 +2345,19 @@ void VnDecoder::cleanup() {
     cbLastFence_.clear();
     for (auto f : fencePool_) vkDestroyFence(device_, f, nullptr);
     fencePool_.clear();
-    // Cleanup frame readback resources
-    if (readback_.mappedPtr) { vkUnmapMemory(device_, readback_.stagingMem); readback_.mappedPtr = nullptr; }
-    if (readback_.cmdBuf) vkFreeCommandBuffers(device_, readback_.cmdPool, 1, &readback_.cmdBuf);
-    if (readback_.cmdPool) vkDestroyCommandPool(device_, readback_.cmdPool, nullptr);
-    if (readback_.stagingBuf) vkDestroyBuffer(device_, readback_.stagingBuf, nullptr);
-    if (readback_.stagingMem) vkFreeMemory(device_, readback_.stagingMem, nullptr);
-    readback_ = {};
+    // Cleanup double-buffered frame readback resources
+    for (int s = 0; s < 2; s++) {
+        FrameReadback& rb = readback_[s];
+        if (rb.mappedPtr) { vkUnmapMemory(device_, rb.stagingMem); rb.mappedPtr = nullptr; }
+        if (rb.cmdBuf) vkFreeCommandBuffers(device_, rb.cmdPool, 1, &rb.cmdBuf);
+        if (rb.cmdPool) vkDestroyCommandPool(device_, rb.cmdPool, nullptr);
+        if (rb.stagingBuf) vkDestroyBuffer(device_, rb.stagingBuf, nullptr);
+        if (rb.stagingMem) vkFreeMemory(device_, rb.stagingMem, nullptr);
+        rb = {};
+        if (readbackFences_[s]) vkDestroyFence(device_, readbackFences_[s], nullptr);
+    }
     if (acquireSemaphore_) vkDestroySemaphore(device_, acquireSemaphore_, nullptr);
     if (acquireFence_) vkDestroyFence(device_, acquireFence_, nullptr);
-#if VBOXGPU_PERF_READBACK_FENCE
-    if (readbackFence_) vkDestroyFence(device_, readbackFence_, nullptr);
-#endif
     for (auto& [id, p] : pipelines_) vkDestroyPipeline(device_, p, nullptr);
     for (auto& [id, l] : pipelineLayouts_) vkDestroyPipelineLayout(device_, l, nullptr);
     for (auto& [id, dsl] : descriptorSetLayouts_) vkDestroyDescriptorSetLayout(device_, dsl, nullptr);
@@ -2529,34 +2547,35 @@ bool VnDecoder::captureScreenshot(const char* path) {
 
 // --- Frame readback for TCP return ---
 
-void VnDecoder::ensureReadbackResources(uint32_t w, uint32_t h) {
+void VnDecoder::ensureReadbackResources(int slot, uint32_t w, uint32_t h) {
+    FrameReadback& rb = readback_[slot];
     VkDeviceSize needed = VkDeviceSize(w) * h * 4; // BGRA8
-    if (readback_.stagingBuf && readback_.bufferSize >= needed) {
-        readback_.width = w;
-        readback_.height = h;
+    if (rb.stagingBuf && rb.bufferSize >= needed) {
+        rb.width = w;
+        rb.height = h;
         return;
     }
 
     // Cleanup old resources
-    if (readback_.mappedPtr) {
-        vkUnmapMemory(device_, readback_.stagingMem);
-        readback_.mappedPtr = nullptr;
+    if (rb.mappedPtr) {
+        vkUnmapMemory(device_, rb.stagingMem);
+        rb.mappedPtr = nullptr;
     }
-    if (readback_.cmdBuf) {
-        vkFreeCommandBuffers(device_, readback_.cmdPool, 1, &readback_.cmdBuf);
-        readback_.cmdBuf = VK_NULL_HANDLE;
+    if (rb.cmdBuf) {
+        vkFreeCommandBuffers(device_, rb.cmdPool, 1, &rb.cmdBuf);
+        rb.cmdBuf = VK_NULL_HANDLE;
     }
-    if (readback_.cmdPool) {
-        vkDestroyCommandPool(device_, readback_.cmdPool, nullptr);
-        readback_.cmdPool = VK_NULL_HANDLE;
+    if (rb.cmdPool) {
+        vkDestroyCommandPool(device_, rb.cmdPool, nullptr);
+        rb.cmdPool = VK_NULL_HANDLE;
     }
-    if (readback_.stagingBuf) {
-        vkDestroyBuffer(device_, readback_.stagingBuf, nullptr);
-        readback_.stagingBuf = VK_NULL_HANDLE;
+    if (rb.stagingBuf) {
+        vkDestroyBuffer(device_, rb.stagingBuf, nullptr);
+        rb.stagingBuf = VK_NULL_HANDLE;
     }
-    if (readback_.stagingMem) {
-        vkFreeMemory(device_, readback_.stagingMem, nullptr);
-        readback_.stagingMem = VK_NULL_HANDLE;
+    if (rb.stagingMem) {
+        vkFreeMemory(device_, rb.stagingMem, nullptr);
+        rb.stagingMem = VK_NULL_HANDLE;
     }
 
     // Create dedicated command pool + buffer (resettable)
@@ -2564,17 +2583,17 @@ void VnDecoder::ensureReadbackResources(uint32_t w, uint32_t h) {
     poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     poolInfo.queueFamilyIndex = graphicsFamily_;
-    if (vkCreateCommandPool(device_, &poolInfo, nullptr, &readback_.cmdPool) != VK_SUCCESS) {
-        fprintf(stderr, "[Readback] Failed to create command pool\n");
+    if (vkCreateCommandPool(device_, &poolInfo, nullptr, &rb.cmdPool) != VK_SUCCESS) {
+        fprintf(stderr, "[Readback] slot%d: Failed to create command pool\n", slot);
         return;
     }
 
     VkCommandBufferAllocateInfo cbAlloc{};
     cbAlloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    cbAlloc.commandPool = readback_.cmdPool;
+    cbAlloc.commandPool = rb.cmdPool;
     cbAlloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     cbAlloc.commandBufferCount = 1;
-    vkAllocateCommandBuffers(device_, &cbAlloc, &readback_.cmdBuf);
+    vkAllocateCommandBuffers(device_, &cbAlloc, &rb.cmdBuf);
 
     // Create staging buffer
     VkBufferCreateInfo bufInfo{};
@@ -2582,13 +2601,13 @@ void VnDecoder::ensureReadbackResources(uint32_t w, uint32_t h) {
     bufInfo.size = needed;
     bufInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    if (vkCreateBuffer(device_, &bufInfo, nullptr, &readback_.stagingBuf) != VK_SUCCESS) {
-        fprintf(stderr, "[Readback] Failed to create staging buffer\n");
+    if (vkCreateBuffer(device_, &bufInfo, nullptr, &rb.stagingBuf) != VK_SUCCESS) {
+        fprintf(stderr, "[Readback] slot%d: Failed to create staging buffer\n", slot);
         return;
     }
 
     VkMemoryRequirements memReq;
-    vkGetBufferMemoryRequirements(device_, readback_.stagingBuf, &memReq);
+    vkGetBufferMemoryRequirements(device_, rb.stagingBuf, &memReq);
 
     // Prefer HOST_VISIBLE + HOST_CACHED for fast CPU reads
     VkPhysicalDeviceMemoryProperties memProps;
@@ -2613,9 +2632,9 @@ void VnDecoder::ensureReadbackResources(uint32_t w, uint32_t h) {
         }
     }
     if (memType == UINT32_MAX) {
-        fprintf(stderr, "[Readback] No suitable memory type\n");
-        vkDestroyBuffer(device_, readback_.stagingBuf, nullptr);
-        readback_.stagingBuf = VK_NULL_HANDLE;
+        fprintf(stderr, "[Readback] slot%d: No suitable memory type\n", slot);
+        vkDestroyBuffer(device_, rb.stagingBuf, nullptr);
+        rb.stagingBuf = VK_NULL_HANDLE;
         return;
     }
 
@@ -2623,93 +2642,77 @@ void VnDecoder::ensureReadbackResources(uint32_t w, uint32_t h) {
     allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     allocInfo.allocationSize = memReq.size;
     allocInfo.memoryTypeIndex = memType;
-    if (vkAllocateMemory(device_, &allocInfo, nullptr, &readback_.stagingMem) != VK_SUCCESS) {
-        vkDestroyBuffer(device_, readback_.stagingBuf, nullptr);
-        readback_.stagingBuf = VK_NULL_HANDLE;
+    if (vkAllocateMemory(device_, &allocInfo, nullptr, &rb.stagingMem) != VK_SUCCESS) {
+        vkDestroyBuffer(device_, rb.stagingBuf, nullptr);
+        rb.stagingBuf = VK_NULL_HANDLE;
         return;
     }
-    vkBindBufferMemory(device_, readback_.stagingBuf, readback_.stagingMem, 0);
+    vkBindBufferMemory(device_, rb.stagingBuf, rb.stagingMem, 0);
 
     // Persistently map for zero-copy reads
-    vkMapMemory(device_, readback_.stagingMem, 0, needed, 0, &readback_.mappedPtr);
+    vkMapMemory(device_, rb.stagingMem, 0, needed, 0, &rb.mappedPtr);
 
-    readback_.width = w;
-    readback_.height = h;
-    readback_.bufferSize = needed;
-    fprintf(stderr, "[Readback] Allocated %ux%u staging buffer (%llu bytes)\n",
-            w, h, (unsigned long long)needed);
+    rb.width = w;
+    rb.height = h;
+    rb.bufferSize = needed;
+    fprintf(stderr, "[Readback] slot%d: Allocated %ux%u staging buffer (%llu bytes)\n",
+            slot, w, h, (unsigned long long)needed);
 }
 
-bool VnDecoder::readbackFrame(uint32_t imageIndex, HostSwapchain& sc) {
-    readbackValid_ = false;
-    ensureReadbackResources(sc.extent.width, sc.extent.height);
-    if (!readback_.stagingBuf || !readback_.mappedPtr) return false;
+// Submit an async readback copy of the swapchain image into readback_[slot].
+// Does NOT wait for the GPU — caller waits via readbackFences_[slot] next frame.
+bool VnDecoder::readbackFrameAsync(uint32_t imageIndex, HostSwapchain& sc, int slot) {
+    ensureReadbackResources(slot, sc.extent.width, sc.extent.height);
+    FrameReadback& rb = readback_[slot];
+    if (!rb.stagingBuf || !rb.mappedPtr) return false;
 
     VkImage srcImage = sc.images[imageIndex];
 
-    vkResetCommandBuffer(readback_.cmdBuf, 0);
+    vkResetCommandBuffer(rb.cmdBuf, 0);
 
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(readback_.cmdBuf, &beginInfo);
+    vkBeginCommandBuffer(rb.cmdBuf, &beginInfo);
 
     // Transition swapchain image: PRESENT_SRC → TRANSFER_SRC
+    // srcStage = ALL_COMMANDS ensures render work on same queue is complete first.
     VkImageMemoryBarrier barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+    barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     barrier.image = srcImage;
     barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    vkCmdPipelineBarrier(readback_.cmdBuf, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+    vkCmdPipelineBarrier(rb.cmdBuf, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 
     // Copy image to staging buffer
     VkBufferImageCopy copy{};
     copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     copy.imageExtent = {sc.extent.width, sc.extent.height, 1};
-    vkCmdCopyImageToBuffer(readback_.cmdBuf, srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           readback_.stagingBuf, 1, &copy);
+    vkCmdCopyImageToBuffer(rb.cmdBuf, srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           rb.stagingBuf, 1, &copy);
 
     // Transition back: TRANSFER_SRC → PRESENT_SRC
     barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
     barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    vkCmdPipelineBarrier(readback_.cmdBuf, VK_PIPELINE_STAGE_TRANSFER_BIT,
+    vkCmdPipelineBarrier(rb.cmdBuf, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 
-    vkEndCommandBuffer(readback_.cmdBuf);
+    vkEndCommandBuffer(rb.cmdBuf);
 
     VkSubmitInfo submit{};
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &readback_.cmdBuf;
-#if VBOXGPU_PERF_READBACK_FENCE
-    vkResetFences(device_, 1, &readbackFence_);
-    vkQueueSubmit(graphicsQueue_, 1, &submit, readbackFence_);
-    vkWaitForFences(device_, 1, &readbackFence_, VK_TRUE, UINT64_MAX);
-#else
-    vkQueueSubmit(graphicsQueue_, 1, &submit, VK_NULL_HANDLE);
-    vkQueueWaitIdle(graphicsQueue_);
-#endif
+    submit.pCommandBuffers = &rb.cmdBuf;
 
-    readbackValid_ = true;
-#ifdef VBOXGPU_VERBOSE
-    // Debug: dump first few pixels
-    static int rbDump = 0;
-    if (rbDump++ < 3) {
-        auto* px = static_cast<const uint8_t*>(readback_.mappedPtr);
-        fprintf(stderr, "[Readback] First 8 pixels (BGRA): ");
-        for (int i = 0; i < 32; i += 4)
-            fprintf(stderr, "(%u,%u,%u,%u) ", px[i], px[i+1], px[i+2], px[i+3]);
-        fprintf(stderr, "\n");
-        // Also dump middle row pixel
-        uint32_t mid = (sc.extent.height / 2) * sc.extent.width * 4 + (sc.extent.width / 2) * 4;
-        fprintf(stderr, "[Readback] Center pixel: (%u,%u,%u,%u)\n", px[mid], px[mid+1], px[mid+2], px[mid+3]);
-    }
-#endif
+    // Reset fence then submit — caller waits on readbackFences_[slot] next frame.
+    vkResetFences(device_, 1, &readbackFences_[slot]);
+    vkQueueSubmit(graphicsQueue_, 1, &submit, readbackFences_[slot]);
+    // No vkWaitForFences here — that's the whole point of double-buffering.
     return true;
 }

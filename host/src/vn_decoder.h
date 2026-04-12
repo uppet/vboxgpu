@@ -6,7 +6,6 @@
 // Performance optimization switches (define to 0 to disable)
 #define VBOXGPU_PERF_FENCE_SYNC      1  // Remove vkDeviceWaitIdle from QueueSubmit
 #define VBOXGPU_PERF_DIRTY_TRACK     1  // ICD mapped memory dirty tracking
-#define VBOXGPU_PERF_READBACK_FENCE  1  // Readback uses fence instead of QueueWaitIdle
 
 #include "vk_bootstrap.h"
 #include "../../common/venus/vn_command.h"
@@ -66,11 +65,12 @@ public:
     bool captureScreenshot(const char* path);
 
     // Frame readback: last presented frame available for TCP return
-    bool hasReadback() const { return readbackValid_; }
-    const void* getReadbackData() const { return readbackValid_ ? readback_.mappedPtr : nullptr; }
-    uint32_t getReadbackWidth() const { return readback_.width; }
-    uint32_t getReadbackHeight() const { return readback_.height; }
-    uint32_t getReadbackSize() const { return static_cast<uint32_t>(readback_.bufferSize); }
+    // Double-buffered: GPU copies frame N while CPU reads frame N-1
+    bool hasReadback() const { return rbReady_ >= 0; }
+    const void* getReadbackData() const { return rbReady_ >= 0 ? readback_[rbReady_].mappedPtr : nullptr; }
+    uint32_t getReadbackWidth() const { return rbReady_ >= 0 ? readback_[rbReady_].width : 0; }
+    uint32_t getReadbackHeight() const { return rbReady_ >= 0 ? readback_[rbReady_].height : 0; }
+    uint32_t getReadbackSize() const { return rbReady_ >= 0 ? static_cast<uint32_t>(readback_[rbReady_].bufferSize) : 0; }
 
 private:
     void dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdSize);
@@ -194,7 +194,8 @@ private:
     bool activeRenderingIsSwapchain_ = false; // true if current render pass targets swapchain
     VkSemaphore acquireSemaphore_ = VK_NULL_HANDLE; // for swapchain acquire sync
     VkFence acquireFence_ = VK_NULL_HANDLE;
-    VkFence readbackFence_ = VK_NULL_HANDLE; // sync for frame readback copies
+    // Double-buffered readback fences: one per slot
+    VkFence readbackFences_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
     uint32_t lastPresentedImageIndex_ = 0; // for screenshot fidelity
 
     // Per-CB fence tracking: maps CB stream ID → last submit fence
@@ -217,7 +218,9 @@ private:
     std::vector<std::function<void()>> pendingDestroys_;
     void flushPendingDestroys();
 
-    // Frame readback infrastructure (persistent, reused per frame)
+    // Double-buffered frame readback infrastructure
+    // Slot rbCur_ receives this frame's GPU copy (submitted async, no wait).
+    // Slot 1-rbCur_ holds the previous frame's data (fence already waited).
     struct FrameReadback {
         VkBuffer stagingBuf = VK_NULL_HANDLE;
         VkDeviceMemory stagingMem = VK_NULL_HANDLE;
@@ -227,11 +230,13 @@ private:
         uint32_t width = 0, height = 0;
         VkDeviceSize bufferSize = 0;
     };
-    FrameReadback readback_;
-    bool readbackValid_ = false;
+    FrameReadback readback_[2];
+    bool readbackSubmitted_[2] = {false, false}; // GPU copy submitted, fence not yet waited
+    int rbCur_ = 0;    // write slot for the current frame
+    int rbReady_ = -1; // slot with CPU-readable data (-1 = none yet)
 
-    void ensureReadbackResources(uint32_t w, uint32_t h);
-    bool readbackFrame(uint32_t imageIndex, HostSwapchain& sc);
+    void ensureReadbackResources(int slot, uint32_t w, uint32_t h);
+    bool readbackFrameAsync(uint32_t imageIndex, HostSwapchain& sc, int slot);
 
     bool error_ = false;
 
