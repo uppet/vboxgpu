@@ -24,8 +24,9 @@ if "%TEST%"=="depth"     goto :sel_depth
 if "%TEST%"=="blend"     goto :sel_blend
 if "%TEST%"=="rtt"       goto :sel_rtt
 if "%TEST%"=="sortcourt" goto :sel_sortcourt
+if "%TEST%"=="ultrakill" goto :sel_ultrakill
 echo Unknown test: %TEST%
-echo Available: triangle, depth, blend, rtt, sortcourt
+echo Available: triangle, depth, blend, rtt, sortcourt, ultrakill
 exit /b 1
 
 :sel_triangle
@@ -57,6 +58,12 @@ set TEST_DIR=%ROOT%\tests\SortTheCourt
 set TEST_EXE=SortTheCourt.exe
 set TEST_ARGS=-screen-width 800 -screen-height 600 -screen-fullscreen 0
 set ICD_DLL=%ROOT%\build32\guest_vk_icd\Debug\vbox_vulkan.dll
+goto :selected
+
+:sel_ultrakill
+set TEST_DIR=%ROOT%\tests\UltraKill
+set TEST_EXE=ULTRAKILL.exe
+set TEST_ARGS=-screen-width 800 -screen-height 600 -screen-fullscreen 0
 goto :selected
 
 :selected

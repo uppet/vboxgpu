@@ -56,13 +56,16 @@ copy /Y "%BUILD64%\guest_vk_icd\Debug\vbox_vulkan.dll" "%ROOT%\tests\dx11_depth_
 copy /Y "%BUILD64%\guest_vk_icd\Debug\vbox_vulkan.dll" "%ROOT%\tests\dx11_multi_blend\test_env\" >nul
 copy /Y "%BUILD64%\guest_vk_icd\Debug\vbox_vulkan.dll" "%ROOT%\tests\dx11_rtt\test_env\"        >nul
 
+REM --- 64-bit ICD for UltraKill ---
+copy /Y "%BUILD64%\guest_vk_icd\Debug\vbox_vulkan.dll" "%ROOT%\tests\UltraKill\"                 >nul
+
 REM --- 32-bit ICD for SortTheCourt ---
 copy /Y "%BUILD32%\guest_vk_icd\Debug\vbox_vulkan.dll" "%ROOT%\tests\SortTheCourt\"              >nul
 
 echo.
 echo ============================================================
 echo  All built and deployed successfully.
-echo  Run: man_run.bat triangle ^| depth ^| blend ^| rtt ^| sortcourt
+echo  Run: man_run.bat triangle ^| depth ^| blend ^| rtt ^| sortcourt ^| ultrakill
 echo ============================================================
 
 endlocal
