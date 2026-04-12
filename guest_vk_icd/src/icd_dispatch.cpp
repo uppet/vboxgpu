@@ -1,6 +1,11 @@
 // VBox GPU Bridge — Vulkan ICD dispatch table.
 // Maps Vulkan function names to our proxy implementations.
 
+// Performance switches — sync with host vn_decoder.h
+#ifndef VBOXGPU_PERF_DIRTY_TRACK
+#define VBOXGPU_PERF_DIRTY_TRACK 1
+#endif
+
 #include "icd_dispatch.h"
 #include <lz4.h>
 #include <cstring>
@@ -133,8 +138,10 @@ bool IcdState::connectToHost(const char* host, uint16_t port) {
 void IcdState::flushBufferRange(uint64_t bufferId, VkDeviceSize offset, VkDeviceSize range) {
     auto bit = bufferBindings.find(bufferId);
     if (bit == bufferBindings.end()) {
+#ifdef VBOXGPU_VERBOSE
         static int miss = 0;
         if (miss++ < 10) icdDbg(("[ICD] flushBufRange MISS: buf=" + std::to_string(bufferId) + " NOT in bufferBindings").c_str());
+#endif
         return;
     }
     uint64_t memId = bit->second.memoryId;
@@ -148,24 +155,29 @@ void IcdState::flushBufferRange(uint64_t bufferId, VkDeviceSize offset, VkDevice
             VkDeviceSize localOff = dataStart - m.offset;
             uint32_t sz = (uint32_t)(dataEnd - dataStart);
             if (sz > m.size - localOff) sz = (uint32_t)(m.size - localOff);
+#ifdef VBOXGPU_VERBOSE
             static int flushOk = 0;
             if (flushOk++ < 10 || sz > 100000)
                 icdDbg(("[ICD] flushBufRange OK: buf=" + std::to_string(bufferId) + " mem=" + std::to_string(memId) + " off=" + std::to_string(dataStart) + " sz=" + std::to_string(sz)).c_str());
+#endif
             encoder.cmdWriteMemory(memId, dataStart, sz,
                                    (const uint8_t*)m.ptr + localOff);
             return;
         }
     }
+#ifdef VBOXGPU_VERBOSE
     // Fell through — buffer binding found but no matching mapped region
     static int mapMiss = 0;
     if (mapMiss++ < 10)
         icdDbg(("[ICD] flushBufRange MAP MISS: buf=" + std::to_string(bufferId)
                 + " mem=" + std::to_string(memId) + " off=" + std::to_string(offset)
                 + " range=" + std::to_string(range) + " mappedCount=" + std::to_string(mappedRegions.size())).c_str());
+#endif
 }
 
 void IcdState::flushMappedMemory() {
     std::lock_guard<std::mutex> lock(mappedMutex);
+#ifdef VBOXGPU_VERBOSE
     static int flushLog = 0;
     if (flushLog++ < 5) {
         std::string msg = "[ICD] flushMappedMemory: regions=" + std::to_string(mappedRegions.size());
@@ -173,11 +185,20 @@ void IcdState::flushMappedMemory() {
             msg += " [mem=" + std::to_string(mappedRegions[i].memoryId) + " sz=" + std::to_string(mappedRegions[i].size) + "]";
         icdDbg(msg.c_str());
     }
+#endif
     for (auto& m : mappedRegions) {
+#if VBOXGPU_PERF_DIRTY_TRACK
+        // Only flush dirty regions — avoids re-sending unchanged 16MB heaps
+        if (m.dirty && m.size <= 32 * 1024 * 1024) {
+            encoder.cmdWriteMemory(m.memoryId, m.offset, (uint32_t)m.size, m.ptr);
+            m.dirty = false;
+        }
+#else
         // Flush all mapped regions (BDA descriptor heaps can be 16MB+)
         if (m.size <= 32 * 1024 * 1024) {
             encoder.cmdWriteMemory(m.memoryId, m.offset, (uint32_t)m.size, m.ptr);
         }
+#endif
     }
 }
 
@@ -185,7 +206,9 @@ bool IcdState::sendAndRecv(uint32_t* imageIndexOut) {
     std::lock_guard<std::mutex> lock(encoder.mutex_);
     encoder.cmdEndOfStreamUnlocked(); // called with lock held
     size_t sendSize = encoder.size();
+#ifdef VBOXGPU_VERBOSE
     icdDbg((std::string("sendAndRecv: size=") + std::to_string(sendSize)).c_str());
+#endif
     bool ok = transport.send(encoder.data(), sendSize);
     // Reset encoder for next batch (keep mutex_)
     encoder.w_ = VnStreamWriter();
@@ -1624,7 +1647,12 @@ static VkResult VKAPI_CALL icd_vkGetFenceStatus(VkDevice, VkFence) { return VK_S
 // --- Queue submit ---
 
 static VkResult VKAPI_CALL icd_vkQueueSubmit(VkQueue q, uint32_t count, const VkSubmitInfo* pSubmits, VkFence fence) {
-    fprintf(stderr, "[ICD] QueueSubmit: count=%u fence=%llu\n", count, (unsigned long long)(uint64_t)fence);
+#if VBOXGPU_PERF_DIRTY_TRACK
+    // Conservative: mark all mapped regions dirty before flush
+    // (DXVK writes via mapped pointer without explicit flush calls)
+    { std::lock_guard<std::mutex> lock(g_icd.mappedMutex);
+      for (auto& m : g_icd.mappedRegions) m.dirty = true; }
+#endif
     g_icd.flushMappedMemory();
     for (uint32_t i = 0; i < count; i++) {
         uint32_t cbCount = pSubmits[i].commandBufferCount;
@@ -1651,15 +1679,18 @@ static VkResult VKAPI_CALL icd_vkQueueSubmit(VkQueue q, uint32_t count, const Vk
 }
 
 static VkResult VKAPI_CALL icd_vkQueueSubmit2(VkQueue q, uint32_t count, const VkSubmitInfo2* pSubmits, VkFence fence) {
-    fprintf(stderr, "[ICD] QueueSubmit2: count=%u fence=%llu\n", count, (unsigned long long)(uint64_t)fence);
+#if VBOXGPU_PERF_DIRTY_TRACK
+    // Conservative: mark all mapped regions dirty before flush
+    { std::lock_guard<std::mutex> lock(g_icd.mappedMutex);
+      for (auto& m : g_icd.mappedRegions) m.dirty = true; }
+#endif
     g_icd.flushMappedMemory();
     for (uint32_t i = 0; i < count; i++) {
         uint32_t cbCount = pSubmits[i].commandBufferInfoCount;
-        fprintf(stderr, "[ICD]   submit[%u]: cbCount=%u waitSem=%u sigSem=%u\n",
-                i, cbCount, pSubmits[i].waitSemaphoreInfoCount, pSubmits[i].signalSemaphoreInfoCount);
         uint64_t waitSem = pSubmits[i].waitSemaphoreInfoCount > 0 ? (uint64_t)pSubmits[i].pWaitSemaphoreInfos[0].semaphore : 0;
         uint64_t sigSem = pSubmits[i].signalSemaphoreInfoCount > 0 ? (uint64_t)pSubmits[i].pSignalSemaphoreInfos[0].semaphore : 0;
         if (waitSem > 10000 || sigSem > 10000) {
+            // BAD SEM still logged — this catches real bugs
             icdDbg((std::string("QueueSubmit2 BAD SEM: waitSem=") + std::to_string(waitSem)
                 + " sigSem=" + std::to_string(sigSem)
                 + " sizeof(VkSemaphoreSubmitInfo)=" + std::to_string(sizeof(VkSemaphoreSubmitInfo))

@@ -3,6 +3,11 @@
 // Host-side Venus command stream decoder.
 // Reads binary commands and executes them on real Vulkan.
 
+// Performance optimization switches (define to 0 to disable)
+#define VBOXGPU_PERF_FENCE_SYNC      1  // Remove vkDeviceWaitIdle from QueueSubmit
+#define VBOXGPU_PERF_DIRTY_TRACK     1  // ICD mapped memory dirty tracking
+#define VBOXGPU_PERF_READBACK_FENCE  1  // Readback uses fence instead of QueueWaitIdle
+
 #include "vk_bootstrap.h"
 #include "../../common/venus/vn_command.h"
 #include "../../common/venus/vn_stream.h"
@@ -186,6 +191,7 @@ private:
     bool activeRenderingIsSwapchain_ = false; // true if current render pass targets swapchain
     VkSemaphore acquireSemaphore_ = VK_NULL_HANDLE; // for swapchain acquire sync
     VkFence acquireFence_ = VK_NULL_HANDLE;
+    VkFence readbackFence_ = VK_NULL_HANDLE; // sync for frame readback copies
     uint32_t lastPresentedImageIndex_ = 0; // for screenshot fidelity
 
     // Deferred present: collect during batch, execute after all QueueSubmits
