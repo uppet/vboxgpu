@@ -170,7 +170,7 @@ int main(int argc, char* argv[]) {
     SetUnhandledExceptionFilter(hostCrashHandler);
     signal(SIGABRT, hostAbortHandler);
     // Suppress assert dialog in Debug builds — go straight to abort handler
-    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTHOOK);
+    _set_abort_behavior(0, _WRITE_ABORT_MSG);
     _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
     _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
     setvbuf(stderr, NULL, _IONBF, 0);  // Force unbuffered stderr
@@ -368,7 +368,9 @@ int main(int argc, char* argv[]) {
                 break;
             }
 
+#ifdef VBOXGPU_VERBOSE
             fprintf(stderr, "[Host] Received %zu bytes\n", bytesRead);
+#endif
 
             // Dump to file if recording
             if (dumpFile) {

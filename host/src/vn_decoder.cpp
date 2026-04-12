@@ -19,6 +19,12 @@ void VnDecoder::init(VkPhysicalDevice physDevice, VkDevice device,
     vkCreateSemaphore(device_, &si, nullptr, &acquireSemaphore_);
     VkFenceCreateInfo fi{}; fi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     vkCreateFence(device_, &fi, nullptr, &acquireFence_);
+#if VBOXGPU_PERF_READBACK_FENCE
+    // Readback fence: separate sync for frame readback copies
+    VkFenceCreateInfo fi3{}; fi3.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fi3.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    vkCreateFence(device_, &fi3, nullptr, &readbackFence_);
+#endif
 }
 
 bool VnDecoder::execute(const uint8_t* data, size_t size) {
@@ -85,7 +91,9 @@ bool VnDecoder::executeOneFrame(VnStreamReader& reader) {
 }
 
 void VnDecoder::dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdSize) {
+#ifdef VBOXGPU_VERBOSE
     fprintf(stderr, "[Decoder] cmd=%u size=%u\n", cmdType, cmdSize);
+#endif
     switch (cmdType) {
     case VN_CMD_vkCreateRenderPass:       handleCreateRenderPass(reader); break;
     case VN_CMD_vkCreateShaderModule:     handleCreateShaderModule(reader); break;
@@ -1333,13 +1341,14 @@ void VnDecoder::handleAllocateCommandBuffers(VnStreamReader& r) {
 void VnDecoder::handleBeginCommandBuffer(VnStreamReader& r) {
     uint64_t cbId = r.readU64();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+#ifdef VBOXGPU_VERBOSE
     fprintf(stderr, "[Decoder] BeginCmdBuf: cbId=0x%llx → cb=%p (map size=%zu)\n",
             (unsigned long long)cbId, (void*)cb, commandBuffers_.size());
     fflush(stderr);
+#endif
     if (!cb) { error_ = true; return; }
 
-    // Must wait for GPU to finish any prior submission of this CB before resetting.
-    // Within a single batch, the same CB can be Submit'd then Begin'd again.
+    // Ensure CB is idle before resetting — it may still be executing on GPU.
     vkDeviceWaitIdle(device_);
     vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo info{};
@@ -1351,8 +1360,10 @@ void VnDecoder::handleEndCommandBuffer(VnStreamReader& r) {
     uint64_t cbId = r.readU64();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     VkResult vr = vkEndCommandBuffer(cb);
+#ifdef VBOXGPU_VERBOSE
     fprintf(stderr, "[Decoder] EndCmdBuf: cbId=0x%llx cb=%p result=%d\n",
             (unsigned long long)cbId, (void*)cb, (int)vr);
+#endif
     fflush(stderr);
 }
 
@@ -2025,9 +2036,10 @@ void VnDecoder::handleQueueSubmit(VnStreamReader& r) {
         info.pSignalSemaphores = &sigSem;
     }
 
-    // Force-serialize: WaitIdle before submit ensures all prior GPU work is done.
+    // No synchronization needed here — submits to the same queue are
+    // implicitly ordered by Vulkan.  The old vkDeviceWaitIdle was unnecessary
+    // overhead that serialized every submit.
     // Strip wait semaphores (unresolvable IDs), keep valid signal semaphores.
-    vkDeviceWaitIdle(device_);
     info.waitSemaphoreCount = 0;
     info.pWaitSemaphores = nullptr;
     info.pWaitDstStageMask = nullptr;
@@ -2038,8 +2050,10 @@ void VnDecoder::handleQueueSubmit(VnStreamReader& r) {
     }
 
     VkResult submitResult = vkQueueSubmit(graphicsQueue_, 1, &info, fence);
+#ifdef VBOXGPU_VERBOSE
     fprintf(stderr, "[Decoder] QueueSubmit result=%d cb=%p\n", (int)submitResult, (void*)cb);
     fflush(stderr);
+#endif
 }
 
 void VnDecoder::handleWaitForFences(VnStreamReader& r) {
@@ -2206,9 +2220,6 @@ void VnDecoder::flushPendingPresents() {
         if (it == swapchains_.end()) continue;
 
         // Wait for all GPU work to complete before presenting.
-        // Don't use ICD semaphores for present wait — they may not be properly
-        // signaled (ICD semaphore IDs don't map 1:1 to Host signal operations).
-        // vkDeviceWaitIdle guarantees all rendering is done.
         vkDeviceWaitIdle(device_);
 
         VkPresentInfoKHR info{};
@@ -2239,11 +2250,11 @@ void VnDecoder::flushPendingPresents() {
 
         VkResult vr = vkQueuePresentKHR(graphicsQueue_, &info);
 
-        // WGC disabled — was causing crashes after push descriptor changes
-
+#ifdef VBOXGPU_VERBOSE
         fprintf(stderr, "[Decoder] Present FLUSH: sc=%p imgIdx=%u result=%d\n",
                 (void*)it->second.swapchain, presentIdx, (int)vr);
         fflush(stderr);
+#endif
 
         lastPresentedImageIndex_ = presentIdx;
         // Auto-acquire next image for the next frame
@@ -2252,8 +2263,10 @@ void VnDecoder::flushPendingPresents() {
                               VK_NULL_HANDLE, acquireFence_, &it->second.currentImageIndex);
         vkWaitForFences(device_, 1, &acquireFence_, VK_TRUE, UINT64_MAX);
         vkResetFences(device_, 1, &acquireFence_);
+#ifdef VBOXGPU_VERBOSE
         fprintf(stderr, "[Decoder] AutoAcquire: %u -> %u\n",
                 oldIdx, it->second.currentImageIndex);
+#endif
     }
     pendingPresents_.clear();
 }
@@ -2282,6 +2295,9 @@ void VnDecoder::cleanup() {
     readback_ = {};
     if (acquireSemaphore_) vkDestroySemaphore(device_, acquireSemaphore_, nullptr);
     if (acquireFence_) vkDestroyFence(device_, acquireFence_, nullptr);
+#if VBOXGPU_PERF_READBACK_FENCE
+    if (readbackFence_) vkDestroyFence(device_, readbackFence_, nullptr);
+#endif
     for (auto& [id, p] : pipelines_) vkDestroyPipeline(device_, p, nullptr);
     for (auto& [id, l] : pipelineLayouts_) vkDestroyPipelineLayout(device_, l, nullptr);
     for (auto& [id, dsl] : descriptorSetLayouts_) vkDestroyDescriptorSetLayout(device_, dsl, nullptr);
@@ -2629,10 +2645,17 @@ bool VnDecoder::readbackFrame(uint32_t imageIndex, HostSwapchain& sc) {
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &readback_.cmdBuf;
+#if VBOXGPU_PERF_READBACK_FENCE
+    vkResetFences(device_, 1, &readbackFence_);
+    vkQueueSubmit(graphicsQueue_, 1, &submit, readbackFence_);
+    vkWaitForFences(device_, 1, &readbackFence_, VK_TRUE, UINT64_MAX);
+#else
     vkQueueSubmit(graphicsQueue_, 1, &submit, VK_NULL_HANDLE);
     vkQueueWaitIdle(graphicsQueue_);
+#endif
 
     readbackValid_ = true;
+#ifdef VBOXGPU_VERBOSE
     // Debug: dump first few pixels
     static int rbDump = 0;
     if (rbDump++ < 3) {
@@ -2645,5 +2668,6 @@ bool VnDecoder::readbackFrame(uint32_t imageIndex, HostSwapchain& sc) {
         uint32_t mid = (sc.extent.height / 2) * sc.extent.width * 4 + (sc.extent.width / 2) * 4;
         fprintf(stderr, "[Readback] Center pixel: (%u,%u,%u,%u)\n", px[mid], px[mid+1], px[mid+2], px[mid+3]);
     }
+#endif
     return true;
 }
