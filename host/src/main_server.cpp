@@ -9,6 +9,8 @@
 #include <vector>
 #include <thread>
 #include <atomic>
+#include <mutex>
+#include <condition_variable>
 #include <chrono>
 #include <cstring>
 #include <csignal>
@@ -357,6 +359,65 @@ int main(int argc, char* argv[]) {
     if (disableReadback)
         fprintf(stderr, "[Host] Frame readback DISABLED (VBOXGPU_NO_READBACK)\n");
 
+    // --- Async LZ4 compress thread ---
+    // Decode thread posts raw frame pixels here; compress thread LZ4s them
+    // in the background while the next frame's GPU work runs.
+    // Adds ~1 frame display latency but removes ~3ms LZ4 from the critical path.
+
+    struct CompressJob {
+        std::vector<uint8_t> rawData;
+        uint32_t w = 0, h = 0;
+        bool valid = false;
+    };
+    struct CompressResult {
+        std::vector<uint8_t> compData;
+        uint32_t w = 0, h = 0, rawSize = 0, compSize = 0;
+        bool valid = false;
+    };
+
+    std::mutex          cjMutex;   // guards compJob
+    std::condition_variable cjCV;
+    CompressJob         compJob;
+
+    std::mutex          crMutex;   // guards compResult
+    CompressResult      compResult;
+
+    std::atomic<bool>   compRunning{true};
+
+    std::thread compressThread([&]() {
+        while (compRunning) {
+            std::unique_lock<std::mutex> lock(cjMutex);
+            cjCV.wait(lock, [&] { return compJob.valid || !compRunning; });
+            if (!compRunning) break;
+
+            uint32_t w = compJob.w, h = compJob.h;
+            std::vector<uint8_t> localRaw = std::move(compJob.rawData);
+            compJob.valid = false;
+            lock.unlock(); // release lock before heavy LZ4 work
+
+            uint32_t rawSize = static_cast<uint32_t>(localRaw.size());
+            int bound = LZ4_compressBound(rawSize);
+            std::vector<uint8_t> compressed(bound);
+            int csz = LZ4_compress_default(
+                reinterpret_cast<const char*>(localRaw.data()),
+                reinterpret_cast<char*>(compressed.data()),
+                rawSize, bound);
+
+            if (csz > 0) {
+                compressed.resize(csz);
+                std::lock_guard<std::mutex> rlock(crMutex);
+                compResult.compData  = std::move(compressed);
+                compResult.w         = w;
+                compResult.h         = h;
+                compResult.rawSize   = rawSize;
+                compResult.compSize  = static_cast<uint32_t>(csz);
+                compResult.valid     = true;
+            } else {
+                fprintf(stderr, "[Compress] LZ4 failed for %ux%u\n", w, h);
+            }
+        }
+    });
+
     // --- Worker thread: recv → decode → execute → send response ---
     // Runs on a separate thread so the main thread can pump window messages
     // without being blocked by vkWaitForFences or other long Vulkan operations.
@@ -400,6 +461,32 @@ int main(int argc, char* argv[]) {
                 break;
             }
 
+            // Post raw frame pixels to compress thread (fast memcpy, non-blocking).
+            // Compress thread will LZ4 in background while next frame renders on GPU.
+            if (!disableReadback && decoder.hasReadback()) {
+                auto* rawPtr = static_cast<const uint8_t*>(decoder.getReadbackData());
+                uint32_t rawSize = decoder.getReadbackSize();
+                {
+                    std::lock_guard<std::mutex> lock(cjMutex);
+                    compJob.rawData.assign(rawPtr, rawPtr + rawSize);
+                    compJob.w = decoder.getReadbackWidth();
+                    compJob.h = decoder.getReadbackHeight();
+                    compJob.valid = true;
+                }
+                cjCV.notify_one();
+            }
+
+            // Take whatever compressed result the compress thread has ready (non-blocking).
+            // Will be the frame from one iteration ago — acceptable 1-frame display lag.
+            CompressResult result;
+            if (!disableReadback) {
+                std::lock_guard<std::mutex> lock(crMutex);
+                if (compResult.valid) {
+                    result = std::move(compResult);
+                    compResult.valid = false;
+                }
+            }
+
             // Build response: [header(16)][LZ4 frame][bdaCount(4)][{bufId(8),addr(8)}*N]
             auto* sc = decoder.getFirstSwapchain();
             uint32_t imageIndex = sc ? sc->currentImageIndex : 0;
@@ -415,46 +502,24 @@ int main(int argc, char* argv[]) {
                 fpsLastTime = now;
             }
 
-            if (!disableReadback && decoder.hasReadback()) {
-                uint32_t w = decoder.getReadbackWidth();
-                uint32_t h = decoder.getReadbackHeight();
-                uint32_t rawSize = decoder.getReadbackSize();
-                int maxCompressed = LZ4_compressBound(rawSize);
+            size_t bdaBytes = 4 + decoder.pendingBdaResults_.size() * 16;
+            if (result.valid) {
+                uint32_t csz = result.compSize;
+                if (sendBuf.size() < 16 + csz + bdaBytes)
+                    sendBuf.resize(16 + csz + bdaBytes);
+                memcpy(sendBuf.data(),      &imageIndex,    4);
+                memcpy(sendBuf.data() + 4,  &result.w,      4);
+                memcpy(sendBuf.data() + 8,  &result.h,      4);
+                memcpy(sendBuf.data() + 12, &csz,           4);
+                memcpy(sendBuf.data() + 16, result.compData.data(), csz);
+                payloadSize = 16 + csz;
 
-                size_t bdaBytes = 4 + decoder.pendingBdaResults_.size() * 16;
-                if (sendBuf.size() < 16 + (size_t)maxCompressed + bdaBytes)
-                    sendBuf.resize(16 + maxCompressed + bdaBytes);
-
-                int compressedSize = LZ4_compress_default(
-                    static_cast<const char*>(decoder.getReadbackData()),
-                    reinterpret_cast<char*>(sendBuf.data() + 16),
-                    rawSize, maxCompressed);
-
-                if (compressedSize > 0) {
-                    uint32_t csz = static_cast<uint32_t>(compressedSize);
-                    memcpy(sendBuf.data(),      &imageIndex, 4);
-                    memcpy(sendBuf.data() + 4,  &w, 4);
-                    memcpy(sendBuf.data() + 8,  &h, 4);
-                    memcpy(sendBuf.data() + 12, &csz, 4);
-                    payloadSize = 16 + csz;
-
-                    static int logCount = 0;
-                    if (++logCount <= 3)
-                        fprintf(stderr, "[Host] Frame %ux%u: %u -> %u bytes (%.1fx)\n",
-                                w, h, rawSize, csz, (float)rawSize / csz);
-                } else {
-                    fprintf(stderr, "[Host] LZ4 compress failed, sending raw\n");
-                    if (sendBuf.size() < 16 + rawSize + bdaBytes)
-                        sendBuf.resize(16 + rawSize + bdaBytes);
-                    memcpy(sendBuf.data(),      &imageIndex, 4);
-                    memcpy(sendBuf.data() + 4,  &w, 4);
-                    memcpy(sendBuf.data() + 8,  &h, 4);
-                    memcpy(sendBuf.data() + 12, &rawSize, 4);
-                    memcpy(sendBuf.data() + 16, decoder.getReadbackData(), rawSize);
-                    payloadSize = 16 + rawSize;
-                }
+                static int logCount = 0;
+                if (++logCount <= 3)
+                    fprintf(stderr, "[Host] Frame %ux%u: %u -> %u bytes (%.1fx)\n",
+                            result.w, result.h, result.rawSize, csz,
+                            (float)result.rawSize / csz);
             } else {
-                size_t bdaBytes = 4 + decoder.pendingBdaResults_.size() * 16;
                 if (sendBuf.size() < 16 + bdaBytes)
                     sendBuf.resize(16 + bdaBytes);
                 memset(sendBuf.data(), 0, 16);
@@ -490,6 +555,10 @@ int main(int argc, char* argv[]) {
     g_running = false;
     server.close(); // unblock recv() in worker thread
     if (workerThread.joinable()) workerThread.join();
+    // Stop compress thread
+    compRunning = false;
+    cjCV.notify_all();
+    if (compressThread.joinable()) compressThread.join();
     if (dumpFile) fclose(dumpFile);
     decoder.cleanup();
     cleanupVulkan(vk);
