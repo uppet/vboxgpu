@@ -360,6 +360,15 @@ uint64_t IcdState::syncGetBufferDeviceAddress(uint64_t bufferId) {
 void IcdState::blitFrameToWindow() {
     if (!frameValid || !presentHwnd || framePixels.empty()) return;
 
+    // Rate-limit GDI blit to ~60 FPS — prevents VM CPU saturation when
+    // host renders 1000+ FPS via async LZ4. Game loop stays fast; only
+    // display output is capped.
+    auto now = std::chrono::steady_clock::now();
+    auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         now - lastBlitTime).count();
+    if (elapsedMs < BLIT_INTERVAL_MS) return;
+    lastBlitTime = now;
+
     HDC hdc = GetDC(presentHwnd);
     if (!hdc) return;
 
