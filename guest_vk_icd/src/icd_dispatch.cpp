@@ -288,21 +288,24 @@ void IcdState::flushMappedMemory() {
 #endif
 }
 
-bool IcdState::sendBatch(bool isPresent) {
-    {
-        std::lock_guard<std::mutex> lock(encoder.mutex_);
-        encoder.cmdEndOfStreamUnlocked();
-        size_t sendSize = encoder.size();
-        bool ok = transport.send(encoder.data(), sendSize);
-        encoder.w_ = VnStreamWriter();
-        if (!ok) return false;
-    }
-    // Record what type of response to expect (recv thread pops in order)
+bool IcdState::sendBatchLocked(bool isPresent) {
+    // Caller MUST hold encoder.mutex_
+    encoder.cmdEndOfStreamUnlocked();
+    size_t sendSize = encoder.size();
+    bool ok = transport.send(encoder.data(), sendSize);
+    encoder.w_ = VnStreamWriter();
+    if (!ok) return false;
+    // Record response type — atomic with TCP send under encoder.mutex_
     {
         std::lock_guard<std::mutex> lock(pendingQueueMutex_);
         pendingResponseQueue_.push(isPresent);
     }
     return true;
+}
+
+bool IcdState::sendBatch(bool isPresent) {
+    std::lock_guard<std::mutex> lock(encoder.mutex_);
+    return sendBatchLocked(isPresent);
 }
 
 void IcdState::startRecvThread() {
@@ -399,9 +402,12 @@ uint64_t IcdState::syncGetBufferDeviceAddress(uint64_t bufferId) {
         if (it != bdaCache.end()) return it->second;
     }
 
-    // Encode BDA query + flush to host (BDA query batch, not a present)
-    encoder.cmdGetBufferDeviceAddress(1, bufferId);
-    sendBatch(false); // false = BDA query, recv thread signals bdaCV_
+    // Encode BDA query + send under encoder.mutex_ for atomicity
+    {
+        ENC_LOCK;
+        encoder.cmdGetBufferDeviceAddressUnlocked(1, bufferId);
+        sendBatchLocked(false); // false = BDA query, recv thread signals bdaCV_
+    }
 
     // Wait for recv thread to populate bdaCache with this buffer's address
     uint64_t result = 0;
