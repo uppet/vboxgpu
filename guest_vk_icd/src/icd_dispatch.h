@@ -140,8 +140,7 @@ struct IcdState {
 
     // Ordered queue of send types — recv thread pops to know how to dispatch response.
     // true = present batch (signal acquireCV_), false = BDA query (signal bdaCV_).
-    // Guarded by pendingQueueMutex_ (recv thread pops under this lock;
-    // sendBatch pushes under encoder.mutex_ which is strictly ordered with TCP send)
+    // Lock ordering: encoder.mutex_ → pendingQueueMutex_ (never reverse)
     std::queue<bool> pendingResponseQueue_;
     std::mutex pendingQueueMutex_;
 
@@ -160,6 +159,7 @@ struct IcdState {
     void stopRecvThread();
     void recvLoop();
     bool sendBatch(bool isPresent); // send encoder buffer; isPresent=true for QueuePresent
+    bool sendBatchLocked(bool isPresent); // caller must hold encoder.mutex_
 
     uint64_t syncGetBufferDeviceAddress(uint64_t bufferId);
     void blitFrameToWindow();

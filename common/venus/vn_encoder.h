@@ -885,6 +885,14 @@ public:
     }
 
     // Unlocked version — caller must hold mutex_
+    void cmdGetBufferDeviceAddressUnlocked(uint64_t deviceId, uint64_t bufferId) {
+        auto off = w_.beginCommand(VN_CMD_BRIDGE_GetBufferDeviceAddress);
+        w_.writeU64(deviceId);
+        w_.writeU64(bufferId);
+        w_.endCommand(off);
+    }
+
+    // Unlocked version — caller must hold mutex_
     void cmdEndOfStreamUnlocked() {
         auto off = w_.beginCommand(VN_CMD_BRIDGE_EndOfStream);
         w_.endCommand(off);

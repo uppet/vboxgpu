@@ -56,6 +56,18 @@ copy /Y "%BUILD64%\guest_vk_icd\Debug\vbox_vulkan.dll" "%ROOT%\tests\dx11_depth_
 copy /Y "%BUILD64%\guest_vk_icd\Debug\vbox_vulkan.dll" "%ROOT%\tests\dx11_multi_blend\test_env\" >nul
 copy /Y "%BUILD64%\guest_vk_icd\Debug\vbox_vulkan.dll" "%ROOT%\tests\dx11_rtt\test_env\"        >nul
 
+REM --- DXVK DLLs (d3d11.dll + dxgi.dll) for all 64-bit test_env ---
+set DXVK_SRC=%ROOT%\tests\dx11_triangle\test_env
+copy /Y "%DXVK_SRC%\d3d11.dll" "%ROOT%\tests\dx11_depth_test\test_env\"  >nul
+copy /Y "%DXVK_SRC%\dxgi.dll"   "%ROOT%\tests\dx11_depth_test\test_env\"  >nul
+copy /Y "%DXVK_SRC%\d3d11.dll" "%ROOT%\tests\dx11_multi_blend\test_env\" >nul
+copy /Y "%DXVK_SRC%\dxgi.dll"   "%ROOT%\tests\dx11_multi_blend\test_env\" >nul
+copy /Y "%DXVK_SRC%\d3d11.dll" "%ROOT%\tests\dx11_rtt\test_env\"        >nul
+copy /Y "%DXVK_SRC%\dxgi.dll"   "%ROOT%\tests\dx11_rtt\test_env\"        >nul
+copy /Y "%DXVK_SRC%\vbox_icd.json" "%ROOT%\tests\dx11_depth_test\test_env\"  >nul
+copy /Y "%DXVK_SRC%\vbox_icd.json" "%ROOT%\tests\dx11_multi_blend\test_env\" >nul
+copy /Y "%DXVK_SRC%\vbox_icd.json" "%ROOT%\tests\dx11_rtt\test_env\"        >nul
+
 REM --- 64-bit ICD for UltraKill ---
 copy /Y "%BUILD64%\guest_vk_icd\Debug\vbox_vulkan.dll" "%ROOT%\tests\UltraKill\"                 >nul
 
