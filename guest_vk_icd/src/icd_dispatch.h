@@ -26,6 +26,8 @@
 
 #include "../../common/venus/vn_encoder.h"
 #include "../../common/transport/tcp_transport.h"
+#define VBOXGPU_TIMING_WIN32_LOG
+#include "../../common/timing.h"
 
 // Handle ID generator
 class HandleAllocator {
@@ -141,8 +143,16 @@ struct IcdState {
     // Ordered queue of send types — recv thread pops to know how to dispatch response.
     // true = present batch (signal acquireCV_), false = BDA query (signal bdaCV_).
     // Lock ordering: encoder.mutex_ → pendingQueueMutex_ (never reverse)
-    std::queue<bool> pendingResponseQueue_;
+    struct PendingResponse {
+        bool isPresent;
+        uint32_t seqId;
+        uint64_t sendTimestampUs;
+    };
+    std::queue<PendingResponse> pendingResponseQueue_;
     std::mutex pendingQueueMutex_;
+
+    // Roundtrip timing: monotonic sequence ID for each batch
+    uint32_t nextSeqId_ = 0;
 
     // AcquireNextImageKHR waits here for the imageIndex from the last present's response.
     std::mutex acquireMutex_;

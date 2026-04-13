@@ -100,6 +100,7 @@ enum VnCommandType : uint32_t {
     VN_CMD_BRIDGE_QueuePresent             = 0x10002,
     VN_CMD_BRIDGE_WriteMemory              = 0x10003,  // upload host-visible memory data
     VN_CMD_BRIDGE_GetBufferDeviceAddress   = 0x10004,  // sync query: host returns real GPU address
+    VN_CMD_BRIDGE_TimingSeq                = 0x10005,  // roundtrip timing: [seqId(4)][guestTimestampUs(8)]
     VN_CMD_BRIDGE_EndOfStream              = 0x1FFFF,
 };
 

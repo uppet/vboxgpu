@@ -892,6 +892,14 @@ public:
         w_.endCommand(off);
     }
 
+    // Timing marker — unlocked, caller must hold mutex_
+    void cmdBridgeTimingSeqUnlocked(uint32_t seqId, uint64_t guestTimestampUs) {
+        auto off = w_.beginCommand(VN_CMD_BRIDGE_TimingSeq);
+        w_.writeU32(seqId);
+        w_.writeU64(guestTimestampUs);
+        w_.endCommand(off);
+    }
+
     // Unlocked version — caller must hold mutex_
     void cmdEndOfStreamUnlocked() {
         auto off = w_.beginCommand(VN_CMD_BRIDGE_EndOfStream);

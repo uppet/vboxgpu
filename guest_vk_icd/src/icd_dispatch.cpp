@@ -290,6 +290,12 @@ void IcdState::flushMappedMemory() {
 
 bool IcdState::sendBatchLocked(bool isPresent) {
     // Caller MUST hold encoder.mutex_
+    uint32_t seqId = nextSeqId_++;
+#if VBOXGPU_TIMING
+    uint64_t t0 = rtNowUs();
+    encoder.cmdBridgeTimingSeqUnlocked(seqId, t0);
+    RT_LOG(seqId, "T1", "sendBatch %zu bytes present=%d", encoder.size(), (int)isPresent);
+#endif
     encoder.cmdEndOfStreamUnlocked();
     size_t sendSize = encoder.size();
     bool ok = transport.send(encoder.data(), sendSize);
@@ -298,7 +304,7 @@ bool IcdState::sendBatchLocked(bool isPresent) {
     // Record response type — atomic with TCP send under encoder.mutex_
     {
         std::lock_guard<std::mutex> lock(pendingQueueMutex_);
-        pendingResponseQueue_.push(isPresent);
+        pendingResponseQueue_.push({isPresent, seqId, rtNowUs()});
     }
     return true;
 }
@@ -329,13 +335,23 @@ void IcdState::recvLoop() {
 
         // Determine response type from the ordered queue
         bool isPresent = true;
+        uint32_t batchSeqId = 0;
+        uint64_t batchSendTs = 0;
         {
             std::lock_guard<std::mutex> lock(pendingQueueMutex_);
             if (!pendingResponseQueue_.empty()) {
-                isPresent = pendingResponseQueue_.front();
+                auto& front = pendingResponseQueue_.front();
+                isPresent = front.isPresent;
+                batchSeqId = front.seqId;
+                batchSendTs = front.sendTimestampUs;
                 pendingResponseQueue_.pop();
             }
         }
+#if VBOXGPU_TIMING
+        uint64_t tRecv = rtNowUs();
+        RT_LOG(batchSeqId, "T7", "recv %zu bytes, wait=%.2fms",
+               n, (tRecv - batchSendTs) / 1000.0);
+#endif
 
         // Parse imageIndex
         uint32_t imageIndex = 0;
@@ -351,24 +367,35 @@ void IcdState::recvLoop() {
             if (compressedSz > 0 && n >= 16 + compressedSz) {
                 uint32_t rawSize = w * h * 4;
                 std::vector<uint8_t> pixels(rawSize);
+#if VBOXGPU_TIMING
+                uint64_t tDecompStart = rtNowUs();
+#endif
                 int dec = LZ4_decompress_safe(
                     reinterpret_cast<const char*>(recvBuf.data() + 16),
                     reinterpret_cast<char*>(pixels.data()),
                     compressedSz, rawSize);
                 if (dec == (int)rawSize) {
+#if VBOXGPU_TIMING
+                    RT_LOG(batchSeqId, "T8", "decompress %.2fms (%u->%u)",
+                           (rtNowUs() - tDecompStart) / 1000.0, compressedSz, rawSize);
+#endif
                     framePixels = std::move(pixels);
                     frameWidth = w;
                     frameHeight = h;
                     frameValid = true;
                     blitFrameToWindow(); // rate-limited to ~60 FPS
+#if VBOXGPU_TIMING
+                    RT_LOG(batchSeqId, "T9", "roundtrip=%.2fms",
+                           (rtNowUs() - batchSendTs) / 1000.0);
+#endif
                 }
             }
         }
 
         // Parse BDA results suffix: [bdaCount(4)][{bufId(8),addr(8)}*N]
         size_t bdaOff = 16 + compressedSz;
+        uint32_t bdaCount = 0;
         if (n >= bdaOff + 4) {
-            uint32_t bdaCount = 0;
             memcpy(&bdaCount, recvBuf.data() + bdaOff, 4);
             if (bdaCount > 0) {
                 std::lock_guard<std::mutex> lock(bdaMutex_);
@@ -381,6 +408,43 @@ void IcdState::recvLoop() {
                 bdaCV_.notify_all();
             }
         }
+
+#if VBOXGPU_TIMING
+        // Parse timing suffix: batch(20) + frame(28) = 48 bytes
+        size_t timingOff = bdaOff + 4 + bdaCount * 16;
+        if (n >= timingOff + 48) {
+            // Batch timing
+            uint64_t hostRecvUs = 0, hostSendUs = 0;
+            memcpy(&hostRecvUs, recvBuf.data() + timingOff + 4,  8);
+            memcpy(&hostSendUs, recvBuf.data() + timingOff + 12, 8);
+            double hostMs = (hostSendUs - hostRecvUs) / 1000.0;
+            double netMs = (rtNowUs() - batchSendTs) / 1000.0 - hostMs;
+            RT_LOG(batchSeqId, "NET", "host=%.2fms net=%.2fms", hostMs, netMs);
+
+            // Frame timing: end-to-end pipeline latency
+            uint32_t ftFrameId = 0;
+            uint64_t ftPresentUs = 0, ftReadbackUs = 0, ftCompressUs = 0;
+            memcpy(&ftFrameId,    recvBuf.data() + timingOff + 20, 4);
+            memcpy(&ftPresentUs,  recvBuf.data() + timingOff + 24, 8);
+            memcpy(&ftReadbackUs, recvBuf.data() + timingOff + 32, 8);
+            memcpy(&ftCompressUs, recvBuf.data() + timingOff + 40, 8);
+            if (ftFrameId > 0 && ftPresentUs > 0) {
+                // All host timestamps are relative to host process start.
+                // We can compute host-side durations, but not cross-machine absolute.
+                // Use hostSendUs - ftPresentUs as the host pipeline age.
+                double hostPipeMs = (hostSendUs - ftPresentUs) / 1000.0;
+                double readbackMs = (ftReadbackUs - ftPresentUs) / 1000.0;
+                double compressMs = (ftCompressUs - ftReadbackUs) / 1000.0;
+                double sendMs = (hostSendUs - ftCompressUs) / 1000.0;
+                // Guest-side: recv + decompress + blit already logged as T7/T8/T9
+                // Estimate total pipeline: host_pipe + net_one_way + guest_decomp_blit
+                // net_one_way ≈ netMs/2 (rough, symmetric assumption)
+                RT_LOG(ftFrameId, "FT",
+                       "pipeline: readback=%.2f compress=%.2f send=%.2f host_total=%.2fms",
+                       readbackMs, compressMs, sendMs, hostPipeMs);
+            }
+        }
+#endif
 
         // Signal the appropriate waiter
         if (isPresent) {

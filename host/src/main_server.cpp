@@ -368,11 +368,20 @@ int main(int argc, char* argv[]) {
         std::vector<uint8_t> rawData;
         uint32_t w = 0, h = 0;
         bool valid = false;
+        // Frame-level timing passthrough
+        uint32_t frameId = 0;
+        uint64_t presentUs = 0;
+        uint64_t readbackUs = 0;
     };
     struct CompressResult {
         std::vector<uint8_t> compData;
         uint32_t w = 0, h = 0, rawSize = 0, compSize = 0;
         bool valid = false;
+        // Frame-level timing passthrough
+        uint32_t frameId = 0;
+        uint64_t presentUs = 0;
+        uint64_t readbackUs = 0;
+        uint64_t compressDoneUs = 0;
     };
 
     std::mutex          cjMutex;   // guards compJob
@@ -391,6 +400,9 @@ int main(int argc, char* argv[]) {
             if (!compRunning) break;
 
             uint32_t w = compJob.w, h = compJob.h;
+            uint32_t jobFrameId = compJob.frameId;
+            uint64_t jobPresentUs = compJob.presentUs;
+            uint64_t jobReadbackUs = compJob.readbackUs;
             std::vector<uint8_t> localRaw = std::move(compJob.rawData);
             compJob.valid = false;
             lock.unlock(); // release lock before heavy LZ4 work
@@ -406,12 +418,16 @@ int main(int argc, char* argv[]) {
             if (csz > 0) {
                 compressed.resize(csz);
                 std::lock_guard<std::mutex> rlock(crMutex);
-                compResult.compData  = std::move(compressed);
-                compResult.w         = w;
-                compResult.h         = h;
-                compResult.rawSize   = rawSize;
-                compResult.compSize  = static_cast<uint32_t>(csz);
-                compResult.valid     = true;
+                compResult.compData      = std::move(compressed);
+                compResult.w             = w;
+                compResult.h             = h;
+                compResult.rawSize       = rawSize;
+                compResult.compSize      = static_cast<uint32_t>(csz);
+                compResult.valid         = true;
+                compResult.frameId       = jobFrameId;
+                compResult.presentUs     = jobPresentUs;
+                compResult.readbackUs    = jobReadbackUs;
+                compResult.compressDoneUs = rtNowUs();
             } else {
                 fprintf(stderr, "[Compress] LZ4 failed for %ux%u\n", w, h);
             }
@@ -441,6 +457,10 @@ int main(int argc, char* argv[]) {
                 break;
             }
 
+#if VBOXGPU_TIMING
+            decoder.batchRecvUs_ = rtNowUs();
+            RT_LOG(0, "T2", "recv %zu bytes", bytesRead);
+#endif
 #ifdef VBOXGPU_VERBOSE
             fprintf(stderr, "[Host] Received %zu bytes\n", bytesRead);
 #endif
@@ -472,6 +492,11 @@ int main(int argc, char* argv[]) {
                     compJob.w = decoder.getReadbackWidth();
                     compJob.h = decoder.getReadbackHeight();
                     compJob.valid = true;
+#if VBOXGPU_TIMING
+                    compJob.frameId   = decoder.readyFrameTiming_.frameId;
+                    compJob.presentUs = decoder.readyFrameTiming_.presentUs;
+                    compJob.readbackUs = decoder.readyFrameTiming_.readbackUs;
+#endif
                 }
                 cjCV.notify_one();
             }
@@ -503,10 +528,14 @@ int main(int argc, char* argv[]) {
             }
 
             size_t bdaBytes = 4 + decoder.pendingBdaResults_.size() * 16;
+            // Timing suffix: batch(20) + frame(28) = 48 bytes
+            // Batch: [seqId(4)][recvUs(8)][sendUs(8)]
+            // Frame: [frameId(4)][presentUs(8)][readbackUs(8)][compressDoneUs(8)]
+            constexpr size_t TIMING_BYTES = 48;
             if (result.valid) {
                 uint32_t csz = result.compSize;
-                if (sendBuf.size() < 16 + csz + bdaBytes)
-                    sendBuf.resize(16 + csz + bdaBytes);
+                if (sendBuf.size() < 16 + csz + bdaBytes + TIMING_BYTES)
+                    sendBuf.resize(16 + csz + bdaBytes + TIMING_BYTES);
                 memcpy(sendBuf.data(),      &imageIndex,    4);
                 memcpy(sendBuf.data() + 4,  &result.w,      4);
                 memcpy(sendBuf.data() + 8,  &result.h,      4);
@@ -520,8 +549,8 @@ int main(int argc, char* argv[]) {
                             result.w, result.h, result.rawSize, csz,
                             (float)result.rawSize / csz);
             } else {
-                if (sendBuf.size() < 16 + bdaBytes)
-                    sendBuf.resize(16 + bdaBytes);
+                if (sendBuf.size() < 16 + bdaBytes + TIMING_BYTES)
+                    sendBuf.resize(16 + bdaBytes + TIMING_BYTES);
                 memset(sendBuf.data(), 0, 16);
                 memcpy(sendBuf.data(), &imageIndex, 4);
                 payloadSize = 16;
@@ -537,6 +566,30 @@ int main(int argc, char* argv[]) {
                        &decoder.pendingBdaResults_[i].address, 8);
             }
             payloadSize += 4 + bdaCount * 16;
+
+#if VBOXGPU_TIMING
+            // Append timing suffix: batch(20) + frame(28) = 48 bytes
+            uint64_t hostSendUs = rtNowUs();
+            if (sendBuf.size() < payloadSize + TIMING_BYTES)
+                sendBuf.resize(payloadSize + TIMING_BYTES);
+            // Batch timing: [seqId(4)][recvUs(8)][sendUs(8)]
+            size_t tp = payloadSize;
+            memcpy(sendBuf.data() + tp,      &decoder.currentSeqId_, 4);
+            memcpy(sendBuf.data() + tp + 4,  &decoder.batchRecvUs_,  8);
+            memcpy(sendBuf.data() + tp + 12, &hostSendUs,            8);
+            // Frame timing: [frameId(4)][presentUs(8)][readbackUs(8)][compressDoneUs(8)]
+            uint32_t ftFrameId = result.valid ? result.frameId : 0;
+            uint64_t ftPresentUs = result.valid ? result.presentUs : 0;
+            uint64_t ftReadbackUs = result.valid ? result.readbackUs : 0;
+            uint64_t ftCompressUs = result.valid ? result.compressDoneUs : 0;
+            memcpy(sendBuf.data() + tp + 20, &ftFrameId,     4);
+            memcpy(sendBuf.data() + tp + 24, &ftPresentUs,   8);
+            memcpy(sendBuf.data() + tp + 32, &ftReadbackUs,  8);
+            memcpy(sendBuf.data() + tp + 40, &ftCompressUs,  8);
+            payloadSize += TIMING_BYTES;
+            RT_LOG(decoder.currentSeqId_, "T6", "send %zu bytes, host=%.2fms frame=%u",
+                   payloadSize, (hostSendUs - decoder.batchRecvUs_) / 1000.0, ftFrameId);
+#endif
 
             server.send(sendBuf.data(), payloadSize);
         }
