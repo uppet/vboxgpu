@@ -29,6 +29,7 @@ static LONG WINAPI icdDirtyPageVEH(PEXCEPTION_POINTERS ep) {
 
     uintptr_t faultAddr = ep->ExceptionRecord->ExceptionInformation[1];
     for (auto& [id, shadow] : g_icd_for_veh->memoryShadows) {
+        if (shadow.freed || !shadow.ptr) continue;
         uintptr_t base = (uintptr_t)shadow.ptr;
         if (faultAddr >= base && faultAddr < base + shadow.size) {
             uint32_t pageIdx = (uint32_t)((faultAddr - base) / 4096);
@@ -179,6 +180,7 @@ static VkResult VKAPI_CALL icd_vkGetImageViewAddressNVX(VkDevice, VkImageView, v
 
 bool IcdState::connectToHost(const char* host, uint16_t port) {
     if (!transport.connect(host, port)) return false;
+    memoryShadows.reserve(256);
     connected = true;
     startRecvThread();
     return true;
@@ -227,6 +229,16 @@ void IcdState::flushBufferRange(uint64_t bufferId, VkDeviceSize offset, VkDevice
 void IcdState::flushMappedMemory() {
     std::lock_guard<std::mutex> lock(mappedMutex);
 #if VBOXGPU_PERF_DIRTY_TRACK
+    // Clean up freed shadow entries (lazy deletion from icd_vkFreeMemory)
+    for (auto it = memoryShadows.begin(); it != memoryShadows.end(); ) {
+        if (it->second.freed) {
+            if (it->second.ptr) VirtualFree(it->second.ptr, 0, MEM_RELEASE);
+            free(it->second.dirtyPages);
+            it = memoryShadows.erase(it);
+        } else {
+            ++it;
+        }
+    }
     // Page-level dirty tracking: only send pages that were written since last flush.
     // 1. Unprotect all shadows so we can read them safely
     unprotectAllShadows();
@@ -1870,9 +1882,7 @@ static void VKAPI_CALL icd_vkFreeMemory(VkDevice, VkDeviceMemory mem, const VkAl
     uint64_t id = (uint64_t)mem;
     auto it = g_icd.memoryShadows.find(id);
     if (it != g_icd.memoryShadows.end()) {
-        if (it->second.ptr) VirtualFree(it->second.ptr, 0, MEM_RELEASE);
-        free(it->second.dirtyPages);
-        g_icd.memoryShadows.erase(it);
+        it->second.freed = true;
     }
     // Also remove any mapped regions referencing this memory
     std::lock_guard<std::mutex> lock(g_icd.mappedMutex);

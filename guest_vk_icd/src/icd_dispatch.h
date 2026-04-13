@@ -92,6 +92,7 @@ struct IcdState {
         VkDeviceSize size;
         uint32_t* dirtyPages;  // bitmap: 1 bit per 4KB page
         uint32_t pageCount;    // number of 4KB pages
+        bool freed = false;    // set by FreeMemory, cleaned up by flushMappedMemory
     };
     std::unordered_map<uint64_t, MemoryShadow> memoryShadows;
 
@@ -139,19 +140,22 @@ struct IcdState {
 
     // Ordered queue of send types — recv thread pops to know how to dispatch response.
     // true = present batch (signal acquireCV_), false = BDA query (signal bdaCV_).
-    std::queue<bool> pendingResponseQueue_; // guarded by pendingQueueMutex_
+    // Guarded by pendingQueueMutex_ (recv thread pops under this lock;
+    // sendBatch pushes under encoder.mutex_ which is strictly ordered with TCP send)
+    std::queue<bool> pendingResponseQueue_;
     std::mutex pendingQueueMutex_;
 
     // AcquireNextImageKHR waits here for the imageIndex from the last present's response.
     std::mutex acquireMutex_;
     std::condition_variable acquireCV_;
     bool imageIndexReady_ = false;
-    bool firstPresented_ = false; // true after first QueuePresent — first acquire returns 0
+    std::atomic<bool> firstPresented_{false};
 
     // syncGetBufferDeviceAddress waits here for BDA results (also guards bdaCache).
     std::mutex bdaMutex_;
     std::condition_variable bdaCV_;
 
+    ~IcdState() { stopRecvThread(); }
     void startRecvThread();
     void stopRecvThread();
     void recvLoop();

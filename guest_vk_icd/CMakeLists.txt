@@ -8,6 +8,7 @@ target_link_libraries(vbox_vk_icd PRIVATE ws2_32 lz4)
 target_compile_definitions(vbox_vk_icd PRIVATE
     WIN32_LEAN_AND_MEAN
     NOMINMAX
+    _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR
 )
 target_include_directories(vbox_vk_icd PRIVATE
     ${Vulkan_INCLUDE_DIRS}
