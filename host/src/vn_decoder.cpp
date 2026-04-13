@@ -77,9 +77,12 @@ bool VnDecoder::execute(const uint8_t* data, size_t size) {
     }
     // All QueueSubmits in this batch have been executed.
     // Now flush deferred Presents so the GPU work is done before presenting.
+    RT_LOG(currentSeqId_, "T4", "decode done, flushing presents");
     flushPendingPresents();
     // Flush deferred destroys AFTER GPU is idle (presents do WaitIdle).
     flushPendingDestroys();
+    RT_LOG(currentSeqId_, "T5", "execute done, total=%.2fms",
+           (rtNowUs() - batchRecvUs_) / 1000.0);
     return !error_;
 }
 
@@ -187,6 +190,12 @@ void VnDecoder::dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdS
     case VN_CMD_BRIDGE_AcquireNextImage:  handleBridgeAcquireNextImage(reader); break;
     case VN_CMD_BRIDGE_QueuePresent:      handleBridgeQueuePresent(reader); break;
     case VN_CMD_BRIDGE_GetBufferDeviceAddress: handleGetBufferDeviceAddress(reader); break;
+    case VN_CMD_BRIDGE_TimingSeq: {
+        currentSeqId_ = reader.readU32();
+        uint64_t guestTs = reader.readU64(); (void)guestTs;
+        RT_LOG(currentSeqId_, "T3", "timing marker received");
+        break;
+    }
     default:
         fprintf(stderr, "[Decoder] Unknown command type %u, skipping\n", cmdType);
         // Don't set error — just skip (cmdSize-based framing will advance past it)
@@ -2291,6 +2300,14 @@ void VnDecoder::flushPendingPresents() {
 
         VkResult vr = vkQueuePresentKHR(graphicsQueue_, &info);
 
+#if VBOXGPU_TIMING
+        // Tag this readback slot with frame ID and present timestamp
+        frameCounter_++;
+        slotTiming_[curSlot].frameId = frameCounter_;
+        slotTiming_[curSlot].presentUs = rtNowUs();
+        RT_LOG(currentSeqId_, "P", "frame=%u present done", frameCounter_);
+#endif
+
 #ifdef VBOXGPU_VERBOSE
         fprintf(stderr, "[Decoder] Present FLUSH: sc=%p imgIdx=%u result=%d\n",
                 (void*)it->second.swapchain, presentIdx, (int)vr);
@@ -2317,6 +2334,13 @@ void VnDecoder::flushPendingPresents() {
             vkWaitForFences(device_, 1, &readbackFences_[prevSlot], VK_TRUE, UINT64_MAX);
             readbackSubmitted_[prevSlot] = false;
             rbReady_ = prevSlot;
+#if VBOXGPU_TIMING
+            slotTiming_[prevSlot].readbackUs = rtNowUs();
+            readyFrameTiming_ = slotTiming_[prevSlot];
+            RT_LOG(currentSeqId_, "R", "frame=%u readback ready, age=%.2fms",
+                   readyFrameTiming_.frameId,
+                   (readyFrameTiming_.readbackUs - readyFrameTiming_.presentUs) / 1000.0);
+#endif
         }
 
         // Flip write slot for next frame

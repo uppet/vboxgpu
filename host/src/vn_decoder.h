@@ -10,6 +10,7 @@
 #include "vk_bootstrap.h"
 #include "../../common/venus/vn_command.h"
 #include "../../common/venus/vn_stream.h"
+#include "../../common/timing.h"
 
 #include <unordered_map>
 #include <vector>
@@ -244,4 +245,20 @@ public:
     // BDA query results: accumulated during execute(), consumed by server
     struct BdaResult { uint64_t bufferId; uint64_t address; };
     std::vector<BdaResult> pendingBdaResults_;
+
+    // Roundtrip timing: seqId from the most recent TimingSeq command in this batch
+    uint32_t currentSeqId_ = 0;
+    uint64_t batchRecvUs_ = 0;  // set by server before execute()
+
+    // Frame-level timing: tracks each present through the pipeline
+    uint32_t frameCounter_ = 0; // monotonic, incremented per present
+    struct FrameTiming {
+        uint32_t frameId = 0;
+        uint64_t presentUs = 0;   // when vkQueuePresentKHR was called
+        uint64_t readbackUs = 0;  // when readback fence was waited (data CPU-accessible)
+    };
+    // Per-slot timing (matches readback_[2] double buffer)
+    FrameTiming slotTiming_[2];
+    // The timing for the frame whose pixels are currently in rbReady_
+    FrameTiming readyFrameTiming_;
 };
