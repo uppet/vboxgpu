@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <mutex>
 #include <condition_variable>
@@ -115,6 +116,11 @@ struct IcdState {
 
     // BDA forwarding: cache of host-side buffer device addresses (protected by bdaMutex_)
     std::unordered_map<uint64_t, uint64_t> bdaCache;
+
+    // BDA optimization: flush at BindBufferMemory + Host auto-BDA
+    // Tracks buffers with SHADER_DEVICE_ADDRESS_BIT usage — BindBufferMemory
+    // will flush immediately so Host can auto-generate BDA in the response.
+    std::unordered_set<uint64_t> bdaNeedBuffers_;  // buffers needing BDA
 
     // GDI blit rate limiter: blit is driven by recv thread (actual rendered frames).
     // Cap at 60 FPS to avoid GDI saturation when game runs very fast.

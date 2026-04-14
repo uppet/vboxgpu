@@ -767,6 +767,7 @@ void VnDecoder::handleCreateBuffer(VnStreamReader& r) {
             (unsigned long long)a.pBuffer, (unsigned long long)a.pCreateInfo_size, usage, (int)vr);
     if (vr != VK_SUCCESS) return;
     store(buffers_, a.pBuffer, buffer);
+    bufferUsageFlags_[a.pBuffer] = usage;
 }
 
 void VnDecoder::handleBindBufferMemory(VnStreamReader& r) {
@@ -788,6 +789,19 @@ void VnDecoder::handleBindBufferMemory(VnStreamReader& r) {
                 (unsigned long long)bufferId, (unsigned long long)memoryId,
                 (unsigned long long)offset, (int)vr);
         bindLog++;
+    }
+
+    // Auto-BDA: if buffer has SHADER_DEVICE_ADDRESS_BIT, proactively query and return
+    if (vr == VK_SUCCESS) {
+        auto uit = bufferUsageFlags_.find(bufferId);
+        if (uit != bufferUsageFlags_.end() &&
+            (uit->second & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT)) {
+            VkBufferDeviceAddressInfo bdaInfo{};
+            bdaInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+            bdaInfo.buffer = buf;
+            VkDeviceAddress addr = vkGetBufferDeviceAddress(device_, &bdaInfo);
+            pendingBdaResults_.push_back({bufferId, addr});
+        }
     }
 }
 
