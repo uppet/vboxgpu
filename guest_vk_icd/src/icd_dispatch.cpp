@@ -459,21 +459,16 @@ void IcdState::recvLoop() {
 }
 
 uint64_t IcdState::syncGetBufferDeviceAddress(uint64_t bufferId) {
-    // Check cache first (under bdaMutex_ since recv thread also writes bdaCache)
+    // Fast path: cache hit (auto-BDA from BindBufferMemory response)
     {
         std::lock_guard<std::mutex> lock(bdaMutex_);
         auto it = bdaCache.find(bufferId);
         if (it != bdaCache.end()) return it->second;
     }
 
-    // Encode BDA query + send under encoder.mutex_ for atomicity
-    {
-        ENC_LOCK;
-        encoder.cmdGetBufferDeviceAddressUnlocked(1, bufferId);
-        sendBatchLocked(false); // false = BDA query, recv thread signals bdaCV_
-    }
-
-    // Wait for recv thread to populate bdaCache with this buffer's address
+    // Cache miss — BindBufferMemory already flushed this buffer to Host.
+    // Host auto-BDA generates the address in the response.
+    // Just wait for the recv thread to deliver it.
     uint64_t result = 0;
     {
         std::unique_lock<std::mutex> lock(bdaMutex_);
@@ -482,8 +477,6 @@ uint64_t IcdState::syncGetBufferDeviceAddress(uint64_t bufferId) {
         auto it = bdaCache.find(bufferId);
         if (it != bdaCache.end()) result = it->second;
     }
-    icdDbg(("[ICD] syncGetBDA: buf=" + std::to_string(bufferId)
-            + " addr=0x" + std::to_string(result)).c_str());
     return result;
 }
 
@@ -2015,8 +2008,15 @@ static VkResult VKAPI_CALL icd_vkUnmapMemory2(VkDevice dev, const void* pMemoryU
 }
 
 static VkResult VKAPI_CALL icd_vkBindBufferMemory(VkDevice, VkBuffer buf, VkDeviceMemory mem, VkDeviceSize offset) {
-    g_icd.bufferBindings[(uint64_t)buf] = {(uint64_t)mem, offset};
-    g_icd.encoder.cmdBindBufferMemory(1, (uint64_t)buf, (uint64_t)mem, offset);
+    uint64_t bufId = (uint64_t)buf;
+    g_icd.bufferBindings[bufId] = {(uint64_t)mem, offset};
+    g_icd.encoder.cmdBindBufferMemory(1, bufId, (uint64_t)mem, offset);
+    // If buffer needs BDA, flush now so Host auto-generates BDA in the response.
+    // GetBDA (called next by DXVK) will just wait for the cache to be populated.
+    if (g_icd.bdaNeedBuffers_.count(bufId)) {
+        g_icd.sendBatch(false);
+        g_icd.bdaNeedBuffers_.erase(bufId);
+    }
     return VK_SUCCESS;
 }
 static VkResult VKAPI_CALL icd_vkBindImageMemory(VkDevice, VkImage img, VkDeviceMemory mem, VkDeviceSize offset) {
@@ -2052,11 +2052,16 @@ static VkResult VKAPI_CALL icd_vkCreateBuffer(VkDevice, const VkBufferCreateInfo
     *p = (VkBuffer)id;
     g_icd.bufferSizes[id] = pInfo->size;
     g_icd.encoder.cmdCreateBuffer(1, id, pInfo);
+    // Track buffers that need BDA — BindBufferMemory will flush immediately
+    if (pInfo->usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT)
+        g_icd.bdaNeedBuffers_.insert(id);
     return VK_SUCCESS;
 }
 static void VKAPI_CALL icd_vkDestroyBuffer(VkDevice, VkBuffer v, const VkAllocationCallbacks*) {
-    g_icd.bdaCache.erase((uint64_t)v);
-    g_icd.encoder.cmdDestroyBuffer(1, (uint64_t)v);
+    uint64_t id = (uint64_t)v;
+    g_icd.bdaCache.erase(id);
+    g_icd.bdaNeedBuffers_.erase(id);
+    g_icd.encoder.cmdDestroyBuffer(1, id);
 }
 static VkResult VKAPI_CALL icd_vkCreateImage(VkDevice, const VkImageCreateInfo* pInfo, const VkAllocationCallbacks*, VkImage* p) {
     uint64_t id = g_icd.handles.alloc();

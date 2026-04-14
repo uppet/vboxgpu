@@ -246,6 +246,9 @@ public:
     struct BdaResult { uint64_t bufferId; uint64_t address; };
     std::vector<BdaResult> pendingBdaResults_;
 
+    // Buffer usage tracking for auto-BDA on BindBufferMemory
+    std::unordered_map<uint64_t, uint32_t> bufferUsageFlags_;
+
     // Roundtrip timing: seqId from the most recent TimingSeq command in this batch
     uint32_t currentSeqId_ = 0;
     uint64_t batchRecvUs_ = 0;  // set by server before execute()
