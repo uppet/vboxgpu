@@ -175,6 +175,20 @@ def disasm_payload(cmd, data, off, size, spirv_dis=False, spirv_dir=None):
         elif cmd == 0x10000:  # BRIDGE_CreateSwapchain
             dev = rd64(); sid = rd64(); w = rd32(); h = rd32(); ic = rd32()
             return f"dev={dev} id={sid} {w}x{h} imageCount={ic}"
+        elif cmd == 0x10003:  # BRIDGE_WriteMemory
+            mem = rd64(); off = rd64(); sz = rd32()
+            return f"mem={mem} off={off} size={sz}"
+        elif cmd == 0x1011:  # CmdCopyBufferToImage
+            cb = rd64(); src = rd64(); dst = rd64(); layout = rd32(); rc = rd32()
+            regions = []
+            for i in range(rc):
+                bo = rd32()
+                rd32(); rd32()  # bufferRowLength, bufferImageHeight
+                rd32(); rd32(); rd32(); rd32()  # imageSubresource
+                rd32(); rd32(); rd32()  # imageOffset
+                w = rd32(); h = rd32(); d = rd32()  # imageExtent
+                regions.append(f"bufOff={bo} {w}x{h}")
+            return f"cb=0x{cb:x} srcBuf={src} dstImg={dst} regions=[{', '.join(regions)}]"
         elif cmd == 0x10002:  # BRIDGE_QueuePresent
             q = rd64(); sc = rd64(); ws = rd64()
             return f"queue={q} swapchain={sc} waitSem={ws}"

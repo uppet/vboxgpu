@@ -46,6 +46,7 @@ void VnDecoder::recycleFence(VkFence f) {
 bool VnDecoder::execute(const uint8_t* data, size_t size) {
     pendingPresents_.clear();
     pendingBdaResults_.clear();
+    copyStagingUsed_ = 0;  // reset staging arena for this batch
     VnStreamReader reader(data, size);
     while (reader.hasMore() && !error_) {
         // Record position before reading header
@@ -146,6 +147,7 @@ void VnDecoder::dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdS
     case VN_CMD_vkCmdCopyImage:           handleCmdCopyImage(reader); break;
     case VN_CMD_vkCmdBlitImage:           handleCmdBlitImage(reader); break;
     case VN_CMD_vkCmdCopyBufferToImage:   handleCmdCopyBufferToImage(reader); break;
+    case VN_CMD_BRIDGE_CopyBufToImgInline: handleCopyBufToImgInline(reader); break;
     case VN_CMD_vkCmdUpdateBuffer:        handleCmdUpdateBuffer(reader); break;
     case VN_CMD_vkCmdDraw:                handleCmdDraw(reader); break;
     case VN_CMD_vkCmdPushConstants:      handleCmdPushConstants(reader); break;
@@ -419,7 +421,6 @@ void VnDecoder::handleAllocateMemory(VnStreamReader& r) {
 
     uint32_t hostType = VnDecoder_mapMemoryType(physDevice_, a.pAllocateInfo_memoryTypeIndex);
 
-    // Enable buffer device address for all allocations — DXVK shaders use BDA
     VkMemoryAllocateFlagsInfo allocFlags{};
     allocFlags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
     allocFlags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
@@ -432,10 +433,11 @@ void VnDecoder::handleAllocateMemory(VnStreamReader& r) {
 
     VkDeviceMemory mem;
     VkResult vr = vkAllocateMemory(device_, &ai, nullptr, &mem);
-    fprintf(stderr, "[Decoder] AllocMemory: id=%llu size=%llu icdType=%u→hostType=%u result=%d\n",
-            (unsigned long long)a.pMemory, (unsigned long long)a.pAllocateInfo_allocationSize,
-            a.pAllocateInfo_memoryTypeIndex, hostType, (int)vr);
-    if (vr != VK_SUCCESS) return;
+    if (vr != VK_SUCCESS) {
+        fprintf(stderr, "[Decoder] AllocMemory FAILED: id=%llu size=%llu\n",
+                (unsigned long long)a.pMemory, (unsigned long long)a.pAllocateInfo_allocationSize);
+        return;
+    }
     store(deviceMemories_, a.pMemory, mem);
 }
 
@@ -749,13 +751,16 @@ void VnDecoder::handleCreateBuffer(VnStreamReader& r) {
     VnDecode_vkCreateBuffer a;
     vn_decode_vkCreateBuffer(&r, &a);
 
-    // Keep all usage flags including SHADER_DEVICE_ADDRESS — DXVK shaders use BDA
     uint32_t usage = a.pCreateInfo_usage;
+    VkDeviceSize size = a.pCreateInfo_size;
+    uint64_t guestId = a.pBuffer;
+
+    bufferUsageFlags_[guestId] = usage;
 
     VkBufferCreateInfo ci{};
     ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     ci.flags = a.pCreateInfo_flags;
-    ci.size = a.pCreateInfo_size;
+    ci.size = size;
     ci.usage = usage;
     ci.sharingMode = static_cast<VkSharingMode>(a.pCreateInfo_sharingMode);
     ci.queueFamilyIndexCount = a.pCreateInfo_queueFamilyIndexCount;
@@ -763,11 +768,12 @@ void VnDecoder::handleCreateBuffer(VnStreamReader& r) {
 
     VkBuffer buffer;
     VkResult vr = vkCreateBuffer(device_, &ci, nullptr, &buffer);
-    fprintf(stderr, "[Decoder] CreateBuffer: id=%llu size=%llu usage=0x%x result=%d\n",
-            (unsigned long long)a.pBuffer, (unsigned long long)a.pCreateInfo_size, usage, (int)vr);
-    if (vr != VK_SUCCESS) return;
-    store(buffers_, a.pBuffer, buffer);
-    bufferUsageFlags_[a.pBuffer] = usage;
+    if (vr != VK_SUCCESS) {
+        fprintf(stderr, "[Decoder] CreateBuffer FAILED: id=%llu size=%llu usage=0x%x\n",
+                (unsigned long long)guestId, (unsigned long long)size, usage);
+        return;
+    }
+    store(buffers_, guestId, buffer);
 }
 
 void VnDecoder::handleBindBufferMemory(VnStreamReader& r) {
@@ -775,21 +781,14 @@ void VnDecoder::handleBindBufferMemory(VnStreamReader& r) {
     uint64_t bufferId = r.readU64();
     uint64_t memoryId = r.readU64();
     uint64_t offset = r.readU64();
+    (void)deviceId;
 
     VkBuffer buf = lookup(buffers_, bufferId);
     VkDeviceMemory mem = lookup(deviceMemories_, memoryId);
     if (!buf || !mem) return;
-    // Check memory requirements
-    VkMemoryRequirements reqs;
-    vkGetBufferMemoryRequirements(device_, buf, &reqs);
+
     VkResult vr = vkBindBufferMemory(device_, buf, mem, offset);
-    static int bindLog = 0;
-    if (bindLog < 10) {
-        fprintf(stderr, "[Decoder] BindBufferMemory: buf=%llu mem=%llu off=%llu result=%d\n",
-                (unsigned long long)bufferId, (unsigned long long)memoryId,
-                (unsigned long long)offset, (int)vr);
-        bindLog++;
-    }
+    bufferBindings_[bufferId] = {memoryId, offset};
 
     // Auto-BDA: if buffer has SHADER_DEVICE_ADDRESS_BIT, proactively query and return
     if (vr == VK_SUCCESS) {
@@ -1829,6 +1828,10 @@ void VnDecoder::handleCmdCopyBuffer(VnStreamReader& r) {
                     (unsigned long long)dstId, (void*)dst);
         return;
     }
+
+    // Staging snapshot: same as CopyBufferToImage — protect source data from
+    // later WriteMemory overwriting it before GPU executes the copy.
+    // Staging snapshot disabled for debugging — use original buffer
     vkCmdCopyBuffer(cb, src, dst, regionCount, regions.data());
 }
 
@@ -1922,6 +1925,80 @@ void VnDecoder::handleCmdBlitImage(VnStreamReader& r) {
                    regionCount, regions.data(), static_cast<VkFilter>(filter));
 }
 
+bool VnDecoder::ensureCopyStagingBuf(VkDeviceSize needed) {
+    // Arena: check if current buffer has room from copyStagingUsed_
+    VkDeviceSize totalNeeded = copyStagingUsed_ + needed;
+    if (copyStagingBuf_.capacity >= totalNeeded && copyStagingBuf_.buffer)
+        return true;
+    // Need larger buffer — defer destruction of old buffer until GPU is done
+    // (command buffers already recorded may reference the old VkBuffer handle).
+    copyStagingUsed_ = 0;
+    totalNeeded = needed;
+    if (copyStagingBuf_.buffer) {
+        fprintf(stderr, "[Decoder] StagingBuf REALLOC: oldCap=%llu needed=%llu arenaUsed=%llu\n",
+                (unsigned long long)copyStagingBuf_.capacity,
+                (unsigned long long)needed,
+                (unsigned long long)copyStagingUsed_);
+        // Move old resources to pendingDestroys_ — freed after GPU idle at batch end
+        auto oldBuf = copyStagingBuf_.buffer;
+        auto oldMem = copyStagingBuf_.memory;
+        auto oldMap = copyStagingBuf_.mapped;
+        auto dev = device_;
+        pendingDestroys_.push_back([dev, oldBuf, oldMem, oldMap]() {
+            if (oldMap) vkUnmapMemory(dev, oldMem);
+            vkDestroyBuffer(dev, oldBuf, nullptr);
+            vkFreeMemory(dev, oldMem, nullptr);
+        });
+    }
+    copyStagingBuf_ = {};
+
+    // Round up to 256KB granularity, at least 2x totalNeeded for arena headroom
+    VkDeviceSize cap = totalNeeded * 2;
+    cap = (cap + 0x3FFFF) & ~(VkDeviceSize)0x3FFFF;
+
+    VkBufferCreateInfo bufInfo{};
+    bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufInfo.size = cap;
+    bufInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(device_, &bufInfo, nullptr, &copyStagingBuf_.buffer) != VK_SUCCESS) return false;
+
+    VkMemoryRequirements memReq;
+    vkGetBufferMemoryRequirements(device_, copyStagingBuf_.buffer, &memReq);
+
+    VkPhysicalDeviceMemoryProperties memProps;
+    vkGetPhysicalDeviceMemoryProperties(physDevice_, &memProps);
+    uint32_t memType = UINT32_MAX;
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
+        if ((memReq.memoryTypeBits & (1u << i)) &&
+            (memProps.memoryTypes[i].propertyFlags &
+             (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
+             (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+            memType = i;
+            break;
+        }
+    }
+    if (memType == UINT32_MAX) {
+        vkDestroyBuffer(device_, copyStagingBuf_.buffer, nullptr);
+        copyStagingBuf_.buffer = VK_NULL_HANDLE;
+        return false;
+    }
+
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memReq.size;
+    allocInfo.memoryTypeIndex = memType;
+    if (vkAllocateMemory(device_, &allocInfo, nullptr, &copyStagingBuf_.memory) != VK_SUCCESS) {
+        vkDestroyBuffer(device_, copyStagingBuf_.buffer, nullptr);
+        copyStagingBuf_.buffer = VK_NULL_HANDLE;
+        return false;
+    }
+    vkBindBufferMemory(device_, copyStagingBuf_.buffer, copyStagingBuf_.memory, 0);
+    vkMapMemory(device_, copyStagingBuf_.memory, 0, cap, 0, &copyStagingBuf_.mapped);
+    copyStagingBuf_.capacity = cap;
+    return true;
+}
+
 void VnDecoder::handleCmdCopyBufferToImage(VnStreamReader& r) {
     uint64_t cbId = r.readU64();
     uint64_t srcBufId = r.readU64(), dstImgId = r.readU64();
@@ -1962,7 +2039,103 @@ void VnDecoder::handleCmdCopyBufferToImage(VnStreamReader& r) {
                 (unsigned long long)dstImgId, (void*)dstImg);
         return;
     }
+
+    // TODO: staging snapshot for copy-source protection (currently causes black screen,
+    // needs investigation — see dirty_tracking_race_analysis.md "方向 C")
+#if 0  // DISABLED — causes all-black frames, root cause TBD
+    auto bit_disabled = bufferBindings_.find(srcBufId);
+    VkDeviceMemory srcMem = (bit != bufferBindings_.end())
+        ? lookup(deviceMemories_, bit->second.memoryId) : VK_NULL_HANDLE;
+    VkDeviceSize srcMemOffset = (bit != bufferBindings_.end()) ? bit->second.memoryOffset : 0;
+
+    if (srcMem) {
+        // Calculate total byte range needed (min offset → max end)
+        VkDeviceSize minOff = UINT64_MAX, maxEnd = 0;
+        for (uint32_t i = 0; i < regionCount; i++) {
+            VkDeviceSize regSize = (VkDeviceSize)regions[i].imageExtent.width *
+                                   regions[i].imageExtent.height *
+                                   regions[i].imageExtent.depth * 4; // assume 4 bpp
+            VkDeviceSize off = regions[i].bufferOffset;
+            if (off < minOff) minOff = off;
+            if (off + regSize > maxEnd) maxEnd = off + regSize;
+        }
+        VkDeviceSize spanSize = maxEnd - minOff;
+
+        if (spanSize > 0 && ensureCopyStagingBuf(spanSize)) {
+            VkDeviceSize arenaOff = copyStagingUsed_;
+            // Map source memory, snapshot the region into arena
+            void* srcMapped = nullptr;
+            if (vkMapMemory(device_, srcMem, srcMemOffset + minOff, spanSize, 0, &srcMapped) == VK_SUCCESS) {
+                memcpy((uint8_t*)copyStagingBuf_.mapped + arenaOff, srcMapped, (size_t)spanSize);
+                vkUnmapMemory(device_, srcMem);
+                // Advance arena (align to 256 for buffer offset alignment)
+                copyStagingUsed_ = (arenaOff + spanSize + 255) & ~(VkDeviceSize)255;
+
+                // Adjust region offsets: base at arenaOff in staging buffer
+                std::vector<VkBufferImageCopy> adjRegions = regions;
+                for (uint32_t i = 0; i < regionCount; i++)
+                    adjRegions[i].bufferOffset = (VkDeviceSize)(adjRegions[i].bufferOffset - minOff + arenaOff);
+
+                vkCmdCopyBufferToImage(cb, copyStagingBuf_.buffer, dstImg,
+                                       static_cast<VkImageLayout>(dstLayout),
+                                       regionCount, adjRegions.data());
+                return;
+            }
+        }
+    }
+
+#endif
+    // Fallback: no binding info or staging alloc failed — use original buffer
     vkCmdCopyBufferToImage(cb, srcBuf, dstImg, static_cast<VkImageLayout>(dstLayout),
+                           regionCount, regions.data());
+}
+
+void VnDecoder::handleCopyBufToImgInline(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint64_t dstImgId = r.readU64();
+    uint32_t dstLayout = r.readU32();
+    uint32_t regionCount = r.readU32();
+    std::vector<VkBufferImageCopy> regions(regionCount);
+    for (uint32_t i = 0; i < regionCount; i++) {
+        regions[i].bufferOffset = r.readU32();
+        regions[i].bufferRowLength = r.readU32();
+        regions[i].bufferImageHeight = r.readU32();
+        regions[i].imageSubresource.aspectMask = r.readU32();
+        regions[i].imageSubresource.mipLevel = r.readU32();
+        regions[i].imageSubresource.baseArrayLayer = r.readU32();
+        regions[i].imageSubresource.layerCount = r.readU32();
+        regions[i].imageOffset.x = r.readI32();
+        regions[i].imageOffset.y = r.readI32();
+        regions[i].imageOffset.z = r.readI32();
+        regions[i].imageExtent.width = r.readU32();
+        regions[i].imageExtent.height = r.readU32();
+        regions[i].imageExtent.depth = r.readU32();
+    }
+    uint32_t dataSize = r.readU32();
+
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    VkImage dstImg = lookup(images_, dstImgId);
+    if (!cb || !dstImg || dataSize == 0) {
+        r.skip(dataSize);
+        return;
+    }
+
+    // Write inline pixel data to staging arena, then CopyBufferToImage from staging.
+    // Data is embedded in the command stream — immune to WriteMemory overwrites.
+    if (!ensureCopyStagingBuf(dataSize)) {
+        r.skip(dataSize);
+        return;
+    }
+    VkDeviceSize arenaOff = copyStagingUsed_;
+    r.readBytes((uint8_t*)copyStagingBuf_.mapped + arenaOff, dataSize);
+    copyStagingUsed_ = (arenaOff + dataSize + 255) & ~(VkDeviceSize)255;
+
+    // Adjust region bufferOffsets to point into staging arena
+    for (uint32_t i = 0; i < regionCount; i++)
+        regions[i].bufferOffset += arenaOff;
+
+    vkCmdCopyBufferToImage(cb, copyStagingBuf_.buffer, dstImg,
+                           static_cast<VkImageLayout>(dstLayout),
                            regionCount, regions.data());
 }
 
@@ -2394,6 +2567,12 @@ void VnDecoder::cleanup() {
         rb = {};
         if (readbackFences_[s]) vkDestroyFence(device_, readbackFences_[s], nullptr);
     }
+    // Cleanup copy staging buffer
+    if (copyStagingBuf_.mapped) { vkUnmapMemory(device_, copyStagingBuf_.memory); copyStagingBuf_.mapped = nullptr; }
+    if (copyStagingBuf_.buffer) vkDestroyBuffer(device_, copyStagingBuf_.buffer, nullptr);
+    if (copyStagingBuf_.memory) vkFreeMemory(device_, copyStagingBuf_.memory, nullptr);
+    copyStagingBuf_ = {};
+
     if (acquireSemaphore_) vkDestroySemaphore(device_, acquireSemaphore_, nullptr);
     if (acquireFence_) vkDestroyFence(device_, acquireFence_, nullptr);
     for (auto& [id, p] : pipelines_) vkDestroyPipeline(device_, p, nullptr);
