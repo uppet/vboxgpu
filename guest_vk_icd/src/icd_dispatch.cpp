@@ -7,6 +7,7 @@
 #endif
 
 #include "icd_dispatch.h"
+#include "../../common/vboxgpu_config.h"
 #include <lz4.h>
 #include <cstring>
 #include <cstdio>
@@ -15,54 +16,9 @@
 #include <cstddef>
 #include <stdexcept>
 
-#if VBOXGPU_PERF_DIRTY_TRACK
-// VEH handler for dirty page tracking.
-// When shadow pages are PAGE_READONLY, any write triggers this handler.
-// It marks the page dirty and restores PAGE_READWRITE for that page.
-static IcdState* g_icd_for_veh = nullptr;
-
-static LONG WINAPI icdDirtyPageVEH(PEXCEPTION_POINTERS ep) {
-    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
-        return EXCEPTION_CONTINUE_SEARCH;
-    if (ep->ExceptionRecord->NumberParameters < 2) return EXCEPTION_CONTINUE_SEARCH;
-    if (ep->ExceptionRecord->ExceptionInformation[0] != 1) return EXCEPTION_CONTINUE_SEARCH;
-
-    uintptr_t faultAddr = ep->ExceptionRecord->ExceptionInformation[1];
-    for (auto& [id, shadow] : g_icd_for_veh->memoryShadows) {
-        if (shadow.freed || !shadow.ptr) continue;
-        uintptr_t base = (uintptr_t)shadow.ptr;
-        if (faultAddr >= base && faultAddr < base + shadow.size) {
-            uint32_t pageIdx = (uint32_t)((faultAddr - base) / 4096);
-            uint32_t word = pageIdx / 32;
-            uint32_t bit = pageIdx % 32;
-            if (word < (shadow.pageCount + 31) / 32)
-                shadow.dirtyPages[word] |= (1u << bit);
-            DWORD oldProt;
-            VirtualProtect((void*)(base + (uintptr_t)pageIdx * 4096), 4096, PAGE_READWRITE, &oldProt);
-            return EXCEPTION_CONTINUE_EXECUTION;
-        }
-    }
-    return EXCEPTION_CONTINUE_SEARCH;
-}
-#endif
-
-void IcdState::protectAllShadows() {
-    for (auto& [id, shadow] : memoryShadows) {
-        if (!shadow.ptr || shadow.size == 0) continue;
-        DWORD oldProt;
-        VirtualProtect(shadow.ptr, (SIZE_T)shadow.size, PAGE_READONLY, &oldProt);
-        if (shadow.dirtyPages)
-            memset(shadow.dirtyPages, 0, ((shadow.pageCount + 31) / 32) * 4);
-    }
-}
-
-void IcdState::unprotectAllShadows() {
-    for (auto& [id, shadow] : memoryShadows) {
-        if (!shadow.ptr || shadow.size == 0) continue;
-        DWORD oldProt;
-        VirtualProtect(shadow.ptr, (SIZE_T)shadow.size, PAGE_READWRITE, &oldProt);
-    }
-}
+// MEM_WRITE_WATCH dirty tracking: no VEH handler needed.
+// The kernel tracks writes at page granularity; GetWriteWatch atomically
+// returns dirty pages and resets tracking — zero race window.
 
 IcdState g_icd;
 
@@ -233,55 +189,96 @@ void IcdState::flushMappedMemory() {
     for (auto it = memoryShadows.begin(); it != memoryShadows.end(); ) {
         if (it->second.freed) {
             if (it->second.ptr) VirtualFree(it->second.ptr, 0, MEM_RELEASE);
-            free(it->second.dirtyPages);
             it = memoryShadows.erase(it);
         } else {
             ++it;
         }
     }
-    // Page-level dirty tracking: only send pages that were written since last flush.
-    // 1. Unprotect all shadows so we can read them safely
-    unprotectAllShadows();
-    // 2. For each mapped region, scan dirty bitmap and send dirty pages
+
+    // Phase 1: GetWriteWatch per shadow — atomically get dirty pages + reset tracking.
+    // No race window: kernel does get+reset in one operation.
+    struct ShadowDirty {
+        std::vector<uintptr_t> offsets; // page-aligned byte offsets from shadow base
+    };
+    std::unordered_map<uint64_t, ShadowDirty> dirtyMap;
+
+    for (auto& [memId, shadow] : memoryShadows) {
+        if (!shadow.ptr || shadow.freed) continue;
+
+        // Large shadows: reset dirty bits to prevent stale accumulation,
+        // but do not send data (handled by explicit flushBufferRange).
+        if (shadow.size > VBOXGPU_DIRTY_TRACK_SIZE_LIMIT) {
+            ResetWriteWatch(shadow.ptr, (SIZE_T)shadow.size);
+            continue;
+        }
+
+        ULONG_PTR maxPages = (ULONG_PTR)((shadow.size + 4095) / 4096);
+        std::vector<void*> pages(maxPages);
+        ULONG_PTR count = maxPages;
+        ULONG granularity = 0;
+
+        UINT res = GetWriteWatch(WRITE_WATCH_FLAG_RESET,
+                                  shadow.ptr, (SIZE_T)shadow.size,
+                                  pages.data(), &count, &granularity);
+        if (res != 0 || count == 0) continue;
+
+        auto& info = dirtyMap[memId];
+        info.offsets.reserve(count);
+        uintptr_t base = (uintptr_t)shadow.ptr;
+        for (ULONG_PTR i = 0; i < count; i++)
+            info.offsets.push_back((uintptr_t)pages[i] - base);
+        // offsets are sorted ascending (guaranteed by GetWriteWatch)
+    }
+
+    // Phase 2: For each mapped region, find overlapping dirty pages → merge runs → send.
     for (auto& m : mappedRegions) {
-        if (m.size > 32 * 1024 * 1024) continue;
-        // Find the shadow for this memory
+        if (m.size > VBOXGPU_DIRTY_TRACK_SIZE_LIMIT) continue;
+        auto dit = dirtyMap.find(m.memoryId);
+        if (dit == dirtyMap.end()) continue;
         auto sit = memoryShadows.find(m.memoryId);
         if (sit == memoryShadows.end()) continue;
         auto& shadow = sit->second;
-        if (!shadow.dirtyPages) continue;
 
-        uint32_t firstPage = (uint32_t)(m.offset / 4096);
-        uint32_t lastPage = (uint32_t)((m.offset + m.size - 1) / 4096);
-        if (lastPage >= shadow.pageCount) lastPage = shadow.pageCount - 1;
+        VkDeviceSize regStart = m.offset;
+        VkDeviceSize regEnd = m.offset + m.size;
 
-        // Batch consecutive dirty pages into single WriteMemory calls
-        uint32_t runStart = UINT32_MAX;
-        for (uint32_t pg = firstPage; pg <= lastPage + 1; pg++) {
-            bool dirty = (pg <= lastPage) &&
-                (shadow.dirtyPages[pg / 32] & (1u << (pg % 32)));
-            if (dirty && runStart == UINT32_MAX) {
-                runStart = pg;
-            } else if (!dirty && runStart != UINT32_MAX) {
-                // Flush run [runStart, pg)
-                VkDeviceSize runOff = (VkDeviceSize)runStart * 4096;
-                VkDeviceSize runSize = (VkDeviceSize)(pg - runStart) * 4096;
-                // Clamp to mapped region bounds
-                if (runOff < m.offset) { runSize -= (m.offset - runOff); runOff = m.offset; }
-                VkDeviceSize runEnd = (VkDeviceSize)pg * 4096;
-                if (runEnd > m.offset + m.size) runSize = m.offset + m.size - runOff;
-                if (runSize > 0)
-                    encoder.cmdWriteMemory(m.memoryId, runOff, (uint32_t)runSize,
-                                           (const uint8_t*)m.ptr + (runOff - m.offset));
-                runStart = UINT32_MAX;
+        // Merge contiguous dirty pages into runs for efficient WriteMemory
+        VkDeviceSize runStart = VK_WHOLE_SIZE, runEnd = 0;
+
+        for (auto off : dit->second.offsets) {
+            VkDeviceSize pageStart = (VkDeviceSize)off;
+            VkDeviceSize pageEnd = pageStart + 4096;
+
+            // Skip pages outside this mapped region
+            if (pageEnd <= regStart || pageStart >= regEnd) continue;
+
+            // Clip to region bounds
+            VkDeviceSize clipStart = pageStart < regStart ? regStart : pageStart;
+            VkDeviceSize clipEnd = pageEnd > regEnd ? regEnd : pageEnd;
+
+            if (runStart == VK_WHOLE_SIZE) {
+                runStart = clipStart;
+                runEnd = clipEnd;
+            } else if (clipStart <= runEnd) {
+                // Extend current run
+                if (clipEnd > runEnd) runEnd = clipEnd;
+            } else {
+                // Emit previous run
+                encoder.cmdWriteMemory(m.memoryId, runStart, (uint32_t)(runEnd - runStart),
+                                       (const uint8_t*)shadow.ptr + runStart);
+                runStart = clipStart;
+                runEnd = clipEnd;
             }
         }
+        // Emit final run
+        if (runStart != VK_WHOLE_SIZE) {
+            encoder.cmdWriteMemory(m.memoryId, runStart, (uint32_t)(runEnd - runStart),
+                                   (const uint8_t*)shadow.ptr + runStart);
+        }
     }
-    // 3. Re-protect for next frame's write detection
-    protectAllShadows();
 #else
     for (auto& m : mappedRegions) {
-        if (m.size <= 32 * 1024 * 1024) {
+        if (m.size <= VBOXGPU_DIRTY_TRACK_SIZE_LIMIT) {
             encoder.cmdWriteMemory(m.memoryId, m.offset, (uint32_t)m.size, m.ptr);
         }
     }
@@ -536,13 +533,6 @@ static VkResult VKAPI_CALL icd_vkCreateInstance(
 {
     icdDbg("vkCreateInstance: enter");
     g_icd.initDefaults();
-#if VBOXGPU_PERF_DIRTY_TRACK
-    // Register VEH handler for dirty page tracking (once)
-    if (!g_icd.vehHandle_) {
-        g_icd_for_veh = &g_icd;
-        g_icd.vehHandle_ = AddVectoredExceptionHandler(1, icdDirtyPageVEH);
-    }
-#endif
     icdDbg("vkCreateInstance: initDefaults done");
     uint64_t id = g_icd.handles.alloc();
     *pInstance = reinterpret_cast<VkInstance>(makeDispatchable(id));
@@ -1933,11 +1923,11 @@ static VkResult VKAPI_CALL icd_vkAllocateMemory(VkDevice, const VkMemoryAllocate
     *p = (VkDeviceMemory)id;
     // Allocate shadow with VirtualAlloc for page-level protection support
     VkDeviceSize allocSize = pInfo->allocationSize;
-    void* shadow = VirtualAlloc(nullptr, (SIZE_T)allocSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!shadow) shadow = VirtualAlloc(nullptr, (SIZE_T)allocSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE); // retry
-    uint32_t pageCount = (uint32_t)((allocSize + 4095) / 4096);
-    uint32_t* dirtyPages = (uint32_t*)calloc((pageCount + 31) / 32, 4);
-    g_icd.memoryShadows[id] = {shadow, allocSize, dirtyPages, pageCount};
+    void* shadow = VirtualAlloc(nullptr, (SIZE_T)allocSize,
+        MEM_COMMIT | MEM_RESERVE | MEM_WRITE_WATCH, PAGE_READWRITE);
+    if (!shadow) shadow = VirtualAlloc(nullptr, (SIZE_T)allocSize,
+        MEM_COMMIT | MEM_RESERVE | MEM_WRITE_WATCH, PAGE_READWRITE); // retry
+    g_icd.memoryShadows[id] = {shadow, allocSize};
     g_icd.encoder.cmdAllocateMemory(1, id, pInfo->allocationSize, pInfo->memoryTypeIndex);
     return VK_SUCCESS;
 }
@@ -2044,6 +2034,23 @@ static void VKAPI_CALL icd_vkGetBufferMemoryRequirements2(VkDevice, const VkBuff
 static void VKAPI_CALL icd_vkGetImageMemoryRequirements2(VkDevice, const VkImageMemoryRequirementsInfo2*, VkMemoryRequirements2* p) {
     p->memoryRequirements.size = 4*1024*1024; p->memoryRequirements.alignment = 256; p->memoryRequirements.memoryTypeBits = 0x3;
 }
+// Vulkan 1.3 / VK_KHR_maintenance4: query memory requirements without creating objects.
+// DXVK calls this at init to probe which memory types support each buffer usage flag.
+// Returning valid results enables DXVK's global buffer sub-allocation (critical for perf).
+static void VKAPI_CALL icd_vkGetDeviceBufferMemoryRequirements(VkDevice, const VkDeviceBufferMemoryRequirements* pInfo, VkMemoryRequirements2* p) {
+    VkDeviceSize sz = pInfo->pCreateInfo->size;
+    sz = (sz + 255) & ~(VkDeviceSize)255;
+    p->sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2;
+    p->memoryRequirements.size = sz;
+    p->memoryRequirements.alignment = 256;
+    p->memoryRequirements.memoryTypeBits = 0x3;
+}
+static void VKAPI_CALL icd_vkGetDeviceImageMemoryRequirements(VkDevice, const VkDeviceImageMemoryRequirements*, VkMemoryRequirements2* p) {
+    p->sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2;
+    p->memoryRequirements.size = 4*1024*1024;
+    p->memoryRequirements.alignment = 256;
+    p->memoryRequirements.memoryTypeBits = 0x3;
+}
 
 // --- Buffer / Image creation ---
 
@@ -2066,6 +2073,7 @@ static void VKAPI_CALL icd_vkDestroyBuffer(VkDevice, VkBuffer v, const VkAllocat
 static VkResult VKAPI_CALL icd_vkCreateImage(VkDevice, const VkImageCreateInfo* pInfo, const VkAllocationCallbacks*, VkImage* p) {
     uint64_t id = g_icd.handles.alloc();
     *p = (VkImage)id;
+    g_icd.imageFormats[id] = pInfo->format;
     g_icd.encoder.cmdCreateImage(1, id,
         pInfo->imageType, pInfo->format,
         pInfo->extent.width, pInfo->extent.height, pInfo->extent.depth,
@@ -2073,7 +2081,10 @@ static VkResult VKAPI_CALL icd_vkCreateImage(VkDevice, const VkImageCreateInfo* 
         pInfo->tiling, pInfo->usage);
     return VK_SUCCESS;
 }
-static void VKAPI_CALL icd_vkDestroyImage(VkDevice, VkImage v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyImage(1, (uint64_t)v); }
+static void VKAPI_CALL icd_vkDestroyImage(VkDevice, VkImage v, const VkAllocationCallbacks*) {
+    g_icd.imageFormats.erase((uint64_t)v);
+    g_icd.encoder.cmdDestroyImage(1, (uint64_t)v);
+}
 
 // --- Sampler / Descriptor ---
 
@@ -2205,6 +2216,92 @@ static void VKAPI_CALL icd_vkCmdCopyBuffer2(VkCommandBuffer cb, const void* pCop
         info->regionCount, srcOffs.data(), dstOffs.data(), sizes.data());
 }
 // Vulkan 1.3 vkCmdCopyBufferToImage2 — wraps to cmdCopyBufferToImage
+
+// Returns bytes per texel for common formats; 0 = unknown (caller should fall back).
+static uint32_t formatBpp(VkFormat fmt) {
+    switch (fmt) {
+    // 1 bpp
+    case VK_FORMAT_R8_UNORM: case VK_FORMAT_R8_SNORM:
+    case VK_FORMAT_R8_UINT:  case VK_FORMAT_R8_SINT:
+    case VK_FORMAT_R8_SRGB:
+        return 1;
+    // 2 bpp
+    case VK_FORMAT_R8G8_UNORM: case VK_FORMAT_R8G8_SNORM:
+    case VK_FORMAT_R8G8_UINT:  case VK_FORMAT_R8G8_SINT:
+    case VK_FORMAT_R8G8_SRGB:
+    case VK_FORMAT_R16_UNORM: case VK_FORMAT_R16_SNORM:
+    case VK_FORMAT_R16_SFLOAT: case VK_FORMAT_R16_UINT: case VK_FORMAT_R16_SINT:
+    case VK_FORMAT_D16_UNORM:
+        return 2;
+    // 3 bpp
+    case VK_FORMAT_R8G8B8_UNORM: case VK_FORMAT_B8G8R8_UNORM:
+    case VK_FORMAT_R8G8B8_SRGB:  case VK_FORMAT_B8G8R8_SRGB:
+        return 3;
+    // 4 bpp
+    case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R8G8B8A8_SNORM:
+    case VK_FORMAT_R8G8B8A8_SRGB:  case VK_FORMAT_R8G8B8A8_UINT:
+    case VK_FORMAT_B8G8R8A8_UNORM: case VK_FORMAT_B8G8R8A8_SRGB:
+    case VK_FORMAT_A8B8G8R8_UNORM_PACK32: case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
+    case VK_FORMAT_R16G16_UNORM: case VK_FORMAT_R16G16_SFLOAT:
+    case VK_FORMAT_R32_SFLOAT: case VK_FORMAT_R32_UINT: case VK_FORMAT_R32_SINT:
+    case VK_FORMAT_D32_SFLOAT: case VK_FORMAT_D24_UNORM_S8_UINT:
+    case VK_FORMAT_X8_D24_UNORM_PACK32:
+        return 4;
+    // 8 bpp
+    case VK_FORMAT_R16G16B16A16_UNORM: case VK_FORMAT_R16G16B16A16_SFLOAT:
+    case VK_FORMAT_R16G16B16A16_UINT:  case VK_FORMAT_R16G16B16A16_SINT:
+    case VK_FORMAT_R32G32_SFLOAT: case VK_FORMAT_R32G32_UINT:
+        return 8;
+    // 16 bpp
+    case VK_FORMAT_R32G32B32A32_SFLOAT: case VK_FORMAT_R32G32B32A32_UINT:
+        return 16;
+    default:
+        return 0; // unknown — caller falls back
+    }
+}
+
+// Helper: gather pixel data from mapped buffer memory for inline CopyBufToImg.
+// Returns the contiguous data span [minOff, maxEnd) and adjusts bufOffsets to be relative to 0.
+// bRL[i]: bufferRowLength (0 = tight), bIH[i]: bufferImageHeight (0 = tight), bpp: bytes/texel.
+static std::vector<uint8_t> gatherCopySourceData(uint64_t bufId, uint32_t regionCount,
+    uint32_t* bufOffsets, const uint32_t* extW, const uint32_t* extH, const uint32_t* extD,
+    const uint32_t* bRL, const uint32_t* bIH, uint32_t bpp) {
+    if (bpp == 0) return {};  // unknown format — can't calculate region size
+    auto bit = g_icd.bufferBindings.find(bufId);
+    if (bit == g_icd.bufferBindings.end()) return {};
+    uint64_t memId = bit->second.memoryId;
+    VkDeviceSize memBase = bit->second.memoryOffset;
+    auto sit = g_icd.memoryShadows.find(memId);
+    if (sit == g_icd.memoryShadows.end() || !sit->second.ptr) return {};
+
+    // Find span [minOff, maxEnd) across all regions
+    // rowPitch = (bufferRowLength != 0 ? bufferRowLength : imageExtent.width) * bpp
+    // imgH     = (bufferImageHeight != 0 ? bufferImageHeight : imageExtent.height)
+    uint32_t minOff = UINT32_MAX, maxEnd = 0;
+    for (uint32_t i = 0; i < regionCount; i++) {
+        uint32_t rowPitch = (bRL[i] != 0 ? bRL[i] : extW[i]) * bpp;
+        uint32_t imgH     = (bIH[i] != 0 ? bIH[i] : extH[i]);
+        uint32_t regSize  = rowPitch * imgH * extD[i];
+        if (bufOffsets[i] < minOff) minOff = bufOffsets[i];
+        uint32_t end = bufOffsets[i] + regSize;
+        if (end > maxEnd) maxEnd = end;
+    }
+    if (minOff >= maxEnd) return {};
+    uint32_t spanSize = maxEnd - minOff;
+
+    // Copy from shadow memory
+    const uint8_t* shadowBase = (const uint8_t*)sit->second.ptr;
+    VkDeviceSize srcOff = memBase + minOff;
+    if (srcOff + spanSize > sit->second.size) return {};
+    std::vector<uint8_t> data(spanSize);
+    memcpy(data.data(), shadowBase + srcOff, spanSize);
+
+    // Rebase bufOffsets relative to 0
+    for (uint32_t i = 0; i < regionCount; i++)
+        bufOffsets[i] -= minOff;
+    return data;
+}
+
 static void VKAPI_CALL icd_vkCmdCopyBufferToImage2(VkCommandBuffer cb, const void* pCopyInfo) {
     struct CopyBufToImgInfo2 {
         VkStructureType sType; const void* pNext;
@@ -2213,12 +2310,6 @@ static void VKAPI_CALL icd_vkCmdCopyBufferToImage2(VkCommandBuffer cb, const voi
         const VkBufferImageCopy2* pRegions;
     };
     auto* info = static_cast<const CopyBufToImgInfo2*>(pCopyInfo);
-    // Flush source buffer memory for each region
-    for (uint32_t i = 0; i < info->regionCount; i++) {
-        VkDeviceSize size = (VkDeviceSize)info->pRegions[i].imageExtent.width *
-                            info->pRegions[i].imageExtent.height * info->pRegions[i].imageExtent.depth * 4;
-        g_icd.flushBufferRange((uint64_t)info->srcBuffer, info->pRegions[i].bufferOffset, size);
-    }
     std::vector<uint32_t> bOff(info->regionCount), bRL(info->regionCount), bIH(info->regionCount);
     std::vector<uint32_t> iAsp(info->regionCount), iMip(info->regionCount), iBL(info->regionCount), iLC(info->regionCount);
     std::vector<int32_t> iOX(info->regionCount), iOY(info->regionCount), iOZ(info->regionCount);
@@ -2230,10 +2321,40 @@ static void VKAPI_CALL icd_vkCmdCopyBufferToImage2(VkCommandBuffer cb, const voi
         iOX[i] = info->pRegions[i].imageOffset.x; iOY[i] = info->pRegions[i].imageOffset.y; iOZ[i] = info->pRegions[i].imageOffset.z;
         iEW[i] = info->pRegions[i].imageExtent.width; iEH[i] = info->pRegions[i].imageExtent.height; iED[i] = info->pRegions[i].imageExtent.depth;
     }
-    g_icd.encoder.cmdCopyBufferToImage(toId(cb), (uint64_t)info->srcBuffer, (uint64_t)info->dstImage,
-        info->dstImageLayout, info->regionCount,
-        bOff.data(), bRL.data(), bIH.data(), iAsp.data(), iMip.data(), iBL.data(), iLC.data(),
-        iOX.data(), iOY.data(), iOZ.data(), iEW.data(), iEH.data(), iED.data());
+    // Look up destination image format for correct bpp calculation
+    uint32_t dstBpp;
+    {
+        auto fit = g_icd.imageFormats.find((uint64_t)info->dstImage);
+        dstBpp = (fit != g_icd.imageFormats.end()) ? formatBpp(fit->second) : 4u;
+    }
+    // Inline data: gather pixel data and encode atomically with copy command
+    auto pixelData = gatherCopySourceData((uint64_t)info->srcBuffer, info->regionCount,
+        bOff.data(), iEW.data(), iEH.data(), iED.data(), bRL.data(), bIH.data(), dstBpp);
+    if (!pixelData.empty()) {
+        g_icd.encoder.cmdCopyBufferToImageInline(toId(cb), (uint64_t)info->dstImage,
+            info->dstImageLayout, info->regionCount,
+            bOff.data(), bRL.data(), bIH.data(), iAsp.data(), iMip.data(), iBL.data(), iLC.data(),
+            iOX.data(), iOY.data(), iOZ.data(), iEW.data(), iEH.data(), iED.data(),
+            (uint32_t)pixelData.size(), pixelData.data());
+    } else {
+        // Fallback: use original path with separate WriteMemory.
+        // For unknown formats (dstBpp==0) default to 4 to preserve old behavior
+        // (over-estimate is clipped by flushBufferRange; compressed formats still work).
+        uint32_t fbBpp = (dstBpp != 0) ? dstBpp : 4u;
+        for (uint32_t i = 0; i < info->regionCount; i++) {
+            uint32_t rowPitch = (bRL[i] != 0 ? bRL[i] : iEW[i]) * fbBpp;
+            uint32_t imgH     = (bIH[i] != 0 ? bIH[i] : iEH[i]);
+            VkDeviceSize size = (VkDeviceSize)rowPitch * imgH * iED[i];
+            g_icd.flushBufferRange((uint64_t)info->srcBuffer, info->pRegions[i].bufferOffset, size);
+        }
+        // Restore original offsets for non-inline path
+        for (uint32_t i = 0; i < info->regionCount; i++)
+            bOff[i] = (uint32_t)info->pRegions[i].bufferOffset;
+        g_icd.encoder.cmdCopyBufferToImage(toId(cb), (uint64_t)info->srcBuffer, (uint64_t)info->dstImage,
+            info->dstImageLayout, info->regionCount,
+            bOff.data(), bRL.data(), bIH.data(), iAsp.data(), iMip.data(), iBL.data(), iLC.data(),
+            iOX.data(), iOY.data(), iOZ.data(), iEW.data(), iEH.data(), iED.data());
+    }
 }
 static void VKAPI_CALL icd_vkCmdCopyImage(VkCommandBuffer cb, VkImage srcImg, VkImageLayout srcLayout,
     VkImage dstImg, VkImageLayout dstLayout, uint32_t regionCount, const VkImageCopy* pRegions)
@@ -2269,12 +2390,6 @@ static void VKAPI_CALL icd_vkCmdCopyImage(VkCommandBuffer cb, VkImage srcImg, Vk
 }
 static void VKAPI_CALL icd_vkCmdCopyBufferToImage(VkCommandBuffer cb, VkBuffer buf, VkImage img, VkImageLayout layout,
     uint32_t regionCount, const VkBufferImageCopy* pRegions) {
-    // Flush source buffer memory for each region
-    for (uint32_t i = 0; i < regionCount; i++) {
-        VkDeviceSize size = (VkDeviceSize)pRegions[i].imageExtent.width * pRegions[i].imageExtent.height *
-                            pRegions[i].imageExtent.depth * 4; // assume 4 bpp
-        g_icd.flushBufferRange((uint64_t)buf, pRegions[i].bufferOffset, size);
-    }
     std::vector<uint32_t> bOff(regionCount), bRL(regionCount), bIH(regionCount);
     std::vector<uint32_t> iAsp(regionCount), iMip(regionCount), iBL(regionCount), iLC(regionCount);
     std::vector<int32_t> iOX(regionCount), iOY(regionCount), iOZ(regionCount);
@@ -2286,9 +2401,32 @@ static void VKAPI_CALL icd_vkCmdCopyBufferToImage(VkCommandBuffer cb, VkBuffer b
         iOX[i] = pRegions[i].imageOffset.x; iOY[i] = pRegions[i].imageOffset.y; iOZ[i] = pRegions[i].imageOffset.z;
         iEW[i] = pRegions[i].imageExtent.width; iEH[i] = pRegions[i].imageExtent.height; iED[i] = pRegions[i].imageExtent.depth;
     }
-    g_icd.encoder.cmdCopyBufferToImage(toId(cb), (uint64_t)buf, (uint64_t)img, layout, regionCount,
-        bOff.data(), bRL.data(), bIH.data(), iAsp.data(), iMip.data(), iBL.data(), iLC.data(),
-        iOX.data(), iOY.data(), iOZ.data(), iEW.data(), iEH.data(), iED.data());
+    uint32_t dstBpp;
+    {
+        auto fit = g_icd.imageFormats.find((uint64_t)img);
+        dstBpp = (fit != g_icd.imageFormats.end()) ? formatBpp(fit->second) : 4u;
+    }
+    auto pixelData = gatherCopySourceData((uint64_t)buf, regionCount,
+        bOff.data(), iEW.data(), iEH.data(), iED.data(), bRL.data(), bIH.data(), dstBpp);
+    if (!pixelData.empty()) {
+        g_icd.encoder.cmdCopyBufferToImageInline(toId(cb), (uint64_t)img, layout, regionCount,
+            bOff.data(), bRL.data(), bIH.data(), iAsp.data(), iMip.data(), iBL.data(), iLC.data(),
+            iOX.data(), iOY.data(), iOZ.data(), iEW.data(), iEH.data(), iED.data(),
+            (uint32_t)pixelData.size(), pixelData.data());
+    } else {
+        uint32_t fbBpp = (dstBpp != 0) ? dstBpp : 4u;
+        for (uint32_t i = 0; i < regionCount; i++) {
+            uint32_t rowPitch = (bRL[i] != 0 ? bRL[i] : iEW[i]) * fbBpp;
+            uint32_t imgH     = (bIH[i] != 0 ? bIH[i] : iEH[i]);
+            VkDeviceSize size = (VkDeviceSize)rowPitch * imgH * iED[i];
+            g_icd.flushBufferRange((uint64_t)buf, pRegions[i].bufferOffset, size);
+        }
+        for (uint32_t i = 0; i < regionCount; i++)
+            bOff[i] = (uint32_t)pRegions[i].bufferOffset;
+        g_icd.encoder.cmdCopyBufferToImage(toId(cb), (uint64_t)buf, (uint64_t)img, layout, regionCount,
+            bOff.data(), bRL.data(), bIH.data(), iAsp.data(), iMip.data(), iBL.data(), iLC.data(),
+            iOX.data(), iOY.data(), iOZ.data(), iEW.data(), iEH.data(), iED.data());
+    }
 }
 // vkCmdCopyImage2 / vkCmdCopyImage2KHR (Vulkan 1.3)
 static void VKAPI_CALL icd_vkCmdCopyImage2(VkCommandBuffer cb, const VkCopyImageInfo2* pInfo) {
@@ -2685,6 +2823,8 @@ static const FuncEntry g_funcTable[] = {
     ENTRY(vkGetImageMemoryRequirements),
     ENTRY(vkGetBufferMemoryRequirements2),
     ENTRY(vkGetImageMemoryRequirements2),
+    ENTRY(vkGetDeviceBufferMemoryRequirements),
+    ENTRY(vkGetDeviceImageMemoryRequirements),
     ENTRY(vkFlushMappedMemoryRanges),
     ENTRY(vkInvalidateMappedMemoryRanges),
 

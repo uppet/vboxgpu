@@ -752,6 +752,34 @@ public:
         w_.endCommand(off);
     }
 
+    // CopyBufferToImage with inline pixel data — avoids staging-data-overwrite race.
+    // Wire format: [cb(8)][dstImg(8)][layout(4)][regionCount(4)][regions...][dataSize(4)][pixelData...]
+    void cmdCopyBufferToImageInline(uint64_t cmdBufferId, uint64_t dstImg,
+                                    uint32_t dstLayout, uint32_t regionCount,
+                                    const uint32_t* bufOffsets, const uint32_t* bufRowLengths,
+                                    const uint32_t* bufImgHeights,
+                                    const uint32_t* imgAspects, const uint32_t* imgMipLevels,
+                                    const uint32_t* imgBaseLayers, const uint32_t* imgLayerCounts,
+                                    const int32_t* imgOffX, const int32_t* imgOffY, const int32_t* imgOffZ,
+                                    const uint32_t* imgExtW, const uint32_t* imgExtH, const uint32_t* imgExtD,
+                                    uint32_t dataSize, const uint8_t* pixelData) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_BRIDGE_CopyBufToImgInline);
+        w_.writeU64(cmdBufferId);
+        w_.writeU64(dstImg); w_.writeU32(dstLayout);
+        w_.writeU32(regionCount);
+        for (uint32_t i = 0; i < regionCount; i++) {
+            w_.writeU32(bufOffsets[i]); w_.writeU32(bufRowLengths[i]); w_.writeU32(bufImgHeights[i]);
+            w_.writeU32(imgAspects[i]); w_.writeU32(imgMipLevels[i]);
+            w_.writeU32(imgBaseLayers[i]); w_.writeU32(imgLayerCounts[i]);
+            w_.writeI32(imgOffX[i]); w_.writeI32(imgOffY[i]); w_.writeI32(imgOffZ[i]);
+            w_.writeU32(imgExtW[i]); w_.writeU32(imgExtH[i]); w_.writeU32(imgExtD[i]);
+        }
+        w_.writeU32(dataSize);
+        w_.writeBytes(pixelData, dataSize);
+        w_.endCommand(off);
+    }
+
     void cmdUpdateBuffer(uint64_t cmdBufferId, uint64_t bufferId,
                          uint64_t offset, uint64_t dataSize, const void* pData) {
         ENC_GUARD;

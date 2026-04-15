@@ -126,6 +126,7 @@ private:
     void handleCmdCopyImage(VnStreamReader& r);
     void handleCmdBlitImage(VnStreamReader& r);
     void handleCmdCopyBufferToImage(VnStreamReader& r);
+    void handleCopyBufToImgInline(VnStreamReader& r);
     void handleCmdUpdateBuffer(VnStreamReader& r);
     void handleCmdPipelineBarrier(VnStreamReader& r);
     void handleCreateBuffer(VnStreamReader& r);
@@ -240,6 +241,23 @@ private:
     bool readbackFrameAsync(uint32_t imageIndex, HostSwapchain& sc, int slot);
 
     bool error_ = false;
+
+    // Buffer → memory binding tracking (for staging snapshot in CopyBuffer*)
+    struct BufferMemBinding { uint64_t memoryId; VkDeviceSize memoryOffset; };
+    std::unordered_map<uint64_t, BufferMemBinding> bufferBindings_;
+
+    // Reusable staging buffer for CopyBufferToImage/CopyBuffer snapshot.
+    // Prevents later WriteMemory from overwriting copy source data before
+    // the GPU executes the copy (staging data lifecycle problem).
+    struct CopyStagingBuf {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        void* mapped = nullptr;
+        VkDeviceSize capacity = 0;
+    };
+    CopyStagingBuf copyStagingBuf_;
+    VkDeviceSize copyStagingUsed_ = 0;  // arena offset: advances per copy, reset per batch
+    bool ensureCopyStagingBuf(VkDeviceSize needed);
 
 public:
     // BDA query results: accumulated during execute(), consumed by server

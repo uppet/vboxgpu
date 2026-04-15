@@ -90,22 +90,19 @@ struct IcdState {
     std::mutex mappedMutex;
 
     // Shadow memory per VkDeviceMemory: memory_id → {ptr, size}
+    // Allocated with MEM_WRITE_WATCH for kernel-level dirty page tracking.
     struct MemoryShadow {
         void* ptr;
         VkDeviceSize size;
-        uint32_t* dirtyPages;  // bitmap: 1 bit per 4KB page
-        uint32_t pageCount;    // number of 4KB pages
         bool freed = false;    // set by FreeMemory, cleaned up by flushMappedMemory
     };
     std::unordered_map<uint64_t, MemoryShadow> memoryShadows;
 
-    // VEH handle for dirty page tracking
-    void* vehHandle_ = nullptr;
-    void protectAllShadows();   // Set all shadow pages to PAGE_READONLY
-    void unprotectAllShadows(); // Set all shadow pages to PAGE_READWRITE
-
     // ImageView → Image mapping (to detect swapchain targets in BeginRendering)
     std::unordered_map<uint64_t, uint64_t> imageViewToImage;
+
+    // Image format tracking: image handle → VkFormat (needed for correct bpp in CopyBufferToImage)
+    std::unordered_map<uint64_t, VkFormat> imageFormats;
 
     // Buffer size tracking: buffer handle → actual size
     std::unordered_map<uint64_t, VkDeviceSize> bufferSizes;
@@ -118,9 +115,8 @@ struct IcdState {
     std::unordered_map<uint64_t, uint64_t> bdaCache;
 
     // BDA optimization: flush at BindBufferMemory + Host auto-BDA
-    // Tracks buffers with SHADER_DEVICE_ADDRESS_BIT usage — BindBufferMemory
-    // will flush immediately so Host can auto-generate BDA in the response.
-    std::unordered_set<uint64_t> bdaNeedBuffers_;  // buffers needing BDA
+    std::unordered_set<uint64_t> bdaNeedBuffers_;
+
 
     // GDI blit rate limiter: blit is driven by recv thread (actual rendered frames).
     // Cap at 60 FPS to avoid GDI saturation when game runs very fast.
