@@ -161,7 +161,7 @@ static std::vector<DumpBatch> loadDumpFile(const char* path) {
     return batches;
 }
 
-static int replayMode(const char* dumpPath) {
+static int replayMode(const char* dumpPath, const char* saveFramesDir = nullptr) {
     HINSTANCE hInstance = GetModuleHandle(nullptr);
 
     auto batches = loadDumpFile(dumpPath);
@@ -243,6 +243,8 @@ found_present:
 
     // Execute frame batches once (DXVK command streams have complex CB lifecycle,
     // safe single-pass replay first)
+    size_t frameNum = 0;
+    bool hadPresent = false;
     for (size_t i = setupEnd; i < batches.size() && g_running; i++) {
         MSG msg{};
         while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -251,10 +253,36 @@ found_present:
         }
         if (!g_running) break;
 
-        fprintf(stderr, "[Replay] Frame batch %zu (%zu bytes)\n", i, batches[i].data.size());
+        // Detect whether this batch contains a Present command
+        bool batchHasPresent = false;
+        if (batches[i].data.size() >= 8) {
+            const uint8_t* p = batches[i].data.data();
+            const uint8_t* end = p + batches[i].data.size();
+            while (p + 8 <= end) {
+                uint32_t cmd = *reinterpret_cast<const uint32_t*>(p);
+                uint32_t sz  = *reinterpret_cast<const uint32_t*>(p + 4);
+                if (cmd == 0x10002) { batchHasPresent = true; break; }
+                if (p + 8 + sz > end) break;
+                p += 8 + sz;
+            }
+        }
+
+        fprintf(stderr, "[Replay] Batch %zu (%zu bytes)%s\n", i, batches[i].data.size(),
+                batchHasPresent ? " [Present]" : "");
         if (!decoder.execute(batches[i].data.data(), batches[i].data.size())) {
-            fprintf(stderr, "[Replay] Frame batch %zu failed\n", i);
+            fprintf(stderr, "[Replay] Batch %zu failed\n", i);
             break;
+        }
+
+        if (batchHasPresent) hadPresent = true;
+
+        // Per-frame screenshot capture when --save-frames is active
+        if (saveFramesDir && hadPresent) {
+            char path[512];
+            snprintf(path, sizeof(path), "%s/frame_%04zu.bmp", saveFramesDir, frameNum++);
+            decoder.captureScreenshot(path);
+        } else if (saveFramesDir && batchHasPresent) {
+            frameNum++;  // count but skip frames before first present
         }
     }
 
@@ -285,12 +313,17 @@ found_present:
 }
 
 int main(int argc, char* argv[]) {
-    // Check for --replay mode
+    // Check for --replay [--save-frames DIR] mode
+    const char* replayDump = nullptr;
+    const char* saveFramesDir = nullptr;
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--replay") == 0 && i + 1 < argc) {
-            return replayMode(argv[++i]);
-        }
+        if (strcmp(argv[i], "--replay") == 0 && i + 1 < argc)
+            replayDump = argv[++i];
+        else if (strcmp(argv[i], "--save-frames") == 0 && i + 1 < argc)
+            saveFramesDir = argv[++i];
     }
+    if (replayDump)
+        return replayMode(replayDump, saveFramesDir);
 
     HINSTANCE hInstance = GetModuleHandle(nullptr);
 

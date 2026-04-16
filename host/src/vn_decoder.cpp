@@ -901,6 +901,16 @@ void VnDecoder::handleWriteMemory(VnStreamReader& r) {
     uint64_t offset = r.readU64();
     uint32_t size = r.readU32();
 
+    // Wait for the previous batch's GPU work before overwriting GPU-visible memory.
+    // Only done once per batch (on the first WriteMemory). Subsequent WriteMemory
+    // calls in the same batch are already safe since the GPU hasn't started yet.
+    // In most cases the fence is already signaled (TCP round-trip gives GPU time),
+    // so this wait is effectively free and only blocks when GPU is truly behind.
+    if (lastBatchWaitPending_ && lastBatchFence_ != VK_NULL_HANDLE) {
+        vkWaitForFences(device_, 1, &lastBatchFence_, VK_TRUE, UINT64_MAX);
+        lastBatchWaitPending_ = false;
+    }
+
     VkDeviceMemory mem = lookup(deviceMemories_, memId);
     if (!mem) {
         r.skip(size);
@@ -2284,6 +2294,14 @@ void VnDecoder::handleQueueSubmit(VnStreamReader& r) {
     fprintf(stderr, "[Decoder] QueueSubmit result=%d cb=%p\n", (int)submitResult, (void*)cb);
     fflush(stderr);
 #endif
+
+    // Track last fence for cross-batch WriteMemory protection.
+    // The next batch's first WriteMemory will wait for this fence before
+    // overwriting GPU-visible memory that this submission might still be reading.
+    if (submitFence != VK_NULL_HANDLE) {
+        lastBatchFence_ = submitFence;
+        lastBatchWaitPending_ = true;
+    }
 }
 
 void VnDecoder::handleWaitForFences(VnStreamReader& r) {

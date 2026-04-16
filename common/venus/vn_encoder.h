@@ -11,10 +11,12 @@
 
 class VnEncoder {
 public:
-    // Lock for thread safety (DXVK is multithreaded)
-    std::mutex mutex_;
+    // Lock for thread safety (DXVK is multithreaded).
+    // Recursive so QueueSubmit can hold the lock for the entire flush+submit
+    // sequence while individual encoder methods also lock it internally.
+    std::recursive_mutex mutex_;
     // Helper: lock must be held for entire beginCommand→endCommand sequence
-    #define ENC_GUARD std::lock_guard<std::mutex> _lk(mutex_)
+    #define ENC_GUARD std::lock_guard<std::recursive_mutex> _lk(mutex_)
     // --- Instance / Device ---
 
     void cmdCreateRenderPass(uint64_t deviceId, uint64_t renderPassId,
