@@ -86,7 +86,7 @@ static std::vector<DumpBatch> loadDumpFile(const char* path) {
     return batches;
 }
 
-static int replayMode(const char* dumpPath) {
+static int replayMode(const char* dumpPath, const char* saveFramesDir = nullptr) {
     auto batches = loadDumpFile(dumpPath);
     if (batches.empty()) { fprintf(stderr, "[Replay] No batches.\n"); return 1; }
 
@@ -123,7 +123,11 @@ static int replayMode(const char* dumpPath) {
     VnDecoder decoder;
     decoder.init(vk.physicalDevice, vk.device, vk.graphicsQueue, vk.graphicsFamily, vk.surface);
 
-    // Execute all batches once, screenshot every 5 batches for debugging
+    // Execute all batches once.
+    // When --save-frames DIR is set, capture a BMP after every batch that
+    // contains a Present command (frame boundary).
+    size_t frameNum = 0;
+    bool hadPresent = false;
     for (size_t i = 0; i < batches.size() && g_running; i++) {
         MSG msg{};
         while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -135,14 +139,41 @@ static int replayMode(const char* dumpPath) {
             fprintf(stderr, "[Replay] Batch %zu failed\n", i);
             break;
         }
-        // Save screenshots at key batches
-        if (i < 5 || i == 10 || i == 50 || i == 100 || i == 150) {
-            char path[256];
-            snprintf(path, sizeof(path), "%s_batch%zu.bmp", dumpPath, i);
+
+        // Detect Present command (0x10002) in this batch.
+        // sz field includes the 8-byte header, so advance by sz (not 8+sz).
+        bool batchHasPresent = false;
+        if (batches[i].data.size() >= 8) {
+            const uint8_t* p = batches[i].data.data();
+            const uint8_t* end = p + batches[i].data.size();
+            while (p + 8 <= end) {
+                uint32_t cmd = *reinterpret_cast<const uint32_t*>(p);
+                uint32_t sz  = *reinterpret_cast<const uint32_t*>(p + 4);
+                if (cmd == 0x10002) { batchHasPresent = true; break; }
+                if (sz < 8 || p + sz > end) break;
+                p += sz;
+            }
+        }
+        if (batchHasPresent) hadPresent = true;
+
+        if (saveFramesDir && hadPresent && batchHasPresent) {
+            char path[512];
+            snprintf(path, sizeof(path), "%s/frame_%04zu.bmp", saveFramesDir, frameNum++);
             decoder.captureScreenshot(path);
-            fprintf(stderr, "[Replay] Batch %zu done, screenshot: %s\n", i, path);
+            if (frameNum % 10 == 0)
+                fprintf(stderr, "[Replay] Saved frame %zu\n", frameNum);
+        } else if (!saveFramesDir) {
+            // Legacy debug screenshots at key batches
+            if (i < 5 || i == 10 || i == 50 || i == 100 || i == 150) {
+                char path[256];
+                snprintf(path, sizeof(path), "%s_batch%zu.bmp", dumpPath, i);
+                decoder.captureScreenshot(path);
+                fprintf(stderr, "[Replay] Batch %zu done, screenshot: %s\n", i, path);
+            }
         }
     }
+    if (saveFramesDir)
+        fprintf(stderr, "[Replay] Saved %zu frames to %s\n", frameNum, saveFramesDir);
 
     // Screenshot
     std::string ssPath = dumpPath;
@@ -178,12 +209,17 @@ int main(int argc, char* argv[]) {
     _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
     setvbuf(stderr, NULL, _IONBF, 0);  // Force unbuffered stderr
 
-    // Check --replay mode first
+    // Check --replay [--save-frames DIR] mode first
+    const char* replayDump = nullptr;
+    const char* saveFramesDir = nullptr;
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--replay") == 0 && i + 1 < argc) {
-            return replayMode(argv[++i]);
-        }
+        if (strcmp(argv[i], "--replay") == 0 && i + 1 < argc)
+            replayDump = argv[++i];
+        else if (strcmp(argv[i], "--save-frames") == 0 && i + 1 < argc)
+            saveFramesDir = argv[++i];
     }
+    if (replayDump)
+        return replayMode(replayDump, saveFramesDir);
 
     uint16_t port = DEFAULT_PORT;
     const char* dumpPath = nullptr;

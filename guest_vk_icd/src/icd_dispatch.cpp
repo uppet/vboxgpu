@@ -36,8 +36,10 @@ static void icdDbg(const char* msg) {
 }
 
 // Lock guard for encoder — DXVK is multithreaded, encoder is not thread-safe
-// All encoder access uses encoder.mutex_ — unified single mutex
-#define ENC_LOCK std::lock_guard<std::mutex> _enc_lock(g_icd.encoder.mutex_)
+// All encoder access uses encoder.mutex_ — unified single mutex.
+// Uses recursive_mutex so QueueSubmit can hold the lock for the full
+// flush+submit sequence while internal encoder methods also lock it.
+#define ENC_LOCK std::lock_guard<std::recursive_mutex> _enc_lock(g_icd.encoder.mutex_)
 
 // --- Crash dump generation ---
 #include <dbghelp.h>
@@ -307,7 +309,7 @@ bool IcdState::sendBatchLocked(bool isPresent) {
 }
 
 bool IcdState::sendBatch(bool isPresent) {
-    std::lock_guard<std::mutex> lock(encoder.mutex_);
+    std::lock_guard<std::recursive_mutex> lock(encoder.mutex_);
     return sendBatchLocked(isPresent);
 }
 
@@ -1857,6 +1859,10 @@ static VkResult VKAPI_CALL icd_vkGetFenceStatus(VkDevice, VkFence) { return VK_S
 // --- Queue submit ---
 
 static VkResult VKAPI_CALL icd_vkQueueSubmit(VkQueue q, uint32_t count, const VkSubmitInfo* pSubmits, VkFence fence) {
+    // Hold encoder lock for the entire flush+submit sequence so all WriteMemory
+    // commands appear before QueueSubmit in the stream, with no interleaving
+    // from other DXVK threads.
+    ENC_LOCK;
     g_icd.flushMappedMemory();
     for (uint32_t i = 0; i < count; i++) {
         uint32_t cbCount = pSubmits[i].commandBufferCount;
@@ -1883,6 +1889,7 @@ static VkResult VKAPI_CALL icd_vkQueueSubmit(VkQueue q, uint32_t count, const Vk
 }
 
 static VkResult VKAPI_CALL icd_vkQueueSubmit2(VkQueue q, uint32_t count, const VkSubmitInfo2* pSubmits, VkFence fence) {
+    ENC_LOCK;
     g_icd.flushMappedMemory();
     for (uint32_t i = 0; i < count; i++) {
         uint32_t cbCount = pSubmits[i].commandBufferInfoCount;

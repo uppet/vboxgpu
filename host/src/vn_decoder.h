@@ -271,6 +271,11 @@ public:
     uint32_t currentSeqId_ = 0;
     uint64_t batchRecvUs_ = 0;  // set by server before execute()
 
+    // Cross-batch fence: wait for previous batch's GPU work before WriteMemory.
+    // Prevents GPU still reading transform data when CPU overwrites it for next batch.
+    VkFence lastBatchFence_ = VK_NULL_HANDLE;  // last fence submitted in previous batch
+    bool    lastBatchWaitPending_ = false;      // true until first WriteMemory this batch waits it
+
     // Frame-level timing: tracks each present through the pipeline
     uint32_t frameCounter_ = 0; // monotonic, incremented per present
     struct FrameTiming {
