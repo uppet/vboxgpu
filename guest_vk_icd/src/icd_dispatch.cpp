@@ -968,7 +968,8 @@ static VkResult VKAPI_CALL icd_vkCreateDevice(
 }
 
 static void VKAPI_CALL icd_vkDestroyDevice(VkDevice device, const VkAllocationCallbacks*) {
-    g_icd.stopRecvThread();
+    // Don't stop recv thread or disconnect — DXUT may destroy and recreate devices.
+    // The TCP connection is per-ICD-lifetime, not per-device.
     if (device) delete reinterpret_cast<DispatchableHandle*>(device);
 }
 

@@ -43,7 +43,7 @@ void createInstance(VulkanContext& ctx) {
 
     // Disable validation layer for host server — the proxy ICD sends commands
     // that may reference objects in unusual ways, causing false validation errors.
-    bool enableValidation = true;  // TEMP: debugging SortTheCourt black screen
+    bool enableValidation = false;  // disabled: validation layer causes ~34MB/s write throughput (vs expected GBs)
 
     const char* validationLayer = "VK_LAYER_KHRONOS_validation";
 

@@ -186,6 +186,9 @@ private:
     std::unordered_map<uint64_t, VkFormat> imageFormats_; // image ID → format
     std::unordered_map<uint64_t, VkImageLayout> imageLayouts_; // image ID → current layout on host
     std::unordered_map<uint64_t, VkDeviceMemory> deviceMemories_;
+    // Persistent memory maps: memId → base pointer (kept mapped across WriteMemory calls).
+    // Eliminates vkMapMemory/vkUnmapMemory per-WriteMemory overhead (major perf bottleneck).
+    std::unordered_map<uint64_t, void*> persistentMaps_;
     std::unordered_map<uint64_t, VkSampler> samplers_;
     std::unordered_map<uint64_t, VkDescriptorPool> descriptorPools_;
     std::unordered_map<uint64_t, VkDescriptorSet> descriptorSets_;
