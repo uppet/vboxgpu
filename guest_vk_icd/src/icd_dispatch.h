@@ -117,6 +117,8 @@ struct IcdState {
     // BDA optimization: flush at BindBufferMemory + Host auto-BDA
     std::unordered_set<uint64_t> bdaNeedBuffers_;
 
+    // BDA recording: buffer IDs already emitted via RecordBDA (deduplication)
+    std::unordered_set<uint64_t> bdaRecorded_;
 
     // GDI blit rate limiter: blit is driven by recv thread (actual rendered frames).
     // Cap at 60 FPS to avoid GDI saturation when game runs very fast.

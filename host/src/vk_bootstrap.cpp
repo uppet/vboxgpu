@@ -145,36 +145,39 @@ void createLogicalDevice(VulkanContext& ctx) {
         queueInfos.push_back(queueInfo);
     }
 
-    // Enable all Vulkan 1.1/1.2/1.3 features DXVK shaders may require
+    // Query ALL features supported by the physical device and enable them all.
+    // Previously we hand-picked a small subset, which caused pipeline creation
+    // failures for features DXVK uses (depthClamp, geometryShader, etc.).
     VkPhysicalDeviceFeatures2 deviceFeatures2{};
     deviceFeatures2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-    deviceFeatures2.features.shaderClipDistance = VK_TRUE;
-    deviceFeatures2.features.shaderCullDistance = VK_TRUE;
 
     VkPhysicalDeviceVulkan11Features vk11Features{};
     vk11Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
-    vk11Features.shaderDrawParameters = VK_TRUE;
 
     VkPhysicalDeviceVulkan12Features vk12Features{};
     vk12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-    vk12Features.bufferDeviceAddress = VK_TRUE;
-    vk12Features.vulkanMemoryModel = VK_TRUE;
-    vk12Features.vulkanMemoryModelDeviceScope = VK_TRUE;
-    vk12Features.descriptorIndexing = VK_TRUE;
-    vk12Features.runtimeDescriptorArray = VK_TRUE;
-    vk12Features.timelineSemaphore = VK_TRUE;
-    vk12Features.scalarBlockLayout = VK_TRUE;
-    vk12Features.uniformBufferStandardLayout = VK_TRUE;
 
     VkPhysicalDeviceVulkan13Features vk13Features{};
     vk13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-    vk13Features.dynamicRendering = VK_TRUE;
-    vk13Features.synchronization2 = VK_TRUE;
 
-    // Chain: deviceFeatures2 → vk11 → vk12 → vk13
+    // Extended dynamic state features (EDS1/EDS2) — promoted to 1.3 core but some
+    // validation layers still check these extension structs explicitly.
+    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT edsFeatures{};
+    edsFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT;
+
+    VkPhysicalDeviceExtendedDynamicState2FeaturesEXT eds2Features{};
+    eds2Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT;
+
+    // Chain for query: deviceFeatures2 → vk11 → vk12 → vk13 → eds → eds2
     deviceFeatures2.pNext = &vk11Features;
     vk11Features.pNext = &vk12Features;
     vk12Features.pNext = &vk13Features;
+    vk13Features.pNext = &edsFeatures;
+    edsFeatures.pNext = &eds2Features;
+
+    // Query: fills VK_TRUE for every feature the GPU actually supports
+    vkGetPhysicalDeviceFeatures2(ctx.physicalDevice, &deviceFeatures2);
+    // Pass the same struct chain to vkCreateDevice — enables everything supported.
 
     const char* deviceExtensions[] = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,

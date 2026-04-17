@@ -905,6 +905,16 @@ public:
         w_.endCommand(off);
     }
 
+    // Record live BDA in stream for replay-time patching of descriptor heap writes.
+    // Wire format: [bufId(8)][liveAddr(8)]
+    void cmdBridgeRecordBDA(uint64_t bufferId, uint64_t liveAddr) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_BRIDGE_RecordBDA);
+        w_.writeU64(bufferId);
+        w_.writeU64(liveAddr);
+        w_.endCommand(off);
+    }
+
     // Sync query: request host-side vkGetBufferDeviceAddress result
     void cmdGetBufferDeviceAddress(uint64_t deviceId, uint64_t bufferId) {
         ENC_GUARD;
