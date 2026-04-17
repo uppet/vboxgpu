@@ -3,7 +3,9 @@
 #include "win_capture.h"
 #include <fstream>
 #include <algorithm>
+#include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 void VnDecoder::init(VkPhysicalDevice physDevice, VkDevice device,
                      VkQueue graphicsQueue, uint32_t graphicsFamily,
@@ -49,6 +51,15 @@ bool VnDecoder::execute(const uint8_t* data, size_t size) {
     pendingBdaResults_.clear();
     copyStagingUsed_ = 0;  // reset staging arena for this batch
     VnStreamReader reader(data, size);
+    // Per-batch profiling: count commands and time by type
+    static uint64_t batchNum = 0;
+    uint64_t thisBatch = ++batchNum;
+    uint64_t cmdCount = 0;
+    auto batchStart = rtNowUs();
+    // Track slowest command + per-type cumulative time
+    uint32_t slowestCmd = 0; double slowestMs = 0;
+    std::unordered_map<uint32_t, double> cmdTotalMs;
+    std::unordered_map<uint32_t, uint64_t> cmdTypeCnt;
     while (reader.hasMore() && !error_) {
         // Record position before reading header
         const uint8_t* cmdStart = reader.currentPtr();
@@ -67,7 +78,13 @@ bool VnDecoder::execute(const uint8_t* data, size_t size) {
             break;
         }
 
+        auto _ct0 = rtNowUs();
         dispatch(cmdType, reader, cmdSize);
+        auto _cdt = (rtNowUs() - _ct0) / 1000.0;
+        if (_cdt > slowestMs) { slowestMs = _cdt; slowestCmd = cmdType; }
+        cmdTotalMs[cmdType] += _cdt;
+        cmdTypeCnt[cmdType]++;
+        cmdCount++;
 
         // Ensure reader is at the correct position for the next command.
         size_t cmdStartOff = cmdStart - data;
@@ -75,6 +92,24 @@ bool VnDecoder::execute(const uint8_t* data, size_t size) {
         size_t currentOff = reader.currentPtr() - data;
         if (currentOff != nextOff && nextOff <= size) {
             reader.setPos(nextOff);
+        }
+    }
+    // Profiling report for large batches
+    if (size > 1024*1024) {
+        double batchMs = (rtNowUs() - batchStart) / 1000.0;
+        fprintf(stderr, "[Batch#%llu] %llu cmds / %zuMB in %.2fms → slowest: cmd=0x%x %.2fms\n",
+                (unsigned long long)thisBatch, (unsigned long long)cmdCount, size/(1024*1024),
+                batchMs, slowestCmd, slowestMs);
+        // Top-5 by cumulative time
+        std::vector<std::pair<uint32_t,double>> sorted(cmdTotalMs.begin(), cmdTotalMs.end());
+        std::sort(sorted.begin(), sorted.end(), [](auto& a, auto& b){ return a.second > b.second; });
+        int topN = (int)std::min((size_t)5, sorted.size());
+        for (int i = 0; i < topN; i++) {
+            uint32_t ct = sorted[i].first;
+            fprintf(stderr, "  [type=0x%x] total=%.2fms  count=%llu  avg=%.3fms\n",
+                    ct, sorted[i].second,
+                    (unsigned long long)cmdTypeCnt[ct],
+                    sorted[i].second / (double)cmdTypeCnt[ct]);
         }
     }
     // All QueueSubmits in this batch have been decoded.
@@ -414,11 +449,40 @@ void VnDecoder::handleCreateImage(VnStreamReader& r) {
 uint32_t VnDecoder_mapMemoryType(VkPhysicalDevice physDev, uint32_t icdType) {
     VkPhysicalDeviceMemoryProperties props;
     vkGetPhysicalDeviceMemoryProperties(physDev, &props);
-    VkMemoryPropertyFlags wanted = (icdType == 0)
-        ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-        : (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    for (uint32_t i = 0; i < props.memoryTypeCount; i++)
-        if ((props.memoryTypes[i].propertyFlags & wanted) == wanted) return i;
+    if (icdType == 0) {
+        // Device-local: pick any DEVICE_LOCAL type
+        for (uint32_t i = 0; i < props.memoryTypeCount; i++)
+            if (props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) return i;
+        return 0;
+    }
+    // Host-visible: prefer HOST_VISIBLE + HOST_COHERENT + HOST_CACHED (system RAM, fast CPU writes).
+    // Avoid DEVICE_LOCAL | HOST_VISIBLE (WC VRAM via BAR/ReBAR — slow memcpy without NT stores).
+    const VkMemoryPropertyFlags wanted = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    // Pass 1: HOST_VISIBLE + HOST_COHERENT + HOST_CACHED, no DEVICE_LOCAL
+    for (uint32_t i = 0; i < props.memoryTypeCount; i++) {
+        auto f = props.memoryTypes[i].propertyFlags;
+        if ((f & wanted) == wanted && (f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) &&
+            !(f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+            fprintf(stderr, "[Alloc] HOST_VISIBLE memType=%u flags=0x%x (cached system RAM)\n", i, f);
+            return i;
+        }
+    }
+    // Pass 2: HOST_VISIBLE + HOST_COHERENT, no DEVICE_LOCAL (non-cached system RAM, still fast)
+    for (uint32_t i = 0; i < props.memoryTypeCount; i++) {
+        auto f = props.memoryTypes[i].propertyFlags;
+        if ((f & wanted) == wanted && !(f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+            fprintf(stderr, "[Alloc] HOST_VISIBLE memType=%u flags=0x%x (system RAM)\n", i, f);
+            return i;
+        }
+    }
+    // Pass 3: any HOST_VISIBLE + HOST_COHERENT (may be WC VRAM)
+    for (uint32_t i = 0; i < props.memoryTypeCount; i++) {
+        auto f = props.memoryTypes[i].propertyFlags;
+        if ((f & wanted) == wanted) {
+            fprintf(stderr, "[Alloc] HOST_VISIBLE memType=%u flags=0x%x (fallback, may be WC VRAM)\n", i, f);
+            return i;
+        }
+    }
     return 0;
 }
 
@@ -623,16 +687,12 @@ void VnDecoder::handleUpdateDescriptorSets(VnStreamReader& r) {
             allBufferInfos[i][j].buffer = lookup(buffers_, bufId);
             allBufferInfos[i][j].offset = bufOff;
             allBufferInfos[i][j].range = bufRange;
-            // Debug: log image descriptor bindings (type 0=SAMPLER, 2=SAMPLED_IMAGE)
+            // Debug: log a handful of image descriptor bindings for startup verification only
             static int descLog = 0;
-            if (descLog < 50000 && (descType == 0 || descType == 1 || descType == 2)) {
-                VkDescriptorSet hostSet = lookup(descriptorSets_, dstSetId);
-                fprintf(stderr, "[Decoder] DescBind: dstSet=%llu(%p) bind=%u arr=%u type=%u iv=%llu(%p) layout=%u sam=%llu(%p)\n",
-                        (unsigned long long)dstSetId, (void*)hostSet,
-                        dstBinding, dstArrayElem + j,
-                        descType, (unsigned long long)ivId, (void*)allImageInfos[i][j].imageView,
-                        imgLayout,
-                        (unsigned long long)samId, (void*)allImageInfos[i][j].sampler);
+            if (descLog < 20 && (descType == 0 || descType == 1 || descType == 2)) {
+                fprintf(stderr, "[Decoder] DescBind: dstSet=%llu bind=%u arr=%u type=%u iv=%llu sam=%llu\n",
+                        (unsigned long long)dstSetId, dstBinding, dstArrayElem + j,
+                        descType, (unsigned long long)ivId, (unsigned long long)samId);
                 descLog++;
             }
         }
@@ -674,14 +734,11 @@ void VnDecoder::handleCmdBindDescriptorSets(VnStreamReader& r) {
     VkPipelineLayout layout = lookup(pipelineLayouts_, layoutId);
     if (!cb || !layout) return;
 
-    // Log descriptor set bindings
+    // Log descriptor set bindings (startup only — hot path, keep quiet)
     static int dsLog = 0;
-    if (dsLog < 50000) {
-        fprintf(stderr, "[Decoder] BindDescSets: cb=%llu bp=%u first=%u count=%u",
+    if (dsLog < 5) {
+        fprintf(stderr, "[Decoder] BindDescSets: cb=%llu bp=%u first=%u count=%u\n",
                 (unsigned long long)cbId, bindPoint, firstSet, setCount);
-        for (uint32_t i = 0; i < setCount; i++)
-            fprintf(stderr, " set[%u]=%p", firstSet + i, (void*)sets[i]);
-        fprintf(stderr, "\n");
         dsLog++;
     }
 
@@ -813,9 +870,6 @@ void VnDecoder::handleBindBufferMemory(VnStreamReader& r) {
             pendingBdaResults_.push_back({bufferId, addr});
             // Track for replay BDA patching: buf → replay GPU address
             replayBdaByBufferId_[bufferId] = (uint64_t)addr;
-            fprintf(stderr, "[AutoBDA] buf=%llu mem=%llu off=%llu -> GPU addr=0x%llx\n",
-                    (unsigned long long)bufferId, (unsigned long long)memoryId,
-                    (unsigned long long)offset, (unsigned long long)addr);
         }
     }
 }
@@ -845,8 +899,6 @@ void VnDecoder::handleCmdClearAttachments(VnStreamReader& r) {
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     if (!cb) return;
     vkCmdClearAttachments(cb, attachCount, attachments.data(), rectCount, rects.data());
-    fprintf(stderr, "[Decoder] ClearAttachments: cb=%p attachments=%u rects=%u\n",
-            (void*)cb, attachCount, rectCount);
 }
 
 void VnDecoder::handleCmdClearColorImage(VnStreamReader& r) {
@@ -865,8 +917,6 @@ void VnDecoder::handleCmdClearColorImage(VnStreamReader& r) {
     range.levelCount = 1;
     range.layerCount = 1;
     vkCmdClearColorImage(cb, img, static_cast<VkImageLayout>(layout), &clearColor, 1, &range);
-    fprintf(stderr, "[Decoder] ClearColorImage: img=%p color=(%.2f,%.2f,%.2f,%.2f)\n",
-            (void*)img, cr, cg, cb_, ca);
 }
 
 // ── Destroy / Free handlers ──────────────────────────────────────────────────
@@ -906,6 +956,12 @@ void VnDecoder::handleFreeMemory(VnStreamReader& r) {
     VkDeviceMemory mem = lookup(deviceMemories_, memId);
     if (mem) {
         deviceMemories_.erase(memId);
+        // Unmap persistent map before freeing (must unmap before vkFreeMemory).
+        auto mapIt = persistentMaps_.find(memId);
+        if (mapIt != persistentMaps_.end()) {
+            vkUnmapMemory(device_, mem);
+            persistentMaps_.erase(mapIt);
+        }
         pendingDestroys_.push_back([this, mem]() { vkFreeMemory(device_, mem, nullptr); });
     }
 }
@@ -923,9 +979,11 @@ void VnDecoder::handleWriteMemory(VnStreamReader& r) {
     // In most cases the fence is already signaled (TCP round-trip gives GPU time),
     // so this wait is effectively free and only blocks when GPU is truly behind.
     if (lastBatchWaitPending_ && lastBatchFence_ != VK_NULL_HANDLE) {
+        auto _fenceT0 = rtNowUs();
         VkResult wr = vkWaitForFences(device_, 1, &lastBatchFence_, VK_TRUE, 5000000000ULL);
-        if (wr != VK_SUCCESS)
-            fprintf(stderr, "[Decoder] batch fence wait failed: %d\n", (int)wr);
+        auto _fenceMs = (rtNowUs() - _fenceT0) / 1000.0;
+        if (_fenceMs > 1.0 || wr != VK_SUCCESS)
+            fprintf(stderr, "[Decoder] batchFenceWait: %.2fms result=%d\n", _fenceMs, (int)wr);
         lastBatchWaitPending_ = false;
     }
 
@@ -934,27 +992,25 @@ void VnDecoder::handleWriteMemory(VnStreamReader& r) {
         r.skip(size);
         return;
     }
-    void* mapped = nullptr;
-    VkResult vr = vkMapMemory(device_, mem, offset, size, 0, &mapped);
-    if (vr != VK_SUCCESS) {
-        r.skip(size);
-        fprintf(stderr, "[Decoder] WriteMemory: MapMemory failed for mem=%llu result=%d\n",
-                (unsigned long long)memId, (int)vr);
-        return;
-    }
-    r.readBytes(mapped, size);
-    // For large writes (likely textures), log first 4 pixels to detect all-zero data
-    if (size >= 1024*1024) {
-        auto* b = static_cast<uint8_t*>(mapped);
-        bool allZero = true;
-        for (uint32_t k = 0; k < std::min(size, 64u); k++) if (b[k]) { allZero = false; break; }
-        fprintf(stderr, "[Decoder] WriteMemory: mem=%llu off=%llu size=%u px0=(%u,%u,%u,%u) %s\n",
-                (unsigned long long)memId, (unsigned long long)offset, size,
-                b[0], b[1], b[2], b[3], allZero ? "ALL_ZERO" : "HAS_DATA");
+
+    // Persistent mapping: keep memory mapped across WriteMemory calls to avoid
+    // vkMapMemory/vkUnmapMemory overhead (was the dominant cost at ~34MB/s for 45MB batches).
+    void* basePtr = nullptr;
+    auto mapIt = persistentMaps_.find(memId);
+    if (mapIt != persistentMaps_.end()) {
+        basePtr = mapIt->second;
     } else {
-        fprintf(stderr, "[Decoder] WriteMemory: mem=%llu off=%llu size=%u\n",
-                (unsigned long long)memId, (unsigned long long)offset, size);
+        VkResult vr = vkMapMemory(device_, mem, 0, VK_WHOLE_SIZE, 0, &basePtr);
+        if (vr != VK_SUCCESS) {
+            r.skip(size);
+            fprintf(stderr, "[Decoder] WriteMemory: MapMemory failed for mem=%llu result=%d\n",
+                    (unsigned long long)memId, (int)vr);
+            return;
+        }
+        persistentMaps_[memId] = basePtr;
     }
+    void* mapped = static_cast<uint8_t*>(basePtr) + offset;
+    r.readBytes(mapped, size);
     // BDA patching: replace live GPU addresses (from live recording session) with
     // current replay GPU addresses. Only active once RecordBDA commands populate
     // liveBdaToReplayBda_. Scans every 8-byte-aligned position in the write payload.
@@ -971,24 +1027,22 @@ void VnDecoder::handleWriteMemory(VnStreamReader& r) {
                 patchCount++;
             }
         }
-        if (patchCount > 0) {
+        static int bdaPatchLog = 0;
+        if (patchCount > 0 && bdaPatchLog++ < 50) {
             fprintf(stderr, "[BDA-PATCH] mem=%llu off=%llu size=%u: patched %u addr(s)\n",
                     (unsigned long long)memId, (unsigned long long)offset, size, patchCount);
         }
     }
-    vkUnmapMemory(device_, mem);
+    // No vkUnmapMemory: memory stays mapped for future writes (released in handleFreeMemory).
 }
 
 // Strip pipeline stage bits that require device features the Host GPU may not
 // have enabled.  This is a defensive filter — the ICD should not report these
 // features, but old command recordings or edge cases might still have them.
 static uint32_t sanitizePipelineStageFlags(uint32_t flags) {
-    // Remove geometry/tessellation stage bits — the ICD no longer advertises
-    // these features, but guard against stale streams or future mismatches.
-    flags &= ~(uint32_t)VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT;
-    flags &= ~(uint32_t)VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT;
-    flags &= ~(uint32_t)VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT;
-    // If stripping bits leaves the mask empty, use a safe fallback
+    // ICD now advertises geometryShader=TRUE and tessellationShader=TRUE,
+    // so DXVK may legitimately emit those stage bits — do not strip them.
+    // Only guard against a fully-zero mask (shouldn't happen, but be safe).
     if (flags == 0)
         flags = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     return flags;
@@ -1017,9 +1071,6 @@ void VnDecoder::handleCmdPipelineBarrier(VnStreamReader& r) {
         // in a different order than they execute on GPU (e.g., init barrier CBs
         // recorded after main CB in stream, but submitted first on GPU).
         imageLayouts_[imgId] = static_cast<VkImageLayout>(newLayout);
-        // Log all layout transitions (with CB info)
-        fprintf(stderr, "[Decoder] Barrier: cb=%llu img=%llu old=%u new=%u\n",
-                (unsigned long long)cbId, (unsigned long long)imgId, oldLayout, newLayout);
         barriers[i].oldLayout = static_cast<VkImageLayout>(oldLayout);  // trust DXVK
         barriers[i].newLayout = static_cast<VkImageLayout>(newLayout);
         barriers[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -1366,8 +1417,9 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
             (void*)pInfo.layout, (void*)(stages[0].module), (void*)(stageCount>1?stages[1].module:VK_NULL_HANDLE),
             (void*)pInfo.pDynamicState, (void*)pInfo.pRasterizationState);
     VkPipeline pipeline;
+    auto _pipeT0 = rtNowUs();
     VkResult vr = vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pInfo, nullptr, &pipeline);
-    fprintf(stderr, "[Decoder] CreatePipeline result=%d\n", (int)vr);
+    fprintf(stderr, "[Decoder] CreatePipeline result=%d time=%.2fms\n", (int)vr, (rtNowUs()-_pipeT0)/1000.0);
     if (vr != VK_SUCCESS) {
         store(pipelines_, pipelineId, (VkPipeline)VK_NULL_HANDLE);
         return;
@@ -1496,8 +1548,6 @@ void VnDecoder::handleBeginCommandBuffer(VnStreamReader& r) {
     VkCommandBufferBeginInfo info{};
     info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     VkResult beginRes = vkBeginCommandBuffer(cb, &info);
-    fprintf(stderr, "[Decoder] BeginCB: cbId=0x%llx cb=%p result=%d\n",
-            (unsigned long long)cbId, (void*)cb, (int)beginRes);
     if (beginRes != VK_SUCCESS) { error_ = true; return; }
 
     // Global memory barrier at start of every CB recording.
@@ -1519,9 +1569,6 @@ void VnDecoder::handleEndCommandBuffer(VnStreamReader& r) {
     uint64_t cbId = r.readU64();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     VkResult vr = vkEndCommandBuffer(cb);
-    fprintf(stderr, "[Decoder] EndCB: cbId=0x%llx cb=%p result=%d\n",
-            (unsigned long long)cbId, (void*)cb, (int)vr);
-    fflush(stderr);
     if (vr != VK_SUCCESS) { error_ = true; }
 }
 
@@ -1602,8 +1649,6 @@ void VnDecoder::handleCmdBeginRendering(VnStreamReader& r) {
 
     if (imageViewId != 0) {
         targetView = lookup(imageViews_, imageViewId);
-        fprintf(stderr, "[Decoder] BeginRendering lookup: ivId=%llu -> view=%p (map size=%zu)\n",
-                (unsigned long long)imageViewId, (void*)targetView, imageViews_.size());
     }
     // Only redirect to swapchain when the target is the swapchain itself
     // (imageViewId=0, i.e. DXVK's present/blit pass targeting the swapchain backbuffer).
@@ -1686,11 +1731,6 @@ void VnDecoder::handleCmdBeginRendering(VnStreamReader& r) {
             0, 0, nullptr, 0, nullptr, 1, &barrier);
     }
 
-    fprintf(stderr, "[Decoder] BeginRendering: cb=%p view=%p (ivId=%llu %s) area=%u,%u,%ux%u load=%u depth=%u clear=(%.2f,%.2f,%.2f,%.2f)\n",
-            (void*)cb, (void*)targetView, (unsigned long long)imageViewId,
-            isSwapchain ? "swapchain" : "internal", areaX, areaY, clampedW, clampedH, loadOp, hasDepth,
-            cr, cg, cb_, ca);
-    fflush(stderr);
     vkCmdBeginRendering(cb, &renderingInfo);
 
     // Removed — DXVK sets viewport/scissor via dynamic state commands
@@ -1716,10 +1756,6 @@ void VnDecoder::handleCmdEndRendering(VnStreamReader& r) {
     bool isSwapchainCB = it->second;
     cbIsSwapchain_.erase(it);  // erase (not reset to false) to prevent spurious second call
 
-    fprintf(stderr, "[Decoder] EndRendering: cbId=0x%llx cb=%p swapchain=%d imgIdx=%u\n",
-            (unsigned long long)cbId, (void*)cb, (int)isSwapchainCB,
-            getFirstSwapchain() ? getFirstSwapchain()->currentImageIndex : 999);
-    fflush(stderr);
     vkCmdEndRendering(cb);
     // DXVK sends its own vkCmdPipelineBarrier2 in the command stream to transition
     // the swapchain image COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR before QueuePresent.
@@ -1748,7 +1784,6 @@ void VnDecoder::handleCmdSetViewport(VnStreamReader& r) {
     vp.x = r.readF32(); vp.y = r.readF32();
     vp.width = r.readF32(); vp.height = r.readF32();
     vp.minDepth = r.readF32(); vp.maxDepth = r.readF32();
-    fprintf(stderr, "[Decoder] SetViewport: x=%.1f y=%.1f w=%.1f h=%.1f\n", vp.x, vp.y, vp.width, vp.height);
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     if (!cb) return;
     // Use WithCount — pipeline declares VIEWPORT_WITH_COUNT for dynamic rendering
@@ -1763,10 +1798,6 @@ void VnDecoder::handleCmdSetScissor(VnStreamReader& r) {
     VkRect2D sc;
     sc.offset.x = r.readI32(); sc.offset.y = r.readI32();
     sc.extent.width = r.readU32(); sc.extent.height = r.readU32();
-    static int scLog = 0;
-    if (scLog++ < 5)
-        fprintf(stderr, "[Decoder] SetScissor: cb=%llu (%d,%d,%u,%u)\n",
-                (unsigned long long)cbId, sc.offset.x, sc.offset.y, sc.extent.width, sc.extent.height);
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     if (!cb) return;
     // Use WithCount — pipeline declares SCISSOR_WITH_COUNT for dynamic rendering
@@ -1780,10 +1811,6 @@ void VnDecoder::handleCmdSetCullMode(VnStreamReader& r) {
     uint64_t cbId = r.readU64();
     uint32_t cullMode = r.readU32();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
-    static int cullLog = 0;
-    if (cullLog++ < 5)
-        fprintf(stderr, "[Decoder] SetCullMode: cb=%llu mode=%u (0=NONE,1=FRONT,2=BACK)\n",
-                (unsigned long long)cbId, cullMode);
     if (cb) vkCmdSetCullMode(cb, static_cast<VkCullModeFlags>(cullMode));
 }
 
@@ -1805,10 +1832,6 @@ void VnDecoder::handleCmdSetDepthTestEnable(VnStreamReader& r) {
     uint64_t cbId = r.readU64();
     uint32_t enable = r.readU32();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
-    static int dtLog = 0;
-    if (dtLog++ < 5)
-        fprintf(stderr, "[Decoder] SetDepthTestEnable: cb=%llu enable=%u\n",
-                (unsigned long long)cbId, enable);
     if (cb) vkCmdSetDepthTestEnable(cb, enable);
 }
 
@@ -1823,10 +1846,6 @@ void VnDecoder::handleCmdSetDepthCompareOp(VnStreamReader& r) {
     uint64_t cbId = r.readU64();
     uint32_t compareOp = r.readU32();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
-    static int depthLog = 0;
-    if (depthLog++ < 5)
-        fprintf(stderr, "[Decoder] SetDepthCompareOp: cb=%llu op=%u\n",
-                (unsigned long long)cbId, compareOp);
     if (cb) vkCmdSetDepthCompareOp(cb, static_cast<VkCompareOp>(compareOp));
 }
 
@@ -1860,17 +1879,6 @@ void VnDecoder::handleCmdBindVertexBuffers(VnStreamReader& r) {
     }
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     if (!cb) return;
-    static int vbLog = 0;
-    if (vbLog < 5000) {
-        fprintf(stderr, "[Decoder] BindVB: first=%u count=%u hasStrides=%d",
-                firstBinding, bindingCount, (int)hasStrides);
-        for (uint32_t i = 0; i < bindingCount; i++)
-            fprintf(stderr, " [%u: buf=%p off=%llu sz=%llu stride=%llu]", i,
-                    (void*)buffers[i], (unsigned long long)offsets[i],
-                    (unsigned long long)sizes[i], (unsigned long long)strides[i]);
-        fprintf(stderr, "\n");
-        vbLog++;
-    }
     if (hasStrides) {
         vkCmdBindVertexBuffers2(cb, firstBinding, bindingCount,
             buffers.data(), offsets.data(), sizes.data(), strides.data());
@@ -1886,9 +1894,6 @@ void VnDecoder::handleCmdBindIndexBuffer(VnStreamReader& r) {
     uint32_t indexType = r.readU32();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     VkBuffer buf = lookup(buffers_, bufId);
-    fprintf(stderr, "[Decoder] BindIndexBuffer: cbId=%llu bufId=%llu buf=%p off=%llu type=%u\n",
-            (unsigned long long)cbId, (unsigned long long)bufId, (void*)buf,
-            (unsigned long long)offset, indexType);
     if (!cb || !buf) return;
     vkCmdBindIndexBuffer(cb, buf, offset, static_cast<VkIndexType>(indexType));
 }
@@ -1900,16 +1905,7 @@ void VnDecoder::handleCmdDrawIndexed(VnStreamReader& r) {
     int32_t vertexOffset = r.readI32();
     uint32_t firstInstance = r.readU32();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
-    if (!cb || !activeRendering_) {
-        static int diSkip = 0;
-        if (diSkip++ < 5)
-            fprintf(stderr, "[Decoder] DrawIndexed SKIP: cb=%p active=%d\n", (void*)cb, (int)activeRendering_);
-        return;
-    }
-    static int diLog = 0;
-    if (diLog++ < 5000)
-        fprintf(stderr, "[Decoder] DrawIndexed: cb=%p idx=%u inst=%u first=%u vtxOff=%d swapchain=%d\n",
-                (void*)cb, indexCount, instanceCount, firstIndex, vertexOffset, (int)activeRenderingIsSwapchain_);
+    if (!cb || !activeRendering_) return;
     vkCmdDrawIndexed(cb, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 }
 
@@ -2124,7 +2120,7 @@ void VnDecoder::handleCmdCopyBufferToImage(VnStreamReader& r) {
     VkBuffer srcBuf = lookup(buffers_, srcBufId);
     VkImage dstImg = lookup(images_, dstImgId);
     static int copyLog = 0;
-    if (copyLog < 5 || (regionCount > 0 && regions[0].imageExtent.width > 100)) {
+    if (copyLog < 30) {
         copyLog++;
         fprintf(stderr, "[Decoder] CopyBufToImg: cb=%llu(%p) srcBuf=%llu(%p) dstImg=%llu(%p) regions=%u %ux%u dstLayout=%u bufOff=%llu\n",
                 (unsigned long long)cbId, (void*)cb,
@@ -2262,11 +2258,7 @@ void VnDecoder::handleCmdDraw(VnStreamReader& r) {
     uint32_t firstVertex = r.readU32();
     uint32_t firstInstance = r.readU32();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
-    if (!cb || !activeRendering_) {
-        fprintf(stderr, "[Decoder] Draw SKIP: cb=%p activeRendering=%d\n", (void*)cb, (int)activeRendering_);
-        return;
-    }
-    fprintf(stderr, "[Decoder] Draw: verts=%u instances=%u\n", vertexCount, instanceCount);
+    if (!cb || !activeRendering_) return;
     vkCmdDraw(cb, vertexCount, instanceCount, firstVertex, firstInstance);
 }
 
@@ -2345,9 +2337,6 @@ void VnDecoder::flushPendingSubmits(VkSemaphore waitSem, VkSemaphore sigSem, VkF
     // Allocate one batch fence to cover all CBs in this submit.
     VkFence batchFence = allocateFence();
     VkResult result = vkQueueSubmit(graphicsQueue_, 1, &info, batchFence);
-    fprintf(stderr, "[Decoder] BatchSubmit: cbs=%zu waitSem=%p sigSem=%p fence=%p result=%d\n",
-            cbs.size(), (void*)waitSem, (void*)sigSem, (void*)batchFence, (int)result);
-    fflush(stderr);
     if (result != VK_SUCCESS) {
         fprintf(stderr, "[Decoder] BatchSubmit FAILED!\n");
         error_ = true;
@@ -2390,12 +2379,6 @@ void VnDecoder::handleQueueSubmit(VnStreamReader& r) {
     VkSemaphore sigSem = lookup(semaphores_, signalSemId);
     VkFence fence = lookup(fences_, fenceId);
 
-    fprintf(stderr, "[Decoder] QueueSubmit: cb=%llu->%p waitSem=%llu sigSem=%llu fence=%llu\n",
-            (unsigned long long)cbId, (void*)cb,
-            (unsigned long long)waitSemId, (unsigned long long)signalSemId,
-            (unsigned long long)fenceId);
-    fflush(stderr);
-
     // Semaphore signal tracking: mark sigSem as pending-signal so future waitSem can proceed.
     if (signalSemId != 0)
         semPendingSignal_.insert(signalSemId);
@@ -2406,10 +2389,7 @@ void VnDecoder::handleQueueSubmit(VnStreamReader& r) {
     // Skip the wait to avoid GPU stalls.
     if (waitSemId != 0 && waitSem != VK_NULL_HANDLE) {
         if (semPendingSignal_.count(waitSemId) == 0) {
-            fprintf(stderr, "[Decoder] QueueSubmit: SKIP waitSem=%llu (never signaled, would deadlock)\n",
-                    (unsigned long long)waitSemId);
-            fflush(stderr);
-            waitSem = VK_NULL_HANDLE;  // suppress the wait
+            waitSem = VK_NULL_HANDLE;  // suppress the wait — semaphore was never signaled
             waitSemId = 0;
         } else {
             semPendingSignal_.erase(waitSemId);  // consumed
@@ -2446,13 +2426,6 @@ void VnDecoder::handleWaitForFences(VnStreamReader& r) {
     (void)deviceId;
     // Remove null fences (unknown IDs)
     fences.erase(std::remove(fences.begin(), fences.end(), VK_NULL_HANDLE), fences.end());
-    fprintf(stderr, "[Decoder] WaitForFences: count=%u valid=%zu fencePtrs=[",
-            fenceCount, fences.size(), waitAll, (unsigned long long)timeout);
-    // Re-read fence IDs for logging (we already consumed them, so log the VkFence pointers)
-    for (size_t i = 0; i < fences.size(); i++)
-        fprintf(stderr, "%s%p", i ? "," : "", (void*)fences[i]);
-    fprintf(stderr, "]\n");
-    fflush(stderr);
     if (!fences.empty()) {
         // Cap timeout to 5s in replay mode to prevent infinite GPU deadlock hangs.
         // In live mode the guest drives the pace; in replay the GPU may deadlock
@@ -2571,10 +2544,6 @@ void VnDecoder::handleBridgeAcquireNextImage(VnStreamReader& r) {
     // Mark semaphore as pending-signal (presentation engine will signal it when image is available)
     if (semId != 0)
         semPendingSignal_.insert(semId);
-    fprintf(stderr, "[Decoder] AcquireNextImage: sc=%llu semId=%llu sem=%p imgIdx=%u result=%d\n",
-            (unsigned long long)scId, (unsigned long long)semId,
-            (void*)sem, it->second.currentImageIndex, (int)res);
-    fflush(stderr);
 }
 
 void VnDecoder::handleBridgeQueuePresent(VnStreamReader& r) {
@@ -2585,8 +2554,6 @@ void VnDecoder::handleBridgeQueuePresent(VnStreamReader& r) {
     // Defer present to end of batch — the corresponding QueueSubmit may come later
     // in the stream due to multi-threaded encoding in the ICD.
     pendingPresents_.push_back({queueId, scId, waitSemId});
-    fprintf(stderr, "[Decoder] Present DEFERRED: sc=%llu waitSem=%llu (will flush at batch end)\n",
-            (unsigned long long)scId, (unsigned long long)waitSemId);
 }
 
 void VnDecoder::handleGetBufferDeviceAddress(VnStreamReader& r) {
@@ -2602,8 +2569,6 @@ void VnDecoder::handleGetBufferDeviceAddress(VnStreamReader& r) {
         info.buffer = buf;
         addr = vkGetBufferDeviceAddress(device_, &info);
     }
-    fprintf(stderr, "[Decoder] GetBufferDeviceAddress: id=%llu buf=%p addr=0x%llx\n",
-            (unsigned long long)bufferId, (void*)buf, (unsigned long long)addr);
     pendingBdaResults_.push_back({bufferId, addr});
 }
 
@@ -2777,6 +2742,13 @@ void VnDecoder::cleanup() {
     for (auto& [id, iv] : imageViews_)
         if (scViews.find(iv) == scViews.end()) vkDestroyImageView(device_, iv, nullptr);
     for (auto& [id, img] : images_) vkDestroyImage(device_, img, nullptr);
+    // Unmap all persistently mapped memories before freeing them.
+    for (auto& [id, ptr] : persistentMaps_) {
+        auto it = deviceMemories_.find(id);
+        if (it != deviceMemories_.end())
+            vkUnmapMemory(device_, it->second);
+    }
+    persistentMaps_.clear();
     for (auto& [id, mem] : deviceMemories_) vkFreeMemory(device_, mem, nullptr);
     for (auto& [id, m] : shaderModules_) vkDestroyShaderModule(device_, m, nullptr);
     for (auto& [id, fb] : framebuffers_) vkDestroyFramebuffer(device_, fb, nullptr);

@@ -1125,9 +1125,6 @@ static void VKAPI_CALL icd_vkCmdBindVertexBuffers2(VkCommandBuffer cb, uint32_t 
         offs[i] = pOffsets[i];
         szs[i] = pSizes ? pSizes[i] : VK_WHOLE_SIZE;
         strs[i] = pStrides ? pStrides[i] : 0;
-        // Flush vertex data: large sub-allocated buffers bypass dirty tracking
-        VkDeviceSize flushSz = (pSizes && pSizes[i] != VK_WHOLE_SIZE) ? pSizes[i] : (16u << 20);
-        g_icd.flushBufferRange((uint64_t)pBuffers[i], pOffsets[i], flushSz);
     }
     g_icd.encoder.cmdBindVertexBuffers(toId(cb), firstBinding, bindingCount,
         ids.data(), offs.data(), szs.data(), strs.data());
@@ -1420,6 +1417,11 @@ static VkResult VKAPI_CALL icd_vkAcquireNextImageKHR(
     g_icd.acquireCV_.wait_for(lock, waitMs, []{ return g_icd.imageIndexReady_; });
     *pIndex = g_icd.currentImageIndex;
     g_icd.imageIndexReady_ = false;
+    // Clear per-frame buffer flush dedup set: new frame starts, buffers may be updated.
+    {
+        std::lock_guard<std::mutex> lk(g_icd.flushedBuffersMutex_);
+        g_icd.flushedBuffersThisFrame_.clear();
+    }
     return VK_SUCCESS;
 }
 
@@ -2220,18 +2222,18 @@ static void VKAPI_CALL icd_vkCmdBindVertexBuffers(VkCommandBuffer cb, uint32_t f
     std::vector<uint64_t> ids(bindingCount), offs(bindingCount);
     for (uint32_t i = 0; i < bindingCount; i++) {
         ids[i] = (uint64_t)pBuffers[i]; offs[i] = pOffsets[i];
-        g_icd.flushBufferRange((uint64_t)pBuffers[i], pOffsets[i], 16u << 20);
     }
+    // No explicit flush: dirty tracking (GetWriteWatch in flushMappedMemory at QueueSubmit time)
+    // captures all writes. WriteMemory is sent before BatchSubmit, so GPU reads correct data.
     g_icd.encoder.cmdBindVertexBuffers(toId(cb), firstBinding, bindingCount,
         ids.data(), offs.data(), nullptr, nullptr);
 }
 static void VKAPI_CALL icd_vkCmdBindIndexBuffer(VkCommandBuffer cb, VkBuffer buf, VkDeviceSize offset, VkIndexType indexType) {
-    g_icd.flushBufferRange((uint64_t)buf, offset, 512u << 10); // flush 512KB of index data
+    // No explicit flush: dirty tracking handles this.
     g_icd.encoder.cmdBindIndexBuffer(toId(cb), (uint64_t)buf, offset, indexType);
 }
 static void VKAPI_CALL icd_vkCmdBindIndexBuffer2(VkCommandBuffer cb, VkBuffer buf, VkDeviceSize offset, VkDeviceSize size, VkIndexType indexType) {
-    VkDeviceSize flushSz = (size != VK_WHOLE_SIZE) ? size : (512u << 10);
-    g_icd.flushBufferRange((uint64_t)buf, offset, flushSz);
+    // No explicit flush: dirty tracking handles this.
     g_icd.encoder.cmdBindIndexBuffer(toId(cb), (uint64_t)buf, offset, indexType);
 }
 static void VKAPI_CALL icd_vkCmdDrawIndexed(VkCommandBuffer cb, uint32_t indexCount, uint32_t instanceCount,
