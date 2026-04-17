@@ -10,13 +10,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目状态
 
-**阶段一 M1.5 完成** — 深度测试 + 多物体 + alpha blend + codegen Stage 3。
+**阶段一 M1.6 基本完成** — 真实 Unity 游戏 (SortTheCourt) 通过完整链路 60 FPS 可玩运行。
 
 已完成里程碑：
 - M1.2：DX11 静态三角形通过 DXVK → ICD → TCP → Host Vulkan 完整链路渲染 ✓
 - M1.3：变色动画三角形（cbuffer 传 time 值 + HSV 色环 shader）✓
 - M1.4：纹理三角形渲染（vertex buffer + texture + sampler 全链路）✓
 - M1.5：深度测试 + 多物体 + alpha blend + blend state 切换 + codegen Stage 3 ✓
+- M1.6：SortTheCourt (Unity 5.3, 32-bit) 60 FPS 可玩 + UltraKill 画面渲染正常 ✓
 
 已完成功能：
 - ICD 代理框架（Vulkan 1.3, Features2, 60+ 扩展）
@@ -44,24 +45,36 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 32-bit ICD 构建支持（build32 目录，PE32 游戏可加载）
 - 画面回传（Host→Guest LZ4 压缩帧 + GDI StretchDIBits 贴图）
 - 大 mapped memory 传输（descriptor heap 等 16MB+ 区域全量 flush）
+- 性能优化：双缓冲 readback + 异步 LZ4 压缩 + GDI 限速 60 FPS
+- 性能修复：删除 icd_vkCmdBindVertexBuffers2 的 explicit flush（44MB→270KB/帧）
+- 性能修复：删除 decoder 热路径 fprintf（800ms→9ms 批次解码）
 
-当前状态（M1.6 进行中）：
-- **SortTheCourt（Unity 5.3 真实游戏）在 Host 窗口正确渲染** ✓
-- BDA (BufferDeviceAddress) 地址转发：ICD 向 Host 同步查询真实 GPU 地址
-- 32-bit ICD 支持（build32 目录，SortTheCourt 等 32-bit 游戏需要）
-- 画面回传：Host→Guest LZ4 压缩帧回传 + GDI 贴图已工作
-- 大 mapped memory flush（16MB descriptor heap 全量传输，待优化为增量）
+当前状态（M1.6 完成）：
+- **SortTheCourt（Unity 5.3, 32-bit）Host 窗口 + Guest 回传 60 FPS 可玩** ✓
+- **UltraKill（Unity, 64-bit）Loading screen ~60 FPS，实际游玩 ~20 FPS，有零星渲染错误** ⚠️
 - 既有测试用例全部通过（dx11_triangle, dx11_depth_test, dx11_multi_blend）
 
-已完成里程碑：
-- M1.5：深度测试 + 多物体 + alpha blend + codegen Stage 3 ✓
-- M1.6 部分：真实游戏画面渲染 + 画面回传 ✓
+## 性能状态（重要）
 
-M1.6 剩余目标：
-- Mapped memory 增量传输（dirty tracking，当前 16MB 全量 flush 性能差）
+**SortTheCourt 稳定帧率：60-67 FPS**（受限于显示器刷新率）
+- 批次大小：加载期 29-44MB（纹理上传，正常），稳定期 ~270KB/帧
+- Host 解码时间：稳定期 ~9ms/帧
+- 两个已解决的性能陷阱：
+  1. `icd_vkCmdBindVertexBuffers2` explicit flush：每次 BindVB 触发 4MB WriteMemory，11 次/帧 = 44MB 无效流量
+  2. decoder 热路径 fprintf：每批 400+ 次 fprintf 通过 delegate-runner pipe 产生阻塞，WM dispatch 膨胀 ~93ms
+
+## Decoder 调试日志说明
+
+- 热路径 fprintf 已删除（BarrierDrawIndexedBindVB 等），默认静默
+- 编译时加 `-DVBOXGPU_VERBOSE` 可开启所有日志（仅调试用，会严重影响性能）
+- 批次级 profiling 日志（`[Batch#]` + `[type=0x...]`）保留，仅对 >1MB 批次输出
+- 错误路径日志（`FAILED`、`SKIP` 等）始终保留
+
+M1.7 / 后续目标：
 - Stencil test 支持
 - Mipmap 支持
 - 多 Render Target (MRT)
+- Mapped memory 增量传输（dirty tracking，当前全量 flush 可以满足正确性）
 - 更多游戏兼容性测试
 
 ## 架构要点
