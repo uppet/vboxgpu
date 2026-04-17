@@ -120,6 +120,12 @@ struct IcdState {
     // BDA recording: buffer IDs already emitted via RecordBDA (deduplication)
     std::unordered_set<uint64_t> bdaRecorded_;
 
+    // Per-frame vertex/index buffer flush dedup: prevents sending same buffer data
+    // multiple times per frame when the same buffer is bound on every draw call.
+    // Cleared at AcquireNextImageKHR (start of next frame).
+    std::unordered_set<uint64_t> flushedBuffersThisFrame_;
+    std::mutex flushedBuffersMutex_;
+
     // GDI blit rate limiter: blit is driven by recv thread (actual rendered frames).
     // Cap at 60 FPS to avoid GDI saturation when game runs very fast.
     static constexpr int BLIT_INTERVAL_MS = 16;
