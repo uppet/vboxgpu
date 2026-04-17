@@ -736,12 +736,37 @@ static void VKAPI_CALL icd_vkGetPhysicalDeviceFeatures2(VkPhysicalDevice pd, VkP
         // Note: hostImageCopy feature kept TRUE (DXVK requires it for Vulkan 1.4).
         // The actual vkCopyMemoryToImage functions return nullptr via nullPrefixes,
         // forcing DXVK to fallback to CmdCopyBufferToImage at runtime.
-        // Verify critical feature
+
+        // --- Disable dangerous features in pNext structs (matching physDeviceFeatures) ---
+        // These must be consistent with the base VkPhysicalDeviceFeatures we report.
         if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES) {
             auto* f = reinterpret_cast<VkPhysicalDeviceVulkan11Features*>(next);
+            // shaderDrawParameters: keep TRUE (DXVK needs it)
             fprintf(stderr, "[ICD]   vk11.shaderDrawParameters=%d\n", (int)f->shaderDrawParameters);
             fflush(stderr);
         }
+        if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES) {
+            auto* f = reinterpret_cast<VkPhysicalDeviceVulkan12Features*>(next);
+            // Vk12 has shaderFloat16/shaderInt8 etc — keep those TRUE.
+            // But disable shaderOutputLayer if geometry shader is off
+            // (shaderOutputLayer requires geometry shader or mesh shader).
+            // Actually Vk12 doesn't duplicate geometry/tessellation flags, so nothing extra here.
+            (void)f;
+        }
+
+        // VkPhysicalDeviceMeshShaderFeaturesEXT: disable if we report no GS
+        // (mesh shader is an alternative pipeline, not currently supported)
+        #ifdef VK_EXT_MESH_SHADER_EXTENSION_NAME
+        if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT) {
+            auto* f = reinterpret_cast<VkPhysicalDeviceMeshShaderFeaturesEXT*>(next);
+            f->taskShader = VK_FALSE;
+            f->meshShader = VK_FALSE;
+            f->multiviewMeshShader = VK_FALSE;
+            f->primitiveFragmentShadingRateMeshShader = VK_FALSE;
+            f->meshShaderQueries = VK_FALSE;
+        }
+        #endif
+
         next = next->pNext;
     }
     fprintf(stderr, "[ICD] vkGetPhysicalDeviceFeatures2 DONE\n"); fflush(stderr);
@@ -985,7 +1010,22 @@ static VkResult VKAPI_CALL icd_vkBindImageMemory2(VkDevice, uint32_t bindInfoCou
 }
 static VkDeviceAddress VKAPI_CALL icd_vkGetBufferDeviceAddress(VkDevice, const VkBufferDeviceAddressInfo* pInfo) {
     if (!pInfo || !pInfo->buffer) return 0;
-    return g_icd.syncGetBufferDeviceAddress((uint64_t)pInfo->buffer);
+    uint64_t bufferId = (uint64_t)pInfo->buffer;
+    VkDeviceAddress addr = g_icd.syncGetBufferDeviceAddress(bufferId);
+    // Emit RecordBDA once per buffer so replay can patch BDA values in WriteMemory payloads.
+    if (addr != 0) {
+        bool shouldEmit = false;
+        {
+            std::lock_guard<std::mutex> lk(g_icd.bdaMutex_);
+            if (!g_icd.bdaRecorded_.count(bufferId)) {
+                g_icd.bdaRecorded_.insert(bufferId);
+                shouldEmit = true;
+            }
+        }
+        if (shouldEmit)
+            g_icd.encoder.cmdBridgeRecordBDA(bufferId, (uint64_t)addr);
+    }
+    return addr;
 }
 static uint64_t VKAPI_CALL icd_vkGetBufferOpaqueCaptureAddress(VkDevice, const VkBufferDeviceAddressInfo*) { return 0; }
 static uint64_t VKAPI_CALL icd_vkGetDeviceMemoryOpaqueCaptureAddress(VkDevice, const VkDeviceMemoryOpaqueCaptureAddressInfo*) { return 0; }
@@ -1085,6 +1125,9 @@ static void VKAPI_CALL icd_vkCmdBindVertexBuffers2(VkCommandBuffer cb, uint32_t 
         offs[i] = pOffsets[i];
         szs[i] = pSizes ? pSizes[i] : VK_WHOLE_SIZE;
         strs[i] = pStrides ? pStrides[i] : 0;
+        // Flush vertex data: large sub-allocated buffers bypass dirty tracking
+        VkDeviceSize flushSz = (pSizes && pSizes[i] != VK_WHOLE_SIZE) ? pSizes[i] : (16u << 20);
+        g_icd.flushBufferRange((uint64_t)pBuffers[i], pOffsets[i], flushSz);
     }
     g_icd.encoder.cmdBindVertexBuffers(toId(cb), firstBinding, bindingCount,
         ids.data(), offs.data(), szs.data(), strs.data());
@@ -2175,15 +2218,20 @@ static void VKAPI_CALL icd_vkCmdBindDescriptorSets(VkCommandBuffer cb, VkPipelin
 static void VKAPI_CALL icd_vkCmdBindVertexBuffers(VkCommandBuffer cb, uint32_t firstBinding, uint32_t bindingCount,
     const VkBuffer* pBuffers, const VkDeviceSize* pOffsets) {
     std::vector<uint64_t> ids(bindingCount), offs(bindingCount);
-    for (uint32_t i = 0; i < bindingCount; i++) { ids[i] = (uint64_t)pBuffers[i]; offs[i] = pOffsets[i]; }
+    for (uint32_t i = 0; i < bindingCount; i++) {
+        ids[i] = (uint64_t)pBuffers[i]; offs[i] = pOffsets[i];
+        g_icd.flushBufferRange((uint64_t)pBuffers[i], pOffsets[i], 16u << 20);
+    }
     g_icd.encoder.cmdBindVertexBuffers(toId(cb), firstBinding, bindingCount,
         ids.data(), offs.data(), nullptr, nullptr);
 }
 static void VKAPI_CALL icd_vkCmdBindIndexBuffer(VkCommandBuffer cb, VkBuffer buf, VkDeviceSize offset, VkIndexType indexType) {
+    g_icd.flushBufferRange((uint64_t)buf, offset, 512u << 10); // flush 512KB of index data
     g_icd.encoder.cmdBindIndexBuffer(toId(cb), (uint64_t)buf, offset, indexType);
 }
 static void VKAPI_CALL icd_vkCmdBindIndexBuffer2(VkCommandBuffer cb, VkBuffer buf, VkDeviceSize offset, VkDeviceSize size, VkIndexType indexType) {
-    (void)size; // size parameter ignored — host uses full buffer
+    VkDeviceSize flushSz = (size != VK_WHOLE_SIZE) ? size : (512u << 10);
+    g_icd.flushBufferRange((uint64_t)buf, offset, flushSz);
     g_icd.encoder.cmdBindIndexBuffer(toId(cb), (uint64_t)buf, offset, indexType);
 }
 static void VKAPI_CALL icd_vkCmdDrawIndexed(VkCommandBuffer cb, uint32_t indexCount, uint32_t instanceCount,

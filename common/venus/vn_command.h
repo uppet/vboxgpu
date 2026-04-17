@@ -102,6 +102,7 @@ enum VnCommandType : uint32_t {
     VN_CMD_BRIDGE_GetBufferDeviceAddress   = 0x10004,  // sync query: host returns real GPU address
     VN_CMD_BRIDGE_TimingSeq                = 0x10005,  // roundtrip timing: [seqId(4)][guestTimestampUs(8)]
     VN_CMD_BRIDGE_CopyBufToImgInline       = 0x10006,  // CopyBufferToImage with inline pixel data (avoids staging overwrite)
+    VN_CMD_BRIDGE_RecordBDA                = 0x10007,  // record live BDA for replay patching: [bufId(8)][liveAddr(8)]
     VN_CMD_BRIDGE_EndOfStream              = 0x1FFFF,
 };
 

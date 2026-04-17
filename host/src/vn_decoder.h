@@ -13,6 +13,7 @@
 #include "../../common/timing.h"
 
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <functional>
 #include <string>
@@ -64,6 +65,10 @@ public:
     // Capture current swapchain image to a BMP file.
     // Returns true on success.
     bool captureScreenshot(const char* path);
+
+    // Debug: capture any VkImage to a BMP file (for diagnosing black frames).
+    void debugCaptureImage(VkImage img, VkFormat fmt, uint32_t w, uint32_t h,
+                           VkImageLayout currentLayout, const char* path);
 
     // Frame readback: last presented frame available for TCP return
     // Double-buffered: GPU copies frame N while CPU reads frame N-1
@@ -155,6 +160,7 @@ private:
     void handleBridgeAcquireNextImage(VnStreamReader& r);
     void handleBridgeQueuePresent(VnStreamReader& r);
     void handleGetBufferDeviceAddress(VnStreamReader& r);
+    void handleBridgeRecordBDA(VnStreamReader& r);
 
     // Handle maps: stream ID → real Vulkan object
     template<typename T>
@@ -178,6 +184,7 @@ private:
     std::unordered_map<uint64_t, VkBuffer> buffers_;
     std::unordered_map<uint64_t, VkImage> images_;
     std::unordered_map<uint64_t, VkFormat> imageFormats_; // image ID → format
+    std::unordered_map<uint64_t, VkImageLayout> imageLayouts_; // image ID → current layout on host
     std::unordered_map<uint64_t, VkDeviceMemory> deviceMemories_;
     std::unordered_map<uint64_t, VkSampler> samplers_;
     std::unordered_map<uint64_t, VkDescriptorPool> descriptorPools_;
@@ -194,6 +201,10 @@ private:
     std::unordered_map<uint64_t, HostSwapchain> swapchains_;
     bool activeRendering_ = false;
     bool activeRenderingIsSwapchain_ = false; // true if current render pass targets swapchain
+    // Per-CB swapchain tracking: cbId → true if that CB is currently in a swapchain render pass.
+    // Needed because multiple CBs may be recorded concurrently and interleave BeginRendering calls,
+    // making the single bool above unreliable.
+    std::unordered_map<uint64_t, bool> cbIsSwapchain_;
     VkSemaphore acquireSemaphore_ = VK_NULL_HANDLE; // for swapchain acquire sync
     VkFence acquireFence_ = VK_NULL_HANDLE;
     // Double-buffered readback fences: one per slot
@@ -215,6 +226,18 @@ private:
     };
     std::vector<PendingPresent> pendingPresents_;
     void flushPendingPresents();
+
+    // Pending submit batching: consecutive QueueSubmit calls with no semaphores/fences
+    // are collected and submitted together in a single vkQueueSubmit to preserve
+    // Vulkan-spec ordering (multiple CBs in same VkSubmitInfo execute in order).
+    struct PendingSubmitCB {
+        uint64_t cbId;
+        VkCommandBuffer cb;
+    };
+    std::vector<PendingSubmitCB> pendingSubmitCBs_;
+    // Flush all pending CBs in a single vkQueueSubmit, then clear the pending list.
+    // waitSem/sigSem/fence apply to the entire batch (the "last" submit's semaphores).
+    void flushPendingSubmits(VkSemaphore waitSem, VkSemaphore sigSem, VkFence userFence);
 
     // Deferred destroy: collect during batch, execute after GPU is idle
     std::vector<std::function<void()>> pendingDestroys_;
@@ -258,6 +281,19 @@ private:
     CopyStagingBuf copyStagingBuf_;
     VkDeviceSize copyStagingUsed_ = 0;  // arena offset: advances per copy, reset per batch
     bool ensureCopyStagingBuf(VkDeviceSize needed);
+    // Retired staging buffers: CBs spanning multiple batches may still reference old
+    // staging buffer handles after a REALLOC. Keep them alive until cleanup() to avoid
+    // GPU page faults when those CBs are finally submitted and executed.
+    std::vector<CopyStagingBuf> retiredStagingBufs_;
+
+    // Semaphore pending-signal tracking.
+    // Binary semaphores start unsignaled. They enter "pending-signal" state when:
+    //   (a) submitted as signalSemaphore in vkQueueSubmit, or
+    //   (b) passed to vkAcquireNextImageKHR (presentation engine will signal it).
+    // A QueueSubmit that waits on a semaphore NOT in this set would GPU-deadlock
+    // (semaphore never signaled). In that case we skip the wait.
+    // Entry is removed (consumed) when the semaphore is used as a wait.
+    std::unordered_set<uint64_t> semPendingSignal_; // stream semaphore IDs
 
 public:
     // BDA query results: accumulated during execute(), consumed by server
@@ -266,6 +302,11 @@ public:
 
     // Buffer usage tracking for auto-BDA on BindBufferMemory
     std::unordered_map<uint64_t, uint32_t> bufferUsageFlags_;
+
+    // BDA replay patching: map live GPU addresses → replay GPU addresses
+    // Populated when RecordBDA command is processed after BindBufferMemory (AutoBDA).
+    std::unordered_map<uint64_t, uint64_t> replayBdaByBufferId_; // bufId → replay GPU addr
+    std::unordered_map<uint64_t, uint64_t> liveBdaToReplayBda_;  // live addr → replay addr
 
     // Roundtrip timing: seqId from the most recent TimingSeq command in this batch
     uint32_t currentSeqId_ = 0;

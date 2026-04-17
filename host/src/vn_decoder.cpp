@@ -27,9 +27,10 @@ void VnDecoder::init(VkPhysicalDevice physDevice, VkDevice device,
 }
 
 VkFence VnDecoder::allocateFence() {
-    if (!fencePool_.empty()) {
+    while (!fencePool_.empty()) {
         VkFence f = fencePool_.back();
         fencePool_.pop_back();
+        if (f == VK_NULL_HANDLE) continue;  // skip corrupted null handles
         vkResetFences(device_, 1, &f);
         return f;
     }
@@ -76,7 +77,10 @@ bool VnDecoder::execute(const uint8_t* data, size_t size) {
             reader.setPos(nextOff);
         }
     }
-    // All QueueSubmits in this batch have been executed.
+    // All QueueSubmits in this batch have been decoded.
+    // Flush any remaining collected CBs (those with no signal semaphore / fence
+    // that were collected for batch ordering but never triggered by sync).
+    flushPendingSubmits(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE);
     // Now flush deferred Presents so the GPU work is done before presenting.
     RT_LOG(currentSeqId_, "T4", "decode done, flushing presents");
     flushPendingPresents();
@@ -192,6 +196,7 @@ void VnDecoder::dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdS
     case VN_CMD_BRIDGE_AcquireNextImage:  handleBridgeAcquireNextImage(reader); break;
     case VN_CMD_BRIDGE_QueuePresent:      handleBridgeQueuePresent(reader); break;
     case VN_CMD_BRIDGE_GetBufferDeviceAddress: handleGetBufferDeviceAddress(reader); break;
+    case VN_CMD_BRIDGE_RecordBDA:           handleBridgeRecordBDA(reader); break;
     case VN_CMD_BRIDGE_TimingSeq: {
         currentSeqId_ = reader.readU32();
         uint64_t guestTs = reader.readU64(); (void)guestTs;
@@ -393,6 +398,7 @@ void VnDecoder::handleCreateImage(VnStreamReader& r) {
     ci.samples = static_cast<VkSampleCountFlagBits>(samples);
     ci.tiling = static_cast<VkImageTiling>(tiling);
     ci.usage = usage;
+    ci.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT; // allow views with compatible formats
     ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
     VkImage image;
@@ -402,6 +408,7 @@ void VnDecoder::handleCreateImage(VnStreamReader& r) {
     if (vr != VK_SUCCESS) return;
     store(images_, imageId, image);
     imageFormats_[imageId] = static_cast<VkFormat>(format);
+    imageLayouts_[imageId] = VK_IMAGE_LAYOUT_UNDEFINED; // newly created image starts in UNDEFINED
 }
 
 uint32_t VnDecoder_mapMemoryType(VkPhysicalDevice physDev, uint32_t icdType) {
@@ -618,12 +625,14 @@ void VnDecoder::handleUpdateDescriptorSets(VnStreamReader& r) {
             allBufferInfos[i][j].range = bufRange;
             // Debug: log image descriptor bindings (type 0=SAMPLER, 2=SAMPLED_IMAGE)
             static int descLog = 0;
-            if (descLog < 50 && (descType == 0 || descType == 1 || descType == 2)) {
-                fprintf(stderr, "[Decoder] DescBind: type=%u iv=%llu(%p) sam=%llu(%p) buf=%llu(%p) off=%llu range=%llu\n",
+            if (descLog < 50000 && (descType == 0 || descType == 1 || descType == 2)) {
+                VkDescriptorSet hostSet = lookup(descriptorSets_, dstSetId);
+                fprintf(stderr, "[Decoder] DescBind: dstSet=%llu(%p) bind=%u arr=%u type=%u iv=%llu(%p) layout=%u sam=%llu(%p)\n",
+                        (unsigned long long)dstSetId, (void*)hostSet,
+                        dstBinding, dstArrayElem + j,
                         descType, (unsigned long long)ivId, (void*)allImageInfos[i][j].imageView,
-                        (unsigned long long)samId, (void*)allImageInfos[i][j].sampler,
-                        (unsigned long long)bufId, (void*)allBufferInfos[i][j].buffer,
-                        (unsigned long long)bufOff, (unsigned long long)bufRange);
+                        imgLayout,
+                        (unsigned long long)samId, (void*)allImageInfos[i][j].sampler);
                 descLog++;
             }
         }
@@ -665,13 +674,15 @@ void VnDecoder::handleCmdBindDescriptorSets(VnStreamReader& r) {
     VkPipelineLayout layout = lookup(pipelineLayouts_, layoutId);
     if (!cb || !layout) return;
 
-    // Check for null descriptor sets
+    // Log descriptor set bindings
     static int dsLog = 0;
-    for (uint32_t i = 0; i < setCount; i++) {
-        if (!sets[i] && dsLog < 5) {
-            fprintf(stderr, "[Decoder] BindDescSets: NULL set at index %u (firstSet=%u)\n", i, firstSet);
-            dsLog++;
-        }
+    if (dsLog < 50000) {
+        fprintf(stderr, "[Decoder] BindDescSets: cb=%llu bp=%u first=%u count=%u",
+                (unsigned long long)cbId, bindPoint, firstSet, setCount);
+        for (uint32_t i = 0; i < setCount; i++)
+            fprintf(stderr, " set[%u]=%p", firstSet + i, (void*)sets[i]);
+        fprintf(stderr, "\n");
+        dsLog++;
     }
 
     vkCmdBindDescriptorSets(cb, static_cast<VkPipelineBindPoint>(bindPoint), layout,
@@ -800,6 +811,11 @@ void VnDecoder::handleBindBufferMemory(VnStreamReader& r) {
             bdaInfo.buffer = buf;
             VkDeviceAddress addr = vkGetBufferDeviceAddress(device_, &bdaInfo);
             pendingBdaResults_.push_back({bufferId, addr});
+            // Track for replay BDA patching: buf → replay GPU address
+            replayBdaByBufferId_[bufferId] = (uint64_t)addr;
+            fprintf(stderr, "[AutoBDA] buf=%llu mem=%llu off=%llu -> GPU addr=0x%llx\n",
+                    (unsigned long long)bufferId, (unsigned long long)memoryId,
+                    (unsigned long long)offset, (unsigned long long)addr);
         }
     }
 }
@@ -907,7 +923,9 @@ void VnDecoder::handleWriteMemory(VnStreamReader& r) {
     // In most cases the fence is already signaled (TCP round-trip gives GPU time),
     // so this wait is effectively free and only blocks when GPU is truly behind.
     if (lastBatchWaitPending_ && lastBatchFence_ != VK_NULL_HANDLE) {
-        vkWaitForFences(device_, 1, &lastBatchFence_, VK_TRUE, UINT64_MAX);
+        VkResult wr = vkWaitForFences(device_, 1, &lastBatchFence_, VK_TRUE, 5000000000ULL);
+        if (wr != VK_SUCCESS)
+            fprintf(stderr, "[Decoder] batch fence wait failed: %d\n", (int)wr);
         lastBatchWaitPending_ = false;
     }
 
@@ -925,13 +943,61 @@ void VnDecoder::handleWriteMemory(VnStreamReader& r) {
         return;
     }
     r.readBytes(mapped, size);
+    // For large writes (likely textures), log first 4 pixels to detect all-zero data
+    if (size >= 1024*1024) {
+        auto* b = static_cast<uint8_t*>(mapped);
+        bool allZero = true;
+        for (uint32_t k = 0; k < std::min(size, 64u); k++) if (b[k]) { allZero = false; break; }
+        fprintf(stderr, "[Decoder] WriteMemory: mem=%llu off=%llu size=%u px0=(%u,%u,%u,%u) %s\n",
+                (unsigned long long)memId, (unsigned long long)offset, size,
+                b[0], b[1], b[2], b[3], allZero ? "ALL_ZERO" : "HAS_DATA");
+    } else {
+        fprintf(stderr, "[Decoder] WriteMemory: mem=%llu off=%llu size=%u\n",
+                (unsigned long long)memId, (unsigned long long)offset, size);
+    }
+    // BDA patching: replace live GPU addresses (from live recording session) with
+    // current replay GPU addresses. Only active once RecordBDA commands populate
+    // liveBdaToReplayBda_. Scans every 8-byte-aligned position in the write payload.
+    if (!liveBdaToReplayBda_.empty()) {
+        auto* b = static_cast<uint8_t*>(mapped);
+        uint32_t patchCount = 0;
+        for (uint32_t k = 0; k + 8 <= size; k += 8) {
+            uint64_t v;
+            memcpy(&v, b + k, 8);
+            auto it = liveBdaToReplayBda_.find(v);
+            if (it != liveBdaToReplayBda_.end()) {
+                uint64_t replayAddr = it->second;
+                memcpy(b + k, &replayAddr, 8);
+                patchCount++;
+            }
+        }
+        if (patchCount > 0) {
+            fprintf(stderr, "[BDA-PATCH] mem=%llu off=%llu size=%u: patched %u addr(s)\n",
+                    (unsigned long long)memId, (unsigned long long)offset, size, patchCount);
+        }
+    }
     vkUnmapMemory(device_, mem);
-    fprintf(stderr, "[Decoder] WriteMemory: mem=%llu off=%llu size=%u\n", (unsigned long long)memId, (unsigned long long)offset, size);
+}
+
+// Strip pipeline stage bits that require device features the Host GPU may not
+// have enabled.  This is a defensive filter — the ICD should not report these
+// features, but old command recordings or edge cases might still have them.
+static uint32_t sanitizePipelineStageFlags(uint32_t flags) {
+    // Remove geometry/tessellation stage bits — the ICD no longer advertises
+    // these features, but guard against stale streams or future mismatches.
+    flags &= ~(uint32_t)VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT;
+    flags &= ~(uint32_t)VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT;
+    flags &= ~(uint32_t)VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT;
+    // If stripping bits leaves the mask empty, use a safe fallback
+    if (flags == 0)
+        flags = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    return flags;
 }
 
 void VnDecoder::handleCmdPipelineBarrier(VnStreamReader& r) {
     uint64_t cbId = r.readU64();
-    uint32_t srcStage = r.readU32(), dstStage = r.readU32();
+    uint32_t srcStage = sanitizePipelineStageFlags(r.readU32());
+    uint32_t dstStage = sanitizePipelineStageFlags(r.readU32());
     uint32_t imageBarrierCount = r.readU32();
 
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
@@ -946,13 +1012,15 @@ void VnDecoder::handleCmdPipelineBarrier(VnStreamReader& r) {
         barriers[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         barriers[i].srcAccessMask = srcAccess;
         barriers[i].dstAccessMask = dstAccess;
-        static int barrierLog = 0;
-        if (barrierLog < 10) {
-            fprintf(stderr, "[Decoder] Barrier: img=%llu old=%u new=%u\n",
-                    (unsigned long long)imgId, oldLayout, newLayout);
-            barrierLog++;
-        }
-        barriers[i].oldLayout = static_cast<VkImageLayout>(oldLayout);
+        // Trust DXVK's layout tracking — it correctly knows the GPU execution order.
+        // Host-side stream-order tracking was unreliable: CBs may appear in stream
+        // in a different order than they execute on GPU (e.g., init barrier CBs
+        // recorded after main CB in stream, but submitted first on GPU).
+        imageLayouts_[imgId] = static_cast<VkImageLayout>(newLayout);
+        // Log all layout transitions (with CB info)
+        fprintf(stderr, "[Decoder] Barrier: cb=%llu img=%llu old=%u new=%u\n",
+                (unsigned long long)cbId, (unsigned long long)imgId, oldLayout, newLayout);
+        barriers[i].oldLayout = static_cast<VkImageLayout>(oldLayout);  // trust DXVK
         barriers[i].newLayout = static_cast<VkImageLayout>(newLayout);
         barriers[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barriers[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -1015,7 +1083,7 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
     VkShaderModule fragMod = lookup(shaderModules_, fragModuleId);
     bool dynamicRendering = (renderPassId == 0 && colorFmt != 0);
 
-    fprintf(stderr, "[Decoder] CreatePipeline: id=%u rp=%u vert→%p frag→%p %ux%u dynRender=%d fmt=%u\n",
+    fprintf(stderr, "[Decoder] CreatePipeline: id=%u rp=%u vert->%p frag->%p %ux%u dynRender=%d fmt=%u\n",
             (unsigned)pipelineId, (unsigned)renderPassId,
             (void*)vertMod, (void*)fragMod, vpWidth, vpHeight,
             (int)dynamicRendering, colorFmt);
@@ -1164,11 +1232,11 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
             dynStates.push_back(VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE);
     }
 
-    fprintf(stderr, "[Decoder] CreatePipeline vtxInput: %zu bindings, %zu attrs depthFmt=%u blend=%d (en=%u src=%u dst=%u op=%u mask=0x%x) topo=%u cull=%u front=%u dt=%u dw=%u rastDiscard=%u dyn=%zu dynVals=[",
+    fprintf(stderr, "[Decoder] CreatePipeline vtxInput: %zu bindings, %zu attrs depthFmt=%u blend=%d (en=%u src=%u dst=%u op=%u mask=0x%x) topo=%u cull=%u front=%u dt=%u dw=%u ste=%u rastDiscard=%u dyn=%zu dynVals=[",
             vtxBindings.size(), vtxAttrs.size(), depthFmt, (int)hasBlendState,
             blendAtt.blendEnable, blendAtt.srcColorBlendFactor, blendAtt.dstColorBlendFactor,
             blendAtt.colorBlendOp, blendAtt.colorWriteMask, topology, cullMode, frontFace,
-            depthTestEnable, depthWriteEnable, rasterizerDiscardEnable, dynStates.size());
+            depthTestEnable, depthWriteEnable, stencilTestEnable, rasterizerDiscardEnable, dynStates.size());
     for (size_t i = 0; i < dynStates.size(); i++)
         fprintf(stderr, "%s%u", i?",":"", (unsigned)dynStates[i]);
     fprintf(stderr, "]\n");
@@ -1255,9 +1323,17 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
     VkFormat depthFormat = static_cast<VkFormat>(depthFmt);
     HostSwapchain* scFmt = getFirstSwapchain();
     // Only override colorFormat for blit/present pipelines (0 vertex bindings)
-    // that target the swapchain. Draw pipelines with vertex input target internal
-    // images and must keep their original format.
-    if (scFmt && dynamicRendering && vtxBindings.empty()) colorFormat = scFmt->format;
+    // that target the swapchain with an LDR format. HDR post-process pipelines
+    // (colorFmt >= VK_FORMAT_R16G16B16A16_SFLOAT=97) target internal render targets
+    // and must keep their original format to avoid pipeline/RT format mismatch.
+    bool isLdrFormat = (colorFmt < 97);
+    if (scFmt && dynamicRendering && vtxBindings.empty() && isLdrFormat) {
+        fprintf(stderr, "[Decoder] CreatePipeline colorFmt override: %u -> %u (swapchain fmt)\n",
+                colorFmt, (uint32_t)scFmt->format);
+        colorFormat = scFmt->format;
+    } else if (scFmt && dynamicRendering && vtxBindings.empty() && !isLdrFormat) {
+        fprintf(stderr, "[Decoder] CreatePipeline colorFmt KEEP HDR: %u (no swapchain override)\n", colorFmt);
+    }
 
     VkGraphicsPipelineCreateInfo pInfo{};
     pInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -1362,7 +1438,7 @@ void VnDecoder::handleAllocateCommandBuffers(VnStreamReader& r) {
     uint64_t cbId = r.readU64();
 
     VkCommandPool pool = lookup(commandPools_, poolId);
-    fprintf(stderr, "[Decoder] AllocCmdBuf: dev=%llu pool=%llu→%p cb=%llu\n",
+    fprintf(stderr, "[Decoder] AllocCmdBuf: dev=%llu pool=%llu->%p cb=%llu\n",
             (unsigned long long)deviceId, (unsigned long long)poolId, (void*)pool, (unsigned long long)cbId);
     if (!pool) { error_ = true; return; }
 
@@ -1390,36 +1466,63 @@ void VnDecoder::handleBeginCommandBuffer(VnStreamReader& r) {
     uint64_t cbId = r.readU64();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
 #ifdef VBOXGPU_VERBOSE
-    fprintf(stderr, "[Decoder] BeginCmdBuf: cbId=0x%llx → cb=%p (map size=%zu)\n",
+    fprintf(stderr, "[Decoder] BeginCmdBuf: cbId=0x%llx -> cb=%p (map size=%zu)\n",
             (unsigned long long)cbId, (void*)cb, commandBuffers_.size());
     fflush(stderr);
 #endif
     if (!cb) { error_ = true; return; }
 
     // Ensure CB is idle before resetting.
-    // Wait on per-CB fence (from last QueueSubmit with this CB) instead of
-    // vkDeviceWaitIdle — only blocks until THIS CB finishes, not all GPU work.
+    // For CBs in batched submits, cbLastFence_ may be null; fall back to lastBatchFence_.
     {
+        VkFence waitFence = VK_NULL_HANDLE;
         auto it = cbLastFence_.find(cbId);
-        if (it != cbLastFence_.end() && it->second != VK_NULL_HANDLE) {
-            vkWaitForFences(device_, 1, &it->second, VK_TRUE, UINT64_MAX);
+        if (it != cbLastFence_.end() && it->second != VK_NULL_HANDLE)
+            waitFence = it->second;
+        else if (lastBatchFence_ != VK_NULL_HANDLE)
+            waitFence = lastBatchFence_;
+
+        if (waitFence != VK_NULL_HANDLE) {
+            // Use 5-second timeout to avoid hanging forever on device lost.
+            VkResult wr = vkWaitForFences(device_, 1, &waitFence, VK_TRUE, 5000000000ULL);
+            if (wr != VK_SUCCESS) {
+                fprintf(stderr, "[Decoder] BeginCB FENCE WAIT FAILED: cbId=0x%llx result=%d\n",
+                        (unsigned long long)cbId, (int)wr);
+                error_ = true; return;
+            }
         }
     }
     vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo info{};
     info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    vkBeginCommandBuffer(cb, &info);
+    VkResult beginRes = vkBeginCommandBuffer(cb, &info);
+    fprintf(stderr, "[Decoder] BeginCB: cbId=0x%llx cb=%p result=%d\n",
+            (unsigned long long)cbId, (void*)cb, (int)beginRes);
+    if (beginRes != VK_SUCCESS) { error_ = true; return; }
+
+    // Global memory barrier at start of every CB recording.
+    // Compensates for stripped wait semaphores: ensures all GPU writes from
+    // prior queue submissions on the same queue are visible when this CB runs.
+    // Required for multi-CB pipelines (e.g., 3D render CB → blit CB) where
+    // the cross-CB synchronization semaphores were stripped by the host decoder.
+    VkMemoryBarrier memBarrier{};
+    memBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    memBarrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+    memBarrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+    vkCmdPipelineBarrier(cb,
+        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+        0, 1, &memBarrier, 0, nullptr, 0, nullptr);
 }
 
 void VnDecoder::handleEndCommandBuffer(VnStreamReader& r) {
     uint64_t cbId = r.readU64();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     VkResult vr = vkEndCommandBuffer(cb);
-#ifdef VBOXGPU_VERBOSE
-    fprintf(stderr, "[Decoder] EndCmdBuf: cbId=0x%llx cb=%p result=%d\n",
+    fprintf(stderr, "[Decoder] EndCB: cbId=0x%llx cb=%p result=%d\n",
             (unsigned long long)cbId, (void*)cb, (int)vr);
-#endif
     fflush(stderr);
+    if (vr != VK_SUCCESS) { error_ = true; }
 }
 
 void VnDecoder::handleCmdBeginRenderPass(VnStreamReader& r) {
@@ -1523,6 +1626,7 @@ void VnDecoder::handleCmdBeginRendering(VnStreamReader& r) {
     }
     activeRendering_ = true;
     activeRenderingIsSwapchain_ = isSwapchain;
+    cbIsSwapchain_[cbId] = isSwapchain; // per-CB tracking (survives interleaved CBs)
 
     VkRenderingAttachmentInfo colorAttachment{};
     colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
@@ -1532,9 +1636,9 @@ void VnDecoder::handleCmdBeginRendering(VnStreamReader& r) {
     colorAttachment.storeOp = static_cast<VkAttachmentStoreOp>(storeOp);
     colorAttachment.clearValue.color = {{cr, cg, cb_, ca}};
 
-    // Clamp render area
+    // Clamp render area only for swapchain passes (internal RTs keep their full size)
     uint32_t clampedW = areaW, clampedH = areaH;
-    if (sc) {
+    if (isSwapchain && sc) {
         clampedW = std::min(areaW, sc->extent.width);
         clampedH = std::min(areaH, sc->extent.height);
     }
@@ -1595,40 +1699,31 @@ void VnDecoder::handleCmdBeginRendering(VnStreamReader& r) {
 void VnDecoder::handleCmdEndRendering(VnStreamReader& r) {
     uint64_t cbId = r.readU64();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
-    if (!cb || !activeRendering_) {
-        fprintf(stderr, "[Decoder] EndRendering SKIP: cbId=0x%llx cb=%p active=%d\n",
-                (unsigned long long)cbId, (void*)cb, (int)activeRendering_);
+    if (!cb) return;
+
+    // Use per-CB tracking to determine if this CB was in a swapchain render pass.
+    // The global activeRenderingIsSwapchain_ flag is unreliable when multiple CBs
+    // are recorded concurrently and interleave their BeginRendering calls.
+    auto it = cbIsSwapchain_.find(cbId);
+    if (it == cbIsSwapchain_.end()) {
+        // CB not in a rendering pass — guard against double-EndRendering. Calling
+        // vkCmdEndRendering outside a render pass causes NVIDIA driver null-deref crash.
+        fprintf(stderr, "[Decoder] EndRendering SKIP: cbId=0x%llx not in rendering state\n",
+                (unsigned long long)cbId);
+        fflush(stderr);
         return;
     }
-    activeRendering_ = false;
-    fprintf(stderr, "[Decoder] EndRendering: cbId=0x%llx cb=%p imgIdx=%u\n",
-            (unsigned long long)cbId, (void*)cb,
+    bool isSwapchainCB = it->second;
+    cbIsSwapchain_.erase(it);  // erase (not reset to false) to prevent spurious second call
+
+    fprintf(stderr, "[Decoder] EndRendering: cbId=0x%llx cb=%p swapchain=%d imgIdx=%u\n",
+            (unsigned long long)cbId, (void*)cb, (int)isSwapchainCB,
             getFirstSwapchain() ? getFirstSwapchain()->currentImageIndex : 999);
     fflush(stderr);
     vkCmdEndRendering(cb);
-
-    // Only transition to PRESENT_SRC if this was a swapchain render pass
-    if (activeRenderingIsSwapchain_) {
-        HostSwapchain* sc = nullptr;
-        for (auto& [id, s] : swapchains_) { sc = &s; break; }
-        if (sc) {
-            VkImageMemoryBarrier barrier{};
-            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-            barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            barrier.image = sc->images[sc->currentImageIndex];
-            barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-            barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-            barrier.dstAccessMask = 0;
-            vkCmdPipelineBarrier(cb,
-                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                0, 0, nullptr, 0, nullptr, 1, &barrier);
-        }
-    }
-    // Non-swapchain images: DXVK manages layout transitions via pipeline barriers
+    // DXVK sends its own vkCmdPipelineBarrier2 in the command stream to transition
+    // the swapchain image COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR before QueuePresent.
+    // Do NOT insert an extra barrier here — it causes double-transition → device lost.
 }
 
 void VnDecoder::handleCmdBindPipeline(VnStreamReader& r) {
@@ -1766,7 +1861,7 @@ void VnDecoder::handleCmdBindVertexBuffers(VnStreamReader& r) {
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     if (!cb) return;
     static int vbLog = 0;
-    if (vbLog < 5) {
+    if (vbLog < 5000) {
         fprintf(stderr, "[Decoder] BindVB: first=%u count=%u hasStrides=%d",
                 firstBinding, bindingCount, (int)hasStrides);
         for (uint32_t i = 0; i < bindingCount; i++)
@@ -1812,7 +1907,7 @@ void VnDecoder::handleCmdDrawIndexed(VnStreamReader& r) {
         return;
     }
     static int diLog = 0;
-    if (diLog++ < 3)
+    if (diLog++ < 5000)
         fprintf(stderr, "[Decoder] DrawIndexed: cb=%p idx=%u inst=%u first=%u vtxOff=%d swapchain=%d\n",
                 (void*)cb, indexCount, instanceCount, firstIndex, vertexOffset, (int)activeRenderingIsSwapchain_);
     vkCmdDrawIndexed(cb, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
@@ -1945,20 +2040,15 @@ bool VnDecoder::ensureCopyStagingBuf(VkDeviceSize needed) {
     copyStagingUsed_ = 0;
     totalNeeded = needed;
     if (copyStagingBuf_.buffer) {
-        fprintf(stderr, "[Decoder] StagingBuf REALLOC: oldCap=%llu needed=%llu arenaUsed=%llu\n",
+        fprintf(stderr, "[Decoder] StagingBuf REALLOC: oldCap=%llu needed=%llu\n",
                 (unsigned long long)copyStagingBuf_.capacity,
-                (unsigned long long)needed,
-                (unsigned long long)copyStagingUsed_);
-        // Move old resources to pendingDestroys_ — freed after GPU idle at batch end
-        auto oldBuf = copyStagingBuf_.buffer;
-        auto oldMem = copyStagingBuf_.memory;
-        auto oldMap = copyStagingBuf_.mapped;
-        auto dev = device_;
-        pendingDestroys_.push_back([dev, oldBuf, oldMem, oldMap]() {
-            if (oldMap) vkUnmapMemory(dev, oldMem);
-            vkDestroyBuffer(dev, oldBuf, nullptr);
-            vkFreeMemory(dev, oldMem, nullptr);
-        });
+                (unsigned long long)needed);
+        // DO NOT put old buffer in pendingDestroys_: CBs spanning multiple batches may
+        // still reference this VkBuffer handle (recorded with vkCmdCopyBufferToImage).
+        // If freed early (when those CBs haven't been submitted yet), the GPU will
+        // access freed memory → VK_ERROR_DEVICE_LOST.
+        // Instead, keep old buffers alive in retiredStagingBufs_ until cleanup().
+        retiredStagingBufs_.push_back(copyStagingBuf_);
     }
     copyStagingBuf_ = {};
 
@@ -2036,11 +2126,14 @@ void VnDecoder::handleCmdCopyBufferToImage(VnStreamReader& r) {
     static int copyLog = 0;
     if (copyLog < 5 || (regionCount > 0 && regions[0].imageExtent.width > 100)) {
         copyLog++;
-        fprintf(stderr, "[Decoder] CopyBufToImg: srcBuf=%llu(%p) dstImg=%llu(%p) regions=%u %ux%u\n",
+        fprintf(stderr, "[Decoder] CopyBufToImg: cb=%llu(%p) srcBuf=%llu(%p) dstImg=%llu(%p) regions=%u %ux%u dstLayout=%u bufOff=%llu\n",
+                (unsigned long long)cbId, (void*)cb,
                 (unsigned long long)srcBufId, (void*)srcBuf,
                 (unsigned long long)dstImgId, (void*)dstImg, regionCount,
                 regionCount>0 ? regions[0].imageExtent.width : 0,
-                regionCount>0 ? regions[0].imageExtent.height : 0);
+                regionCount>0 ? regions[0].imageExtent.height : 0,
+                dstLayout,
+                regionCount>0 ? (unsigned long long)regions[0].bufferOffset : 0ULL);
         copyLog++;
     }
     if (!cb || !srcBuf || !dstImg) {
@@ -2224,37 +2317,21 @@ void VnDecoder::handleCreateFence(VnStreamReader& r) {
     store(fences_, a.pFence, fence);
 }
 
-void VnDecoder::handleQueueSubmit(VnStreamReader& r) {
-    uint64_t queueId = r.readU64();
-    uint64_t cbId = r.readU64();
-    uint64_t waitSemId = r.readU64();
-    uint64_t signalSemId = r.readU64();
-    uint64_t fenceId = r.readU64();
-    if (waitSemId > 10000 || signalSemId > 10000)
-        fprintf(stderr, "[Decoder] QueueSubmit SUSPECT: q=%llu cb=%llu ws=%llu ss=%llu f=%llu\n",
-                (unsigned long long)queueId, (unsigned long long)cbId,
-                (unsigned long long)waitSemId, (unsigned long long)signalSemId,
-                (unsigned long long)fenceId);
+void VnDecoder::flushPendingSubmits(VkSemaphore waitSem, VkSemaphore sigSem, VkFence userFence) {
+    // Only skip if there is truly nothing to submit.
+    if (pendingSubmitCBs_.empty() && waitSem == VK_NULL_HANDLE &&
+        sigSem == VK_NULL_HANDLE && userFence == VK_NULL_HANDLE)
+        return;
 
-    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
-    VkSemaphore waitSem = lookup(semaphores_, waitSemId);
-    VkSemaphore sigSem = lookup(semaphores_, signalSemId);
-    VkFence fence = lookup(fences_, fenceId);
+    std::vector<VkCommandBuffer> cbs;
+    cbs.reserve(pendingSubmitCBs_.size());
+    for (auto& p : pendingSubmitCBs_) cbs.push_back(p.cb);
 
-    fprintf(stderr, "[Decoder] QueueSubmit: cb=%llu→%p waitSem=%llu sigSem=%llu fence=%llu\n",
-            (unsigned long long)cbId, (void*)cb,
-            (unsigned long long)waitSemId, (unsigned long long)signalSemId,
-            (unsigned long long)fenceId);
-    fflush(stderr);
-
-    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     VkSubmitInfo info{};
     info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    if (cb) {
-        info.commandBufferCount = 1;
-        info.pCommandBuffers = &cb;
-    }
+    info.commandBufferCount = (uint32_t)cbs.size();
+    info.pCommandBuffers = cbs.data();
     if (waitSem) {
         info.waitSemaphoreCount = 1;
         info.pWaitSemaphores = &waitSem;
@@ -2265,43 +2342,97 @@ void VnDecoder::handleQueueSubmit(VnStreamReader& r) {
         info.pSignalSemaphores = &sigSem;
     }
 
-    // No synchronization needed here — submits to the same queue are
-    // implicitly ordered by Vulkan.  The old vkDeviceWaitIdle was unnecessary
-    // overhead that serialized every submit.
-    // Strip wait semaphores (unresolvable IDs), keep valid signal semaphores.
-    info.waitSemaphoreCount = 0;
-    info.pWaitSemaphores = nullptr;
-    info.pWaitDstStageMask = nullptr;
-    // Only keep signal semaphore if it resolved to a valid handle
-    if (!sigSem) {
-        info.signalSemaphoreCount = 0;
-        info.pSignalSemaphores = nullptr;
-    }
-
-    // Use internal fence for per-CB tracking if CB is present
-    VkFence submitFence = fence;
-    if (cb) {
-        // Recycle previous fence for this CB if any
-        auto it = cbLastFence_.find(cbId);
-        if (it != cbLastFence_.end()) recycleFence(it->second);
-        VkFence cbFence = allocateFence();
-        cbLastFence_[cbId] = cbFence;
-        submitFence = cbFence;
-    }
-
-    VkResult submitResult = vkQueueSubmit(graphicsQueue_, 1, &info, submitFence);
-#ifdef VBOXGPU_VERBOSE
-    fprintf(stderr, "[Decoder] QueueSubmit result=%d cb=%p\n", (int)submitResult, (void*)cb);
+    // Allocate one batch fence to cover all CBs in this submit.
+    VkFence batchFence = allocateFence();
+    VkResult result = vkQueueSubmit(graphicsQueue_, 1, &info, batchFence);
+    fprintf(stderr, "[Decoder] BatchSubmit: cbs=%zu waitSem=%p sigSem=%p fence=%p result=%d\n",
+            cbs.size(), (void*)waitSem, (void*)sigSem, (void*)batchFence, (int)result);
     fflush(stderr);
-#endif
-
-    // Track last fence for cross-batch WriteMemory protection.
-    // The next batch's first WriteMemory will wait for this fence before
-    // overwriting GPU-visible memory that this submission might still be reading.
-    if (submitFence != VK_NULL_HANDLE) {
-        lastBatchFence_ = submitFence;
-        lastBatchWaitPending_ = true;
+    if (result != VK_SUCCESS) {
+        fprintf(stderr, "[Decoder] BatchSubmit FAILED!\n");
+        error_ = true;
     }
+
+    // Mark all CBs in the batch with null per-CB fence; they use lastBatchFence_ instead.
+    // (BeginCommandBuffer falls back to lastBatchFence_ when per-CB fence is null.)
+    for (auto& p : pendingSubmitCBs_) {
+        auto it = cbLastFence_.find(p.cbId);
+        if (it != cbLastFence_.end() && it->second != VK_NULL_HANDLE)
+            recycleFence(it->second);  // only recycle valid handles
+        cbLastFence_[p.cbId] = VK_NULL_HANDLE;
+    }
+    lastBatchFence_ = batchFence;
+    lastBatchWaitPending_ = true;
+
+    pendingSubmitCBs_.clear();
+
+    // Signal the stream-side fence if provided.
+    // vkQueueSubmit only accepts one fence per call, so we use a separate empty submit.
+    // Queued after the main batch, it signals userFence once all prior GPU work completes.
+    if (userFence != VK_NULL_HANDLE) {
+        VkSubmitInfo fenceInfo{};
+        fenceInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        VkResult fr = vkQueueSubmit(graphicsQueue_, 1, &fenceInfo, userFence);
+        if (fr != VK_SUCCESS)
+            fprintf(stderr, "[Decoder] FenceSubmit FAILED! result=%d\n", (int)fr);
+    }
+}
+
+void VnDecoder::handleQueueSubmit(VnStreamReader& r) {
+    uint64_t queueId = r.readU64();
+    uint64_t cbId = r.readU64();
+    uint64_t waitSemId = r.readU64();
+    uint64_t signalSemId = r.readU64();
+    uint64_t fenceId = r.readU64();
+
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    VkSemaphore waitSem = lookup(semaphores_, waitSemId);
+    VkSemaphore sigSem = lookup(semaphores_, signalSemId);
+    VkFence fence = lookup(fences_, fenceId);
+
+    fprintf(stderr, "[Decoder] QueueSubmit: cb=%llu->%p waitSem=%llu sigSem=%llu fence=%llu\n",
+            (unsigned long long)cbId, (void*)cb,
+            (unsigned long long)waitSemId, (unsigned long long)signalSemId,
+            (unsigned long long)fenceId);
+    fflush(stderr);
+
+    // Semaphore signal tracking: mark sigSem as pending-signal so future waitSem can proceed.
+    if (signalSemId != 0)
+        semPendingSignal_.insert(signalSemId);
+
+    // If waitSem was never put in pending-signal state (i.e., nobody called sigSem or
+    // vkAcquireNextImageKHR with it), the GPU would deadlock waiting for it.
+    // This happens with ICD acquire semaphores that are silently dropped by icd_vkAcquireNextImageKHR.
+    // Skip the wait to avoid GPU stalls.
+    if (waitSemId != 0 && waitSem != VK_NULL_HANDLE) {
+        if (semPendingSignal_.count(waitSemId) == 0) {
+            fprintf(stderr, "[Decoder] QueueSubmit: SKIP waitSem=%llu (never signaled, would deadlock)\n",
+                    (unsigned long long)waitSemId);
+            fflush(stderr);
+            waitSem = VK_NULL_HANDLE;  // suppress the wait
+            waitSemId = 0;
+        } else {
+            semPendingSignal_.erase(waitSemId);  // consumed
+        }
+    }
+
+    bool hasSync = (waitSem != VK_NULL_HANDLE || sigSem != VK_NULL_HANDLE ||
+                    fence != VK_NULL_HANDLE || waitSemId != 0);
+
+    if (!hasSync) {
+        // No synchronization primitives — collect for batch submission.
+        // The ICD splits a multi-CB vkQueueSubmit into individual cmdQueueSubmit
+        // commands. Without batching, the host submits them as separate
+        // vkQueueSubmit calls, which have no ordering guarantee in the Vulkan spec.
+        // Collecting and submitting together in one call restores ordering.
+        if (cb) pendingSubmitCBs_.push_back({cbId, cb});
+        return;
+    }
+
+    // Has synchronization — flush any pending CBs first, then submit this one.
+    // Add current CB to the batch so it's submitted together with the pending ones.
+    if (cb) pendingSubmitCBs_.push_back({cbId, cb});
+    flushPendingSubmits(waitSem, sigSem, fence);
 }
 
 void VnDecoder::handleWaitForFences(VnStreamReader& r) {
@@ -2322,9 +2453,17 @@ void VnDecoder::handleWaitForFences(VnStreamReader& r) {
         fprintf(stderr, "%s%p", i ? "," : "", (void*)fences[i]);
     fprintf(stderr, "]\n");
     fflush(stderr);
-    if (!fences.empty())
-        vkWaitForFences(device_, (uint32_t)fences.size(), fences.data(),
+    if (!fences.empty()) {
+        // Cap timeout to 5s in replay mode to prevent infinite GPU deadlock hangs.
+        // In live mode the guest drives the pace; in replay the GPU may deadlock
+        // on a semaphore that was never re-signaled (acquire-sem reuse across frames).
+        const uint64_t MAX_WAIT = 5000000000ULL; // 5s
+        if (timeout > MAX_WAIT) timeout = MAX_WAIT;
+        VkResult wr = vkWaitForFences(device_, (uint32_t)fences.size(), fences.data(),
                         waitAll ? VK_TRUE : VK_FALSE, timeout);
+        if (wr == VK_TIMEOUT)
+            fprintf(stderr, "[Decoder] WaitForFences TIMEOUT (GPU deadlock?)\n");
+    }
 }
 
 void VnDecoder::handleResetFences(VnStreamReader& r) {
@@ -2427,8 +2566,15 @@ void VnDecoder::handleBridgeAcquireNextImage(VnStreamReader& r) {
     if (it == swapchains_.end()) { error_ = true; return; }
 
     VkSemaphore sem = lookup(semaphores_, semId);
-    vkAcquireNextImageKHR(device_, it->second.swapchain, UINT64_MAX,
+    VkResult res = vkAcquireNextImageKHR(device_, it->second.swapchain, UINT64_MAX,
                           sem, VK_NULL_HANDLE, &it->second.currentImageIndex);
+    // Mark semaphore as pending-signal (presentation engine will signal it when image is available)
+    if (semId != 0)
+        semPendingSignal_.insert(semId);
+    fprintf(stderr, "[Decoder] AcquireNextImage: sc=%llu semId=%llu sem=%p imgIdx=%u result=%d\n",
+            (unsigned long long)scId, (unsigned long long)semId,
+            (void*)sem, it->second.currentImageIndex, (int)res);
+    fflush(stderr);
 }
 
 void VnDecoder::handleBridgeQueuePresent(VnStreamReader& r) {
@@ -2461,6 +2607,25 @@ void VnDecoder::handleGetBufferDeviceAddress(VnStreamReader& r) {
     pendingBdaResults_.push_back({bufferId, addr});
 }
 
+void VnDecoder::handleBridgeRecordBDA(VnStreamReader& r) {
+    uint64_t bufferId = r.readU64();
+    uint64_t liveAddr = r.readU64();
+
+    // Build live→replay mapping: look up this buffer's replay GPU address from AutoBDA.
+    // Called during replay after BindBufferMemory (which populates replayBdaByBufferId_).
+    auto it = replayBdaByBufferId_.find(bufferId);
+    if (it != replayBdaByBufferId_.end()) {
+        liveBdaToReplayBda_[liveAddr] = it->second;
+        fprintf(stderr, "[RecordBDA] buf=%llu live=0x%llx -> replay=0x%llx\n",
+                (unsigned long long)bufferId, (unsigned long long)liveAddr,
+                (unsigned long long)it->second);
+    } else {
+        // Should not happen: BindBufferMemory always precedes vkGetBufferDeviceAddress
+        fprintf(stderr, "[RecordBDA] buf=%llu live=0x%llx (no replay addr — BDA buffer not yet bound?)\n",
+                (unsigned long long)bufferId, (unsigned long long)liveAddr);
+    }
+}
+
 void VnDecoder::flushPendingPresents() {
     for (auto& pp : pendingPresents_) {
         auto it = swapchains_.find(pp.scId);
@@ -2485,7 +2650,7 @@ void VnDecoder::flushPendingPresents() {
         // Capture screenshots at specific frames for animation debugging
         static int dbgFr2 = 0;
         dbgFr2++;
-        if (dbgFr2 == 5 || dbgFr2 == 150 || dbgFr2 == 300) {
+        if (dbgFr2 == 5 || dbgFr2 == 50 || dbgFr2 == 150) {
             uint32_t savedLPI = lastPresentedImageIndex_;
             lastPresentedImageIndex_ = presentIdx;
             char path[256];
@@ -2585,11 +2750,18 @@ void VnDecoder::cleanup() {
         rb = {};
         if (readbackFences_[s]) vkDestroyFence(device_, readbackFences_[s], nullptr);
     }
-    // Cleanup copy staging buffer
-    if (copyStagingBuf_.mapped) { vkUnmapMemory(device_, copyStagingBuf_.memory); copyStagingBuf_.mapped = nullptr; }
-    if (copyStagingBuf_.buffer) vkDestroyBuffer(device_, copyStagingBuf_.buffer, nullptr);
-    if (copyStagingBuf_.memory) vkFreeMemory(device_, copyStagingBuf_.memory, nullptr);
-    copyStagingBuf_ = {};
+    // Cleanup copy staging buffer and all retired staging buffers.
+    // Retired buffers may still be referenced by CBs that span multiple batches;
+    // we hold them alive here and free only after vkDeviceWaitIdle (above).
+    auto freeStagingBuf = [this](CopyStagingBuf& b) {
+        if (b.mapped) vkUnmapMemory(device_, b.memory);
+        if (b.buffer) vkDestroyBuffer(device_, b.buffer, nullptr);
+        if (b.memory) vkFreeMemory(device_, b.memory, nullptr);
+        b = {};
+    };
+    freeStagingBuf(copyStagingBuf_);
+    for (auto& b : retiredStagingBufs_) freeStagingBuf(b);
+    retiredStagingBufs_.clear();
 
     if (acquireSemaphore_) vkDestroySemaphore(device_, acquireSemaphore_, nullptr);
     if (acquireFence_) vkDestroyFence(device_, acquireFence_, nullptr);
@@ -2618,13 +2790,211 @@ void VnDecoder::cleanup() {
     }
 }
 
+void VnDecoder::debugCaptureImage(VkImage img, VkFormat fmt, uint32_t w, uint32_t h,
+                                   VkImageLayout currentLayout, const char* path) {
+    if (!img || commandPools_.empty()) return;
+
+    // Compute bytes per pixel from format for correct buffer sizing
+    uint32_t bytesPerPixel = 4; // default R8G8B8A8
+    if (fmt == VK_FORMAT_R16G16B16A16_SFLOAT) bytesPerPixel = 8;
+    else if (fmt == VK_FORMAT_R32G32B32A32_SFLOAT) bytesPerPixel = 16;
+    else if (fmt == VK_FORMAT_B8G8R8A8_UNORM || fmt == VK_FORMAT_B8G8R8A8_SRGB) bytesPerPixel = 4;
+    VkDeviceSize bufSize = VkDeviceSize(w) * h * bytesPerPixel;
+    VkBuffer stagingBuf = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMem = VK_NULL_HANDLE;
+
+    VkBufferCreateInfo bufInfo{};
+    bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufInfo.size = bufSize;
+    bufInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(device_, &bufInfo, nullptr, &stagingBuf) != VK_SUCCESS) return;
+
+    VkMemoryRequirements memReq;
+    vkGetBufferMemoryRequirements(device_, stagingBuf, &memReq);
+
+    VkPhysicalDeviceMemoryProperties memProps;
+    vkGetPhysicalDeviceMemoryProperties(physDevice_, &memProps);
+    uint32_t memType = UINT32_MAX;
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
+        if ((memReq.memoryTypeBits & (1u << i)) &&
+            (memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
+            memType = i; break;
+        }
+    }
+    if (memType == UINT32_MAX) { vkDestroyBuffer(device_, stagingBuf, nullptr); return; }
+
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memReq.size;
+    allocInfo.memoryTypeIndex = memType;
+    if (vkAllocateMemory(device_, &allocInfo, nullptr, &stagingMem) != VK_SUCCESS) {
+        vkDestroyBuffer(device_, stagingBuf, nullptr); return;
+    }
+    vkBindBufferMemory(device_, stagingBuf, stagingMem, 0);
+
+    VkCommandBufferAllocateInfo cbAlloc{};
+    cbAlloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cbAlloc.commandPool = commandPools_.begin()->second;
+    cbAlloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbAlloc.commandBufferCount = 1;
+    VkCommandBuffer cb;
+    vkAllocateCommandBuffers(device_, &cbAlloc, &cb);
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cb, &beginInfo);
+
+    VkImageMemoryBarrier imgBarrier{};
+    imgBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    imgBarrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                              | VK_ACCESS_SHADER_WRITE_BIT;
+    imgBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    imgBarrier.oldLayout = currentLayout;
+    imgBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    imgBarrier.image = img;
+    imgBarrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &imgBarrier);
+
+    VkBufferImageCopy copy{};
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.imageExtent = {w, h, 1};
+    vkCmdCopyImageToBuffer(cb, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stagingBuf, 1, &copy);
+
+    // Restore image to original layout so subsequent barriers remain valid
+    if (currentLayout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+        VkImageMemoryBarrier restoreBarrier{};
+        restoreBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        restoreBarrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        restoreBarrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
+        restoreBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        restoreBarrier.newLayout = currentLayout;
+        restoreBarrier.image = img;
+        restoreBarrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &restoreBarrier);
+    }
+
+    vkEndCommandBuffer(cb);
+
+    VkSubmitInfo submit{};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &cb;
+    vkQueueSubmit(graphicsQueue_, 1, &submit, VK_NULL_HANDLE);
+    vkQueueWaitIdle(graphicsQueue_);
+    vkFreeCommandBuffers(device_, cbAlloc.commandPool, 1, &cb);
+
+    void* mapped = nullptr;
+    vkMapMemory(device_, stagingMem, 0, bufSize, 0, &mapped);
+    if (mapped) {
+        auto* px = static_cast<uint8_t*>(mapped);
+        uint32_t stride = bytesPerPixel;
+        uint32_t cOff = (h/2 * w + w/2) * stride;
+        fprintf(stderr, "[DebugCap] %s bpp=%u: px0=(%u,%u,%u,%u) center=(%u,%u,%u,%u)\n",
+                path, bytesPerPixel,
+                px[0], px[1], px[2], px[3],
+                px[cOff], px[cOff+1], px[cOff+2], px[cOff+3]);
+
+        uint32_t rowStride = (w * 4 + 3u) & ~3u;
+        uint32_t pixelDataSize = rowStride * h;
+        uint32_t fileSize = 14 + 40 + pixelDataSize;
+        FILE* f = fopen(path, "wb");
+        if (f) {
+            uint8_t fh[14] = {};
+            fh[0]='B'; fh[1]='M';
+            *(uint32_t*)(fh+2) = fileSize;
+            *(uint32_t*)(fh+10) = 54;
+            fwrite(fh, 1, 14, f);
+            uint8_t dh[40] = {};
+            *(uint32_t*)(dh+0) = 40;
+            *(int32_t*)(dh+4) = w;
+            *(int32_t*)(dh+8) = -(int32_t)h;
+            *(uint16_t*)(dh+12) = 1;
+            *(uint16_t*)(dh+14) = 32;
+            *(uint32_t*)(dh+20) = pixelDataSize;
+            fwrite(dh, 1, 40, f);
+            uint8_t pad[4] = {};
+            uint32_t padSize = rowStride - w*4;
+            for (uint32_t y = 0; y < h; y++) {
+                fwrite(px + y*w*4, 1, w*4, f);
+                if (padSize) fwrite(pad, 1, padSize, f);
+            }
+            fclose(f);
+        } else {
+            fprintf(stderr, "[DebugCap] Failed to open %s for writing\n", path);
+        }
+        vkUnmapMemory(device_, stagingMem);
+    } else {
+        fprintf(stderr, "[DebugCap] vkMapMemory failed for %s\n", path);
+    }
+
+    vkDestroyBuffer(device_, stagingBuf, nullptr);
+    vkFreeMemory(device_, stagingMem, nullptr);
+}
+
 bool VnDecoder::captureScreenshot(const char* path) {
     HostSwapchain* sc = getFirstSwapchain();
     if (!sc || sc->images.empty()) return false;
 
     uint32_t w = sc->extent.width;
     uint32_t h = sc->extent.height;
-    // Use the image that was last presented to the window (not auto-acquired)
+
+    // Prefer the readback buffer: it was captured BEFORE vkQueuePresentKHR, so the
+    // contents are well-defined.  After present, the Vulkan spec says swapchain image
+    // contents are undefined, which is why direct swapchain copies return black pixels.
+    if (rbReady_ >= 0 && readback_[rbReady_].mappedPtr &&
+        readback_[rbReady_].width == w && readback_[rbReady_].height == h) {
+        fprintf(stderr, "[Screenshot] Using readback slot %d (frame %u, %ux%u)\n",
+                rbReady_, readyFrameTiming_.frameId, w, h);
+        const uint8_t* src = static_cast<const uint8_t*>(readback_[rbReady_].mappedPtr);
+        // Invalidate host cache so CPU sees GPU writes
+        VkMappedMemoryRange inv{};
+        inv.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+        inv.memory = readback_[rbReady_].stagingMem;
+        inv.offset = 0;
+        inv.size = VK_WHOLE_SIZE;
+        vkInvalidateMappedMemoryRanges(device_, 1, &inv);
+
+        // Inspect a few pixels
+        auto px = [&](uint32_t x, uint32_t y) {
+            const uint8_t* p = src + (y * w + x) * 4;
+            fprintf(stderr, "[Screenshot] Pixel(%u,%u) BGRA=(%u,%u,%u,%u)\n",
+                    x, y, p[0], p[1], p[2], p[3]);
+        };
+        px(w/2, h/2); px(0, 0); px(w/4, h/4);
+
+        uint32_t rowStride = (w * 4 + 3u) & ~3u;
+        uint32_t pixelDataSize = rowStride * h;
+        uint32_t fileSize = 14 + 40 + pixelDataSize;
+        FILE* f = fopen(path, "wb");
+        if (!f) return false;
+        uint8_t fh[14] = {};
+        fh[0] = 'B'; fh[1] = 'M';
+        *(uint32_t*)(fh + 2) = fileSize;
+        *(uint32_t*)(fh + 10) = 14 + 40;
+        fwrite(fh, 1, 14, f);
+        uint8_t ih[40] = {};
+        *(uint32_t*)(ih + 0) = 40; *(int32_t*)(ih + 4) = (int32_t)w;
+        *(int32_t*)(ih + 8) = -(int32_t)h;  // negative = top-down
+        *(uint16_t*)(ih + 12) = 1; *(uint16_t*)(ih + 14) = 32;
+        *(uint32_t*)(ih + 16) = 0; *(uint32_t*)(ih + 20) = pixelDataSize;
+        fwrite(ih, 1, 40, f);
+        std::vector<uint8_t> row(rowStride, 0);
+        for (uint32_t y = 0; y < h; y++) {
+            memcpy(row.data(), src + y * w * 4, w * 4);
+            fwrite(row.data(), 1, rowStride, f);
+        }
+        fclose(f);
+        fprintf(stderr, "[Screenshot] Saved %s (%ux%u) from readback\n", path, w, h);
+        return true;
+    }
+
+    // Fallback: copy directly from swapchain image.
+    // NOTE: After vkQueuePresentKHR the image contents are undefined per Vulkan spec;
+    // this path may return black on some drivers (see readback path above).
     uint32_t imgIdx = lastPresentedImageIndex_ < sc->images.size() ? lastPresentedImageIndex_ : 0;
     VkImage srcImage = sc->images[imgIdx];
     fprintf(stderr, "[Screenshot] Capturing swapchain image %u (current=%u, lastPresented=%u)\n",
@@ -2714,16 +3084,29 @@ bool VnDecoder::captureScreenshot(const char* path) {
 
     vkEndCommandBuffer(cb);
 
+    // Wait for the graphics queue to be idle before submitting the copy CB.
+    // Same-queue ordering ensures render finishes before copy starts.
+    VkResult waitIdleRes = vkQueueWaitIdle(graphicsQueue_);
+    if (waitIdleRes != VK_SUCCESS)
+        fprintf(stderr, "[Screenshot] vkQueueWaitIdle returned %d (device lost?)\n", (int)waitIdleRes);
+
+    VkFence copyFence = VK_NULL_HANDLE;
+    VkFenceCreateInfo fci{};
+    fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    vkCreateFence(device_, &fci, nullptr, &copyFence);
+
     VkSubmitInfo submit{};
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &cb;
-    vkQueueSubmit(graphicsQueue_, 1, &submit, VK_NULL_HANDLE);
-    vkQueueWaitIdle(graphicsQueue_);
+    VkResult submitRes = vkQueueSubmit(graphicsQueue_, 1, &submit, copyFence);
+    VkResult waitRes = vkWaitForFences(device_, 1, &copyFence, VK_TRUE, 5000000000ull); // 5s timeout
+    fprintf(stderr, "[Screenshot] copy submit=%d waitFence=%d\n", (int)submitRes, (int)waitRes);
+    vkDestroyFence(device_, copyFence, nullptr);
 
     vkFreeCommandBuffers(device_, cbAlloc.commandPool, 1, &cb);
 
-    // Map and write BMP
+    // Map first, then invalidate cache (required for non-HOST_COHERENT memory)
     void* data = nullptr;
     vkMapMemory(device_, stagingMem, 0, bufferSize, 0, &data);
     if (!data) {
@@ -2731,6 +3114,12 @@ bool VnDecoder::captureScreenshot(const char* path) {
         vkFreeMemory(device_, stagingMem, nullptr);
         return false;
     }
+    VkMappedMemoryRange flushRange{};
+    flushRange.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+    flushRange.memory = stagingMem;
+    flushRange.offset = 0;
+    flushRange.size = VK_WHOLE_SIZE;
+    vkInvalidateMappedMemoryRanges(device_, 1, &flushRange);
 
     // BMP: row padding to 4-byte boundary
     uint32_t rowStride = (w * 4 + 3u) & ~3u;
@@ -2776,7 +3165,50 @@ bool VnDecoder::captureScreenshot(const char* path) {
     vkDestroyBuffer(device_, stagingBuf, nullptr);
     vkFreeMemory(device_, stagingMem, nullptr);
 
+    // Log center pixel for quick black-screen diagnosis
+    {
+        auto* px = static_cast<uint8_t*>(data);
+        uint32_t cx = w / 2, cy = h / 2;
+        uint32_t off = (cy * w + cx) * 4;
+        fprintf(stderr, "[Screenshot] Center pixel BGRA=(%u,%u,%u,%u)\n",
+                px[off], px[off+1], px[off+2], px[off+3]);
+        // Also log a few pixels from top-left and middle
+        fprintf(stderr, "[Screenshot] TopLeft BGRA=(%u,%u,%u,%u)  Mid1 BGRA=(%u,%u,%u,%u)\n",
+                px[0], px[1], px[2], px[3],
+                px[(cy/2 * w + w/2) * 4], px[(cy/2 * w + w/2) * 4 + 1],
+                px[(cy/2 * w + w/2) * 4 + 2], px[(cy/2 * w + w/2) * 4 + 3]);
+    }
     fprintf(stderr, "[Screenshot] Saved %s (%ux%u)\n", path, w, h);
+
+    // DEBUG: capture internal RTs to diagnose black swapchain output.
+    // img=261 is the final LDR RT before the swapchain blit; img=265 is upstream.
+    // If 261 is non-black but swapchain is black → blit broken.
+    // If 261 is black too → rendering chain broken upstream.
+    {
+        static int dbgCap = 0;
+        if (dbgCap < 3) {
+            auto captureRT = [&](uint64_t imgId, VkFormat fmt, uint32_t rw, uint32_t rh, const char* tag) {
+                auto it = images_.find(imgId);
+                if (it == images_.end()) return;
+                char p[256];
+                snprintf(p, sizeof(p), "S:/bld/vboxgpu/dbg_%s_%d.bmp", tag, dbgCap);
+                auto li = imageLayouts_.find(imgId);
+                VkImageLayout lay = (li != imageLayouts_.end()) ? li->second : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                fprintf(stderr, "[DbgCap] img=%llu trackedLayout=%d -> %s\n",
+                        (unsigned long long)imgId, (int)lay, p);
+                debugCaptureImage(it->second, fmt, rw, rh, lay, p);
+            };
+            // uk_livetest.bin RTs (800x600 recording):
+            // img=271: HDR color RT (fmt=91/R16G16B16A16_SFLOAT, 800x600)
+            // img=268: LDR color RT (fmt=37/R8G8B8A8_UNORM, 800x600)
+            // img=259: another LDR RT (fmt=37, 800x600)
+            captureRT(271, VK_FORMAT_R16G16B16A16_SFLOAT, 800, 600, "rt271_hdr");
+            captureRT(268, VK_FORMAT_R8G8B8A8_UNORM, 800, 600, "rt268_ldr");
+            captureRT(259, VK_FORMAT_R8G8B8A8_UNORM, 800, 600, "rt259_ldr");
+            dbgCap++;
+        }
+    }
+
     return true;
 }
 

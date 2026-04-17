@@ -78,11 +78,33 @@ void IcdState::initDefaults() {
     limits.minStorageBufferOffsetAlignment = 16;
     limits.nonCoherentAtomSize = 64;
 
-    // --- Features: enable everything ---
-    // Set every VkBool32 field to VK_TRUE (=1), not 0x01010101 from memset
+    // --- Features: enable a safe subset for DX11/DXVK ---
+    // Start with all TRUE, then disable features that cause Host validation
+    // errors when the Host GPU doesn't support them.  The ICD is a proxy —
+    // it doesn't execute Vulkan itself, but whatever we report here determines
+    // which code paths DXVK takes (e.g. barrier stage bits, pipeline state).
+    //
+    // Long-term: Host sends its real VkPhysicalDeviceFeatures during handshake.
+    // Short-term: disable dangerous features that most DX11 games don't need.
     VkBool32* featureBools = reinterpret_cast<VkBool32*>(&physDeviceFeatures);
     size_t numFeatures = sizeof(physDeviceFeatures) / sizeof(VkBool32);
     for (size_t i = 0; i < numFeatures; i++) featureBools[i] = VK_TRUE;
+
+    // Disable only features that require special OS/GPU infrastructure not yet
+    // implemented in the bridge, or that DX11 genuinely doesn't expose.
+    // DXVK 2.7.1 requires geometryShader, tessellationShader, shaderInt64, and
+    // many others — keep all enabled (host GPU is real NVIDIA/AMD, supports them).
+    // - sparseBinding/sparseResidency*: OS-level sparse VA allocation not wired up.
+    physDeviceFeatures.sparseBinding = VK_FALSE;
+    physDeviceFeatures.sparseResidencyBuffer = VK_FALSE;
+    physDeviceFeatures.sparseResidencyImage2D = VK_FALSE;
+    physDeviceFeatures.sparseResidencyImage3D = VK_FALSE;
+    physDeviceFeatures.sparseResidency2Samples = VK_FALSE;
+    physDeviceFeatures.sparseResidency4Samples = VK_FALSE;
+    physDeviceFeatures.sparseResidency8Samples = VK_FALSE;
+    physDeviceFeatures.sparseResidency16Samples = VK_FALSE;
+    physDeviceFeatures.sparseResidencyAliased = VK_FALSE;
+    physDeviceFeatures.shaderResourceResidency = VK_FALSE;
 
     // --- Memory properties ---
     memset(&memProps, 0, sizeof(memProps));
@@ -163,7 +185,7 @@ void IcdState::initDefaults() {
         "VK_EXT_line_rasterization",
         "VK_EXT_pageable_device_local_memory",
         "VK_EXT_memory_budget", "VK_EXT_memory_priority",
-        "VK_EXT_mesh_shader",
+        // "VK_EXT_mesh_shader",  // disabled: geometry/tessellation/mesh shaders not supported by proxy
         "VK_EXT_hdr_metadata",
         "VK_EXT_full_screen_exclusive",
         // "VK_EXT_descriptor_buffer", // disabled — forces DXVK to use push descriptors instead

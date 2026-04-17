@@ -2,14 +2,16 @@
 """Analyze BMP screenshots from the vbox_host_server replay/capture tool.
 
 Usage:
-  check_screenshot.py [path ...]       # analyze one or more BMP files
-  check_screenshot.py --glob PATTERN   # glob pattern, e.g. 'dbg_frame*.bmp'
-  check_screenshot.py --latest [N]     # analyze N most recent dbg_frame*.bmp (default 3)
-  check_screenshot.py --batch DUMP     # analyze all DUMP_batch*.bmp files
+  check_screenshot.py [path ...]           # analyze one or more BMP files
+  check_screenshot.py --glob PATTERN       # glob pattern, e.g. 'dbg_frame*.bmp'
+  check_screenshot.py --latest [N]         # analyze N most recent dbg_frame*.bmp (default 3)
+  check_screenshot.py --batch DUMP         # analyze all DUMP_batch*.bmp files
+  check_screenshot.py --frames-dir DIR     # analyze frame_*.bmp in DIR (--limit N for first N)
 
 Options:
-  --sample                             # print a 5x5 center grid of pixel values
-  --bright-rows R1 R2                  # count bright pixels in row range [R1,R2)
+  --limit N                                # max frames to analyze (for --frames-dir / --glob)
+  --sample                                 # print a 5x5 center grid of pixel values
+  --bright-rows R1 R2                      # count bright pixels in row range [R1,R2)
 """
 import struct, sys, glob, os, argparse
 
@@ -88,6 +90,10 @@ def main():
     p.add_argument('--latest', nargs='?', const=3, type=int, metavar='N',
                    help='analyze N most recent dbg_frame*.bmp (default 3)')
     p.add_argument('--batch', metavar='DUMP', help='analyze all DUMP_batch*.bmp files')
+    p.add_argument('--frames-dir', metavar='DIR',
+                   help='analyze frame_*.bmp in DIR (use --limit to cap count)')
+    p.add_argument('--limit', type=int, metavar='N',
+                   help='max frames to analyze (applies to --frames-dir and --glob)')
     p.add_argument('--sample', action='store_true', help='print center 5x5 pixel grid')
     p.add_argument('--bright-rows', nargs=2, type=int, metavar=('R1', 'R2'),
                    help='count bright pixels in row range')
@@ -96,7 +102,17 @@ def main():
     files = list(args.paths)
 
     if args.glob:
-        files += sorted(glob.glob(args.glob))
+        matched = sorted(glob.glob(args.glob))
+        if args.limit:
+            matched = matched[:args.limit]
+        files += matched
+
+    if args.frames_dir:
+        pattern = os.path.join(args.frames_dir, 'frame_*.bmp')
+        matched = sorted(glob.glob(pattern))
+        if args.limit:
+            matched = matched[:args.limit]
+        files += matched
 
     if args.latest is not None:
         pattern = os.path.join(BASE, 'dbg_frame*.bmp')
