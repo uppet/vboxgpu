@@ -848,7 +848,7 @@ public:
 
     void cmdBridgeCreateSwapchain(uint64_t deviceId, uint64_t swapchainId,
                                   uint32_t width, uint32_t height,
-                                  uint32_t imageCount, uint32_t imageFormat = 0) {
+                                  uint32_t imageCount) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_BRIDGE_CreateSwapchain);
         w_.writeU64(deviceId);
@@ -856,7 +856,6 @@ public:
         w_.writeU32(width);
         w_.writeU32(height);
         w_.writeU32(imageCount);
-        w_.writeU32(imageFormat); // guest-requested VkFormat; 0 = let host pick
         w_.endCommand(off);
     }
 

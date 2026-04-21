@@ -202,12 +202,6 @@ void IcdState::initDefaults() {
         addExt(name);
 
     // --- Surface formats ---
-    // Advertise UNORM only so DXVK always requests a UNORM swapchain.
-    // SRGB swapchain causes pipeline colorFmt mismatches: DXVK compiles blit
-    // pipelines with colorFmt=SRGB(50) but the host GPU may not support SRGB
-    // as a surface format, forcing us to create UNORM(44) anyway — then the
-    // pipeline(50) vs RT(44) mismatch causes GPU hangs / rendering artifacts.
-    // With UNORM-only: swapchain=UNORM(44), blit pipeline colorFmt=UNORM(44),
-    // internal SRGB RTs use their own format(50) pipelines — no mismatches.
+    surfaceFormats.push_back({ VK_FORMAT_B8G8R8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR });
     surfaceFormats.push_back({ VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR });
 }

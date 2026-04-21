@@ -120,6 +120,12 @@ struct IcdState {
     // BDA recording: buffer IDs already emitted via RecordBDA (deduplication)
     std::unordered_set<uint64_t> bdaRecorded_;
 
+    // Per-frame vertex/index buffer flush dedup: prevents sending same buffer data
+    // multiple times per frame when the same buffer is bound on every draw call.
+    // Cleared at AcquireNextImageKHR (start of next frame).
+    std::unordered_set<uint64_t> flushedBuffersThisFrame_;
+    std::mutex flushedBuffersMutex_;
+
     // GDI blit rate limiter: blit is driven by recv thread (actual rendered frames).
     // Cap at 60 FPS to avoid GDI saturation when game runs very fast.
     static constexpr int BLIT_INTERVAL_MS = 16;
@@ -158,24 +164,11 @@ struct IcdState {
     // Roundtrip timing: monotonic sequence ID for each batch
     uint32_t nextSeqId_ = 0;
 
-    // AcquireNextImageKHR: recv thread delivers imageIndex here.
-    // With pipelining, acquire uses round-robin prediction; this is consumed when available.
+    // AcquireNextImageKHR waits here for the imageIndex from the last present's response.
     std::mutex acquireMutex_;
     std::condition_variable acquireCV_;
     bool imageIndexReady_ = false;
     std::atomic<bool> firstPresented_{false};
-
-    // Pipelining: limit in-flight present batches to MAX_IN_FLIGHT.
-    // QueuePresent waits here if too many batches are outstanding.
-    // Recv thread decrements on each present ack.
-    static constexpr int MAX_IN_FLIGHT = 2;
-    int inFlightBatches_ = 0;   // guarded by inFlightMutex_
-    std::mutex inFlightMutex_;
-    std::condition_variable inFlightCV_;
-
-    // Predictive image index: last value returned by AcquireNextImageKHR.
-    // Round-robin mod swapchainImageCount when ack has not yet arrived.
-    uint32_t lastPredictedImageIndex_ = 0;
 
     // syncGetBufferDeviceAddress waits here for BDA results (also guards bdaCache).
     std::mutex bdaMutex_;

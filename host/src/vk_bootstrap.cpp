@@ -43,8 +43,7 @@ void createInstance(VulkanContext& ctx) {
 
     // Disable validation layer for host server — the proxy ICD sends commands
     // that may reference objects in unusual ways, causing false validation errors.
-    // Set env var VBOX_VALIDATION=1 to re-enable for debugging (expect perf hit).
-    bool enableValidation = (getenv("VBOX_VALIDATION") != nullptr);
+    bool enableValidation = false;  // disabled: validation layer causes ~34MB/s write throughput (vs expected GBs)
 
     const char* validationLayer = "VK_LAYER_KHRONOS_validation";
 
@@ -169,45 +168,21 @@ void createLogicalDevice(VulkanContext& ctx) {
     VkPhysicalDeviceExtendedDynamicState2FeaturesEXT eds2Features{};
     eds2Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT;
 
-    // VK_EXT_robustness2: enables nullDescriptor (null image/buffer views in descriptor writes)
-    // Required for DXVK's sparse descriptor arrays where unbound slots are written as NULL.
-    VkPhysicalDeviceRobustness2FeaturesEXT robustness2Features{};
-    robustness2Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT;
-
-    // Check if VK_EXT_robustness2 is available before adding to feature chain / ext list.
-    bool hasRobustness2 = false;
-    {
-        uint32_t extCount = 0;
-        vkEnumerateDeviceExtensionProperties(ctx.physicalDevice, nullptr, &extCount, nullptr);
-        std::vector<VkExtensionProperties> exts(extCount);
-        vkEnumerateDeviceExtensionProperties(ctx.physicalDevice, nullptr, &extCount, exts.data());
-        for (auto& e : exts) {
-            if (strcmp(e.extensionName, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME) == 0) {
-                hasRobustness2 = true;
-                break;
-            }
-        }
-    }
-
-    // Chain for query: deviceFeatures2 → vk11 → vk12 → vk13 → eds → eds2 [→ robustness2]
+    // Chain for query: deviceFeatures2 → vk11 → vk12 → vk13 → eds → eds2
     deviceFeatures2.pNext = &vk11Features;
     vk11Features.pNext = &vk12Features;
     vk12Features.pNext = &vk13Features;
     vk13Features.pNext = &edsFeatures;
     edsFeatures.pNext = &eds2Features;
-    if (hasRobustness2)
-        eds2Features.pNext = &robustness2Features;
 
     // Query: fills VK_TRUE for every feature the GPU actually supports
     vkGetPhysicalDeviceFeatures2(ctx.physicalDevice, &deviceFeatures2);
     // Pass the same struct chain to vkCreateDevice — enables everything supported.
 
-    std::vector<const char*> deviceExtensions = {
+    const char* deviceExtensions[] = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
         VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
     };
-    if (hasRobustness2)
-        deviceExtensions.push_back(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
 
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -215,8 +190,8 @@ void createLogicalDevice(VulkanContext& ctx) {
     createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueInfos.size());
     createInfo.pQueueCreateInfos = queueInfos.data();
     createInfo.pEnabledFeatures = nullptr; // using pNext chain instead
-    createInfo.enabledExtensionCount = (uint32_t)deviceExtensions.size();
-    createInfo.ppEnabledExtensionNames = deviceExtensions.data();
+    createInfo.enabledExtensionCount = 2;
+    createInfo.ppEnabledExtensionNames = deviceExtensions;
 
     if (vkCreateDevice(ctx.physicalDevice, &createInfo, nullptr, &ctx.device) != VK_SUCCESS)
         throw std::runtime_error("Failed to create logical device");

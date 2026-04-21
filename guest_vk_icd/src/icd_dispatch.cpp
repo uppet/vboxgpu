@@ -321,12 +321,6 @@ void IcdState::startRecvThread() {
 void IcdState::stopRecvThread() {
     recvRunning_ = false;
     transport.close(); // unblocks any pending recv
-    // Unblock QueuePresent if it's waiting on the in-flight backpressure gate.
-    {
-        std::lock_guard<std::mutex> lk(inFlightMutex_);
-        inFlightBatches_ = 0;
-        inFlightCV_.notify_all();
-    }
     if (recvThread_.joinable()) recvThread_.join();
 }
 
@@ -453,19 +447,10 @@ void IcdState::recvLoop() {
 
         // Signal the appropriate waiter
         if (isPresent) {
-            // Decrement in-flight counter — unblocks QueuePresent backpressure gate.
-            {
-                std::lock_guard<std::mutex> lk(inFlightMutex_);
-                if (inFlightBatches_ > 0) inFlightBatches_--;
-                inFlightCV_.notify_one();
-            }
-            // Deliver real image index for next AcquireNextImage (used when available).
-            {
-                std::lock_guard<std::mutex> lock(acquireMutex_);
-                currentImageIndex = imageIndex;
-                imageIndexReady_ = true;
-                acquireCV_.notify_one();
-            }
+            std::lock_guard<std::mutex> lock(acquireMutex_);
+            currentImageIndex = imageIndex;
+            imageIndexReady_ = true;
+            acquireCV_.notify_one();
         } else {
             // BDA query response: bdaCV_ already notified above if results present
         }
@@ -1395,11 +1380,10 @@ static VkResult VKAPI_CALL icd_vkCreateSwapchainKHR(
     g_icd.swapchainExtent = pInfo->imageExtent;
     g_icd.swapchainFormat = pInfo->imageFormat;
 
-    // Tell host to create swapchain with the format DXVK requested so that
-    // pipelines compiled with colorFmt=X match the host swapchain format.
+    // Tell host to create swapchain
     g_icd.encoder.cmdBridgeCreateSwapchain(1, id,
         pInfo->imageExtent.width, pInfo->imageExtent.height,
-        g_icd.swapchainImageCount, (uint32_t)pInfo->imageFormat);
+        g_icd.swapchainImageCount);
 
     return VK_SUCCESS;
 }
@@ -1419,76 +1403,56 @@ static VkResult VKAPI_CALL icd_vkGetSwapchainImagesKHR(
 }
 
 static VkResult VKAPI_CALL icd_vkAcquireNextImageKHR(
-    VkDevice, VkSwapchainKHR, uint64_t /*timeout*/, VkSemaphore, VkFence, uint32_t* pIndex)
+    VkDevice, VkSwapchainKHR, uint64_t timeout, VkSemaphore, VkFence, uint32_t* pIndex)
 {
     // First acquire (before any present): return image 0 immediately — no response yet.
     if (!g_icd.firstPresented_) {
-        g_icd.lastPredictedImageIndex_ = 0;
         *pIndex = 0;
         return VK_SUCCESS;
     }
-    // Pipelining: consume real image index from recv thread if already available.
-    // Otherwise predict round-robin — with FIFO present mode the sequence is deterministic.
+    // Wait for recv thread to deliver imageIndex from the last QueuePresent response.
+    std::unique_lock<std::mutex> lock(g_icd.acquireMutex_);
+    auto waitMs = (timeout == UINT64_MAX)
+        ? std::chrono::milliseconds(5000)
+        : std::chrono::milliseconds(timeout / 1000000 + 1);
+    g_icd.acquireCV_.wait_for(lock, waitMs, []{ return g_icd.imageIndexReady_; });
+    *pIndex = g_icd.currentImageIndex;
+    g_icd.imageIndexReady_ = false;
+    // Clear per-frame buffer flush dedup set: new frame starts, buffers may be updated.
     {
-        std::lock_guard<std::mutex> lock(g_icd.acquireMutex_);
-        if (g_icd.imageIndexReady_) {
-            g_icd.lastPredictedImageIndex_ = g_icd.currentImageIndex;
-            g_icd.imageIndexReady_ = false;
-            *pIndex = g_icd.lastPredictedImageIndex_;
-            return VK_SUCCESS;
-        }
+        std::lock_guard<std::mutex> lk(g_icd.flushedBuffersMutex_);
+        g_icd.flushedBuffersThisFrame_.clear();
     }
-    // Predict: advance round-robin without blocking.
-    g_icd.lastPredictedImageIndex_ =
-        (g_icd.lastPredictedImageIndex_ + 1) % g_icd.swapchainImageCount;
-    *pIndex = g_icd.lastPredictedImageIndex_;
     return VK_SUCCESS;
 }
 
 static VkResult VKAPI_CALL icd_vkQueuePresentKHR(VkQueue q, const VkPresentInfoKHR* pInfo)
 {
-    // Flush dirty mapped memory once per present (not per QueueSubmit).
-    // All WriteMemory commands must appear before cmdBridgeQueuePresent in the stream,
-    // so hold encoder lock for the entire encode section (not sendBatch).
-    {
-        ENC_LOCK;
-        g_icd.flushMappedMemory();
-        g_icd.encoder.cmdBridgeQueuePresent(2, // H_QUEUE
-            ndToId((uint64_t)pInfo->pSwapchains[0]),
-            pInfo->waitSemaphoreCount > 0 ? ndToId((uint64_t)pInfo->pWaitSemaphores[0]) : 0);
+    g_icd.encoder.cmdBridgeQueuePresent(2, // H_QUEUE
+        ndToId((uint64_t)pInfo->pSwapchains[0]),
+        pInfo->waitSemaphoreCount > 0 ? ndToId((uint64_t)pInfo->pWaitSemaphores[0]) : 0);
 
-        // Walk pNext for VkSwapchainPresentFenceInfoEXT (sType=1000275001) —
-        // DXVK presenter attaches fences that must be signaled after present completes.
-        // Forward them as empty QueueSubmit so the host signals them after present.
-        {
-            struct PresentFenceInfo { VkStructureType sType; const void* pNext; uint32_t swapchainCount; const VkFence* pFences; };
-            const VkBaseInStructure* pNext = reinterpret_cast<const VkBaseInStructure*>(pInfo->pNext);
-            while (pNext) {
-                if (pNext->sType == (VkStructureType)1000275001) { // VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT
-                    auto* fi = reinterpret_cast<const PresentFenceInfo*>(pNext);
-                    for (uint32_t i = 0; i < pInfo->swapchainCount; i++) {
-                        if (fi->pFences[i])
-                            g_icd.encoder.cmdQueueSubmit(toId(q), 0, 0, 0, (uint64_t)fi->pFences[i]);
-                    }
-                    break;
+    // Walk pNext for VkSwapchainPresentFenceInfoEXT (sType=1000275001) —
+    // DXVK presenter attaches fences that must be signaled after present completes.
+    // Forward them as empty QueueSubmit so the host signals them after present.
+    {
+        struct PresentFenceInfo { VkStructureType sType; const void* pNext; uint32_t swapchainCount; const VkFence* pFences; };
+        const VkBaseInStructure* pNext = reinterpret_cast<const VkBaseInStructure*>(pInfo->pNext);
+        while (pNext) {
+            if (pNext->sType == (VkStructureType)1000275001) { // VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT
+                auto* fi = reinterpret_cast<const PresentFenceInfo*>(pNext);
+                for (uint32_t i = 0; i < pInfo->swapchainCount; i++) {
+                    if (fi->pFences[i])
+                        g_icd.encoder.cmdQueueSubmit(toId(q), 0, 0, 0, (uint64_t)fi->pFences[i]);
                 }
-                pNext = pNext->pNext;
+                break;
             }
+            pNext = pNext->pNext;
         }
     }
 
-    // Backpressure: block if too many present batches are already in flight.
-    // Recv thread decrements inFlightBatches_ on each ack, unblocking us here.
-    {
-        std::unique_lock<std::mutex> lk(g_icd.inFlightMutex_);
-        g_icd.inFlightCV_.wait(lk, []{
-            return g_icd.inFlightBatches_ < IcdState::MAX_IN_FLIGHT;
-        });
-        g_icd.inFlightBatches_++;
-    }
-
-    // Send batch to host. Recv thread receives response asynchronously:
-    // updates currentImageIndex, blits the frame, decrements inFlightBatches_.
+    // Fire-and-forget: send batch to host. Recv thread will receive the response,
+    // update currentImageIndex, blit the frame, and signal acquireCV_.
     g_icd.sendBatch(true); // true = present batch
     g_icd.firstPresented_ = true;
 
@@ -1941,9 +1905,11 @@ static VkResult VKAPI_CALL icd_vkGetFenceStatus(VkDevice, VkFence) { return VK_S
 // --- Queue submit ---
 
 static VkResult VKAPI_CALL icd_vkQueueSubmit(VkQueue q, uint32_t count, const VkSubmitInfo* pSubmits, VkFence fence) {
-    // Hold encoder lock so QueueSubmit commands don't interleave with other threads.
-    // flushMappedMemory is now done once per present in icd_vkQueuePresentKHR.
+    // Hold encoder lock for the entire flush+submit sequence so all WriteMemory
+    // commands appear before QueueSubmit in the stream, with no interleaving
+    // from other DXVK threads.
     ENC_LOCK;
+    g_icd.flushMappedMemory();
     for (uint32_t i = 0; i < count; i++) {
         uint32_t cbCount = pSubmits[i].commandBufferCount;
         uint64_t waitSem = pSubmits[i].waitSemaphoreCount > 0 ? (uint64_t)pSubmits[i].pWaitSemaphores[0] : 0;
@@ -1970,6 +1936,7 @@ static VkResult VKAPI_CALL icd_vkQueueSubmit(VkQueue q, uint32_t count, const Vk
 
 static VkResult VKAPI_CALL icd_vkQueueSubmit2(VkQueue q, uint32_t count, const VkSubmitInfo2* pSubmits, VkFence fence) {
     ENC_LOCK;
+    g_icd.flushMappedMemory();
     for (uint32_t i = 0; i < count; i++) {
         uint32_t cbCount = pSubmits[i].commandBufferInfoCount;
         uint64_t waitSem = pSubmits[i].waitSemaphoreInfoCount > 0 ? (uint64_t)pSubmits[i].pWaitSemaphoreInfos[0].semaphore : 0;
@@ -2257,7 +2224,7 @@ static void VKAPI_CALL icd_vkCmdBindVertexBuffers(VkCommandBuffer cb, uint32_t f
     for (uint32_t i = 0; i < bindingCount; i++) {
         ids[i] = (uint64_t)pBuffers[i]; offs[i] = pOffsets[i];
     }
-    // No explicit flush: dirty tracking (GetWriteWatch in flushMappedMemory at QueuePresent time)
+    // No explicit flush: dirty tracking (GetWriteWatch in flushMappedMemory at QueueSubmit time)
     // captures all writes. WriteMemory is sent before BatchSubmit, so GPU reads correct data.
     g_icd.encoder.cmdBindVertexBuffers(toId(cb), firstBinding, bindingCount,
         ids.data(), offs.data(), nullptr, nullptr);

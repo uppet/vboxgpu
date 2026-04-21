@@ -15,7 +15,6 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-#include <array>
 #include <functional>
 #include <string>
 
@@ -209,10 +208,6 @@ private:
     // Needed because multiple CBs may be recorded concurrently and interleave BeginRendering calls,
     // making the single bool above unreliable.
     std::unordered_map<uint64_t, bool> cbIsSwapchain_;
-    // Swapchain image view tracking: viewId → swapchain image index.
-    // Populated when handleCreateImageView sees a sentinel image ID (0xFFF00000+i).
-    // Used by handleCmdBeginRendering to identify swapchain views without fallback.
-    std::unordered_map<uint64_t, uint32_t> swapchainViewImageIndex_;
     VkSemaphore acquireSemaphore_ = VK_NULL_HANDLE; // for swapchain acquire sync
     VkFence acquireFence_ = VK_NULL_HANDLE;
     // Double-buffered readback fences: one per slot
@@ -272,7 +267,6 @@ private:
     bool readbackFrameAsync(uint32_t imageIndex, HostSwapchain& sc, int slot);
 
     bool error_ = false;
-    bool gpuHung_ = false;  // true if a fence wait timed out (GPU device lost)
 
     // Buffer → memory binding tracking (for staging snapshot in CopyBuffer*)
     struct BufferMemBinding { uint64_t memoryId; VkDeviceSize memoryOffset; };
@@ -303,49 +297,6 @@ private:
     // (semaphore never signaled). In that case we skip the wait.
     // Entry is removed (consumed) when the semaphore is used as a wait.
     std::unordered_set<uint64_t> semPendingSignal_; // stream semaphore IDs
-
-    // ---------------------------------------------------------------------------
-    // Method-D pipelining: parallel CB recording.
-    // After the parse loop, each CB's task list is executed by a worker thread.
-    // Handle lookups are resolved at parse time (main thread); lambdas only call Vulkan.
-    std::unordered_map<uint64_t, std::vector<std::function<void()>>> cbTasks_;
-    // cbIds currently in RECORDING state (BeginCB seen, EndCB lambda not yet run).
-    // Guards barrier/draw lambdas from firing on EXECUTABLE-state CBs.
-    std::unordered_set<uint64_t> recordingCbIds_;
-
-    // ---------------------------------------------------------------------------
-    // Method-A pipelining: overlap decode with GPU execution.
-    //
-    // Two-slot command buffer scheme: each guest CB has 2 host CBs.
-    //   Slot 0: used on even frames, slot 1: used on odd frames.
-    //   When beginning a CB in slot S, we only wait slotFences_[S] — which is
-    //   from 2 frames ago. With MAX_IN_FLIGHT=2 on the guest, that fence is
-    //   typically already signaled before the batch arrives → 0 ms wait.
-    //
-    // WriteMemory staging: data is buffered in RAM during decode; applied to
-    //   GPU-visible memory only in flushPendingSubmits(), AFTER waiting the
-    //   prev-frame fence (slotFences_[1-frameSlot_]). This defers the fence
-    //   wait to the END of decode so command recording proceeds without stalling.
-    // ---------------------------------------------------------------------------
-    struct StagedWrite {
-        uint64_t    memId;
-        VkDeviceSize offset;
-        uint32_t    size;
-        std::vector<uint8_t> data;
-    };
-    std::vector<StagedWrite> stagedWrites_;
-
-    // Per-guest-CB: two host VkCommandBuffers (one per slot).
-    std::unordered_map<uint64_t, std::array<VkCommandBuffer, 2>> cbDoubleBuffer_;
-    // Pool each guest CB was allocated from (for on-demand slot-1 allocation).
-    std::unordered_map<uint64_t, VkCommandPool> cbPoolMap_;
-
-    // Current frame slot (0 or 1, toggled at the start of each execute()).
-    int  frameSlot_        = 0;
-    // Per-slot fence: set after flushPendingSubmits, waited before reusing that slot's CBs.
-    VkFence slotFences_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
-    // Last fence waited per slot; re-wait when slotFences_[s] changes (intra-batch submit).
-    VkFence slotFenceLastWaited_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
 
 public:
     // BDA query results: accumulated during execute(), consumed by server
