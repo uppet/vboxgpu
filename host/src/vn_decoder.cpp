@@ -1057,9 +1057,9 @@ void VnDecoder::handleWriteMemory(VnStreamReader& r) {
     }
     auto* mapped = static_cast<uint8_t*>(basePtr) + offset;
     r.readBytes(mapped, size);  // sync copy — no batch buffer pointer stored
-    // BDA patching: only scan memory that has BDA buffers bound (bdaMemoryIds_ whitelist).
-    // Skipping texture-only memory eliminates ~62ms/4MB of useless scanning.
-    if (!liveBdaToReplayBda_.empty() && bdaMemoryIds_.count(memId)) {
+    // BDA patching: skip entirely when all addresses are identity (live==replay, local run).
+    // Otherwise only scan memory that has BDA buffers bound (bdaMemoryIds_ whitelist).
+    if (!liveBdaToReplayBda_.empty() && !bdaAllIdentical_ && bdaMemoryIds_.count(memId)) {
         if (size >= kAsyncBdaPatchThreshold) {
             enqueueBdaPatch(mapped, size);
         } else {
@@ -2617,9 +2617,12 @@ void VnDecoder::handleBridgeRecordBDA(VnStreamReader& r) {
     auto it = replayBdaByBufferId_.find(bufferId);
     if (it != replayBdaByBufferId_.end()) {
         liveBdaToReplayBda_[liveAddr] = it->second;
-        fprintf(stderr, "[RecordBDA] buf=%llu live=0x%llx -> replay=0x%llx\n",
+        // Track if all BDA entries are identity (live==replay) — skip scanning if so
+        if (liveAddr != it->second) bdaAllIdentical_ = false;
+        fprintf(stderr, "[RecordBDA] buf=%llu live=0x%llx -> replay=0x%llx%s\n",
                 (unsigned long long)bufferId, (unsigned long long)liveAddr,
-                (unsigned long long)it->second);
+                (unsigned long long)it->second,
+                liveAddr == it->second ? "" : " PATCHING");
     } else {
         // Should not happen: BindBufferMemory always precedes vkGetBufferDeviceAddress
         fprintf(stderr, "[RecordBDA] buf=%llu live=0x%llx (no replay addr — BDA buffer not yet bound?)\n",

@@ -318,6 +318,7 @@ public:
     // Memory IDs that have BDA buffers bound — only these need BDA patching in WriteMemory.
     // Populated in handleBindBufferMemory when buffer has SHADER_DEVICE_ADDRESS_BIT.
     std::unordered_set<uint64_t> bdaMemoryIds_;
+    bool bdaAllIdentical_ = true;  // true when all live==replay (local run), skip scanning
 
     // Roundtrip timing: seqId from the most recent TimingSeq command in this batch
     uint32_t currentSeqId_ = 0;
