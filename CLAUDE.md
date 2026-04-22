@@ -71,10 +71,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 错误路径日志（`FAILED`、`SKIP` 等）始终保留
 
 M1.7 / 后续目标：
+
+架构升级（优先）：
+- **Host 常驻多客户端服务**：host 变为 1-to-N 服务进程，accept loop 接受多个连接，每个连接独立 VnDecoder + VkDevice 实例，TCP 断开时回收该客户端的设备资源，host 不退出
+
+性能优化：
+- **decode/GPU 流水线化（Method-A）**：当前 host 串行处理 batch（recv→decode→GPU→readback→send），GPU 和 CPU 互相等待。双缓冲流水线：decode batch N+1 同时 GPU 执行 batch N，预期提升 30-50% FPS
+- **BDA patching 按需 skip**：本机运行时 liveBdaToReplayBda_ 中 live==replay，所有 BDA scan 写入值等于原值。检测此条件后整个 BDA scan 可跳过
+- Mapped memory 增量传输（dirty tracking，当前全量 flush 可以满足正确性）
+
+功能完善：
 - Stencil test 支持
 - Mipmap 支持
 - 多 Render Target (MRT)
-- Mapped memory 增量传输（dirty tracking，当前全量 flush 可以满足正确性）
 - 更多游戏兼容性测试
 
 ## 架构要点

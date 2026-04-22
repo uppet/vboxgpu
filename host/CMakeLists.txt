@@ -65,6 +65,7 @@ target_compile_definitions(vbox_host_cmd PRIVATE
 # --- TCP server mode executable ---
 set(SERVER_SOURCES
     src/main_server.cpp
+    src/client_session.cpp
     src/vk_bootstrap.cpp
     src/vn_decoder.cpp
     src/win_capture.cpp

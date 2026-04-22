@@ -3,7 +3,10 @@
 
 #include "vn_decoder.h"
 #include "win_capture.h"
+#include "client_session.h"
 #include "../../common/transport/tcp_transport.h"
+#include <dwmapi.h>
+#pragma comment(lib, "dwmapi.lib")
 #include <lz4.h>
 #include <cstdio>
 #include <vector>
@@ -48,12 +51,111 @@ static void hostAbortHandler(int) {
     _exit(99);
 }
 
-static constexpr uint32_t WINDOW_WIDTH = 800;
-static constexpr uint32_t WINDOW_HEIGHT = 600;
+static constexpr uint32_t WINDOW_WIDTH = 400;
+static constexpr uint32_t WINDOW_HEIGHT = 300;
 static std::atomic<bool> g_running{true};
+
+// Server dashboard state (updated by accept thread, read by WM_PAINT)
+static uint16_t g_port = 0;
+static int g_maxSessions = 0;
+static std::vector<std::unique_ptr<ClientSession>>* g_sessions = nullptr;
+static int g_totalConnections = 0;
+static DWORD g_startTime = 0;
+#define WM_REFRESH_DASHBOARD (WM_USER + 1)
+#define IDC_HIDE_WINDOWS 101
+static bool g_cloakWindows = false;
+
+static void applyCloakToSessions(bool cloak) {
+    g_cloakWindows = cloak;
+    if (!g_sessions) return;
+    BOOL val = cloak ? TRUE : FALSE;
+    for (auto& s : *g_sessions) {
+        if (s && s->hwnd())
+            DwmSetWindowAttribute(s->hwnd(), DWMWA_CLOAK, &val, sizeof(val));
+    }
+}
 
 static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
+    case WM_CREATE:
+        g_startTime = GetTickCount();
+        SetTimer(hwnd, 1, 500, nullptr);
+        CreateWindowExA(0, "BUTTON", "Hide render windows",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            10, 260, 200, 24, hwnd, (HMENU)IDC_HIDE_WINDOWS,
+            ((LPCREATESTRUCT)lParam)->hInstance, nullptr);
+        return 0;
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDC_HIDE_WINDOWS) {
+            bool checked = (SendDlgItemMessageA(hwnd, IDC_HIDE_WINDOWS, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            applyCloakToSessions(checked);
+        }
+        return 0;
+    case WM_TIMER:
+        InvalidateRect(hwnd, nullptr, TRUE);
+        return 0;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT rc; GetClientRect(hwnd, &rc);
+
+        // Background
+        FillRect(hdc, &rc, (HBRUSH)(COLOR_WINDOW + 1));
+
+        SetBkMode(hdc, TRANSPARENT);
+        HFONT font = CreateFontA(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, FIXED_PITCH, "Consolas");
+        HFONT fontBold = CreateFontA(18, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, FIXED_PITCH, "Consolas");
+        SelectObject(hdc, fontBold);
+
+        int y = 10;
+        char buf[256];
+
+        // Title
+        snprintf(buf, sizeof(buf), "VBox GPU Bridge Server");
+        TextOutA(hdc, 10, y, buf, (int)strlen(buf)); y += 24;
+
+        SelectObject(hdc, font);
+
+        // Uptime
+        DWORD upSec = (GetTickCount() - g_startTime) / 1000;
+        snprintf(buf, sizeof(buf), "Uptime: %um %02us    Port: %u",
+                 upSec / 60, upSec % 60, g_port);
+        TextOutA(hdc, 10, y, buf, (int)strlen(buf)); y += 20;
+
+        // Session stats
+        int active = 0;
+        if (g_sessions) {
+            for (auto& s : *g_sessions)
+                if (s && s->isRunning()) active++;
+        }
+        snprintf(buf, sizeof(buf), "Sessions: %d/%d active    Total: %d",
+                 active, g_maxSessions, g_totalConnections);
+        TextOutA(hdc, 10, y, buf, (int)strlen(buf)); y += 24;
+
+        // Per-session list
+        if (g_sessions) {
+            for (auto& s : *g_sessions) {
+                if (!s) continue;
+                snprintf(buf, sizeof(buf), "  [%d] %s",
+                         s->id(), s->isRunning() ? "ACTIVE" : "ended");
+                SetTextColor(hdc, s->isRunning() ? RGB(0, 128, 0) : RGB(128, 128, 128));
+                TextOutA(hdc, 10, y, buf, (int)strlen(buf)); y += 18;
+            }
+        }
+        SetTextColor(hdc, RGB(0, 0, 0));
+
+        y += 10;
+        snprintf(buf, sizeof(buf), "ESC or close window to shutdown");
+        SetTextColor(hdc, RGB(128, 128, 128));
+        TextOutA(hdc, 10, y, buf, (int)strlen(buf));
+
+        DeleteObject(font);
+        DeleteObject(fontBold);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
     case WM_CLOSE:
     case WM_DESTROY:
         g_running = false;
@@ -373,295 +475,111 @@ int main(int argc, char* argv[]) {
     }
 #endif
 
-    VnDecoder decoder;
-    decoder.init(vk.physicalDevice, vk.device, vk.graphicsQueue, vk.graphicsFamily, vk.surface);
+    // --- Multi-client accept loop ---
+    int maxSessions = DEFAULT_MAX_SESSIONS;
+    const char* maxStr = getenv("VBOXGPU_MAX_SESSIONS");
+    if (maxStr) maxSessions = atoi(maxStr);
+    if (maxSessions < 1) maxSessions = 1;
+    fprintf(stderr, "[Host] Max concurrent sessions: %d\n", maxSessions);
 
-    // --- Start TCP server ---
-    TcpReceiver server;
-    if (!server.listen(port)) {
-        fprintf(stderr, "Failed to start TCP server on port %u\n", port);
+    // TCP listen socket (shared across all sessions)
+    WSADATA wsa;
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+    SOCKET listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    int reuseAddr = 1;
+    setsockopt(listenSock, SOL_SOCKET, SO_REUSEADDR,
+               reinterpret_cast<const char*>(&reuseAddr), sizeof(reuseAddr));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(port);
+    if (::bind(listenSock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        fprintf(stderr, "[Host] Bind failed: %d\n", WSAGetLastError());
         return 1;
     }
-    if (!server.accept()) {
-        fprintf(stderr, "Failed to accept connection\n");
-        return 1;
-    }
+    ::listen(listenSock, maxSessions);
+    fprintf(stderr, "[TcpReceiver] Listening on port %u...\n", port);
 
-    fprintf(stderr, "[Host] Connection established. Processing command streams.\n");
+    // Session pool
+    std::vector<std::unique_ptr<ClientSession>> sessions;
+    int nextSessionId = 0;
+    g_sessions = &sessions;
+    g_port = port;
+    g_maxSessions = maxSessions;
 
-    // Check if frame readback is disabled (saves bandwidth for sortcourt etc.)
-    bool disableReadback = (getenv("VBOXGPU_NO_READBACK") != nullptr);
-    decoder.noReadback_ = disableReadback;
-    if (disableReadback)
-        fprintf(stderr, "[Host] Frame readback DISABLED (VBOXGPU_NO_READBACK)\n");
-
-    // --- Async LZ4 compress thread ---
-    // Decode thread posts raw frame pixels here; compress thread LZ4s them
-    // in the background while the next frame's GPU work runs.
-    // Adds ~1 frame display latency but removes ~3ms LZ4 from the critical path.
-
-    struct CompressJob {
-        std::vector<uint8_t> rawData;
-        uint32_t w = 0, h = 0;
-        bool valid = false;
-        // Frame-level timing passthrough
-        uint32_t frameId = 0;
-        uint64_t presentUs = 0;
-        uint64_t readbackUs = 0;
-    };
-    struct CompressResult {
-        std::vector<uint8_t> compData;
-        uint32_t w = 0, h = 0, rawSize = 0, compSize = 0;
-        bool valid = false;
-        // Frame-level timing passthrough
-        uint32_t frameId = 0;
-        uint64_t presentUs = 0;
-        uint64_t readbackUs = 0;
-        uint64_t compressDoneUs = 0;
-    };
-
-    std::mutex          cjMutex;   // guards compJob
-    std::condition_variable cjCV;
-    CompressJob         compJob;
-
-    std::mutex          crMutex;   // guards compResult
-    CompressResult      compResult;
-
-    std::atomic<bool>   compRunning{true};
-
-    std::thread compressThread([&]() {
-        while (compRunning) {
-            std::unique_lock<std::mutex> lock(cjMutex);
-            cjCV.wait(lock, [&] { return compJob.valid || !compRunning; });
-            if (!compRunning) break;
-
-            uint32_t w = compJob.w, h = compJob.h;
-            uint32_t jobFrameId = compJob.frameId;
-            uint64_t jobPresentUs = compJob.presentUs;
-            uint64_t jobReadbackUs = compJob.readbackUs;
-            std::vector<uint8_t> localRaw = std::move(compJob.rawData);
-            compJob.valid = false;
-            lock.unlock(); // release lock before heavy LZ4 work
-
-            uint32_t rawSize = static_cast<uint32_t>(localRaw.size());
-            int bound = LZ4_compressBound(rawSize);
-            std::vector<uint8_t> compressed(bound);
-            int csz = LZ4_compress_default(
-                reinterpret_cast<const char*>(localRaw.data()),
-                reinterpret_cast<char*>(compressed.data()),
-                rawSize, bound);
-
-            if (csz > 0) {
-                compressed.resize(csz);
-                std::lock_guard<std::mutex> rlock(crMutex);
-                compResult.compData      = std::move(compressed);
-                compResult.w             = w;
-                compResult.h             = h;
-                compResult.rawSize       = rawSize;
-                compResult.compSize      = static_cast<uint32_t>(csz);
-                compResult.valid         = true;
-                compResult.frameId       = jobFrameId;
-                compResult.presentUs     = jobPresentUs;
-                compResult.readbackUs    = jobReadbackUs;
-                compResult.compressDoneUs = rtNowUs();
-            } else {
-                fprintf(stderr, "[Compress] LZ4 failed for %ux%u\n", w, h);
-            }
-        }
-    });
-
-    // --- Worker thread: recv → decode → execute → send response ---
-    // Runs on a separate thread so the main thread can pump window messages
-    // without being blocked by vkWaitForFences or other long Vulkan operations.
-
-    // FPS counter
-    int fpsFrameCount = 0;
-    auto fpsLastTime = std::chrono::steady_clock::now();
-
-    std::thread workerThread([&]() {
-        constexpr size_t BUF_SIZE = 256 * 1024 * 1024; // 256 MB max per message
-        std::vector<uint8_t> recvBuf(BUF_SIZE);
-        // Persistent send buffer — avoids per-frame allocation
-        std::vector<uint8_t> sendBuf;
+    // --- Accept loop: spawn ClientSession per connection ---
+    // Accept runs on a dedicated thread; main thread pumps window messages.
+    std::thread acceptThread([&]() {
         while (g_running) {
-            // Receive a command stream message (blocking)
-            size_t bytesRead = 0;
-            if (!server.recv(recvBuf.data(), BUF_SIZE, bytesRead)) {
-                fprintf(stderr, "[Host] Client disconnected. Waiting for reconnect...\n");
-                decoder.cleanup();
-                decoder.init(vk.physicalDevice, vk.device, vk.graphicsQueue,
-                             vk.graphicsFamily, vk.surface);
-                server.closeClient();
-                if (!server.accept()) {
-                    fprintf(stderr, "[Host] Re-accept failed, shutting down.\n");
-                    g_running = false;
-                    PostMessageA(hwnd, WM_CLOSE, 0, 0);
-                    break;
-                }
-                fprintf(stderr, "[Host] Client reconnected.\n");
+            // Reap finished sessions
+            sessions.erase(
+                std::remove_if(sessions.begin(), sessions.end(),
+                    [](auto& s) { return !s->isRunning(); }),
+                sessions.end());
+
+            if ((int)sessions.size() >= maxSessions) {
+                Sleep(100); // at capacity, poll for slot
                 continue;
             }
 
-#if VBOXGPU_TIMING
-            decoder.batchRecvUs_ = rtNowUs();
-            RT_LOG(0, "T2", "recv %zu bytes", bytesRead);
-#endif
-#ifdef VBOXGPU_VERBOSE
-            fprintf(stderr, "[Host] Received %zu bytes\n", bytesRead);
-#endif
-
-            // Dump to file if recording
-            if (dumpFile) {
-                uint32_t sz = static_cast<uint32_t>(bytesRead);
-                fwrite(&sz, sizeof(sz), 1, dumpFile);
-                fwrite(recvBuf.data(), 1, bytesRead, dumpFile);
-                fflush(dumpFile);
-            }
-
-            // Execute the command stream
-            if (!decoder.execute(recvBuf.data(), bytesRead)) {
-                fprintf(stderr, "[Host] Command stream execution failed.\n");
-                g_running = false;
-                PostMessageA(hwnd, WM_CLOSE, 0, 0);
+            SOCKET cs = ::accept(listenSock, nullptr, nullptr);
+            if (cs == INVALID_SOCKET) {
+                if (g_running) fprintf(stderr, "[Host] accept() error: %d\n", WSAGetLastError());
                 break;
             }
+            // Match client-side socket settings
+            int flag = 1;
+            setsockopt(cs, IPPROTO_TCP, TCP_NODELAY,
+                       reinterpret_cast<const char*>(&flag), sizeof(flag));
+            int bufsz = 4 * 1024 * 1024;
+            setsockopt(cs, SOL_SOCKET, SO_SNDBUF,
+                       reinterpret_cast<const char*>(&bufsz), sizeof(bufsz));
+            setsockopt(cs, SOL_SOCKET, SO_RCVBUF,
+                       reinterpret_cast<const char*>(&bufsz), sizeof(bufsz));
 
-            // Post raw frame pixels to compress thread (fast memcpy, non-blocking).
-            // Compress thread will LZ4 in background while next frame renders on GPU.
-            if (!disableReadback && decoder.hasReadback()) {
-                auto* rawPtr = static_cast<const uint8_t*>(decoder.getReadbackData());
-                uint32_t rawSize = decoder.getReadbackSize();
-                {
-                    std::lock_guard<std::mutex> lock(cjMutex);
-                    compJob.rawData.assign(rawPtr, rawPtr + rawSize);
-                    compJob.w = decoder.getReadbackWidth();
-                    compJob.h = decoder.getReadbackHeight();
-                    compJob.valid = true;
-#if VBOXGPU_TIMING
-                    compJob.frameId   = decoder.readyFrameTiming_.frameId;
-                    compJob.presentUs = decoder.readyFrameTiming_.presentUs;
-                    compJob.readbackUs = decoder.readyFrameTiming_.readbackUs;
-#endif
-                }
-                cjCV.notify_one();
-            }
+            int sid = nextSessionId++;
+            g_totalConnections = sid + 1;
+            fprintf(stderr, "[Host] Client connected → Session %d (active: %d/%d)\n",
+                    sid, (int)sessions.size() + 1, maxSessions);
 
-            // Take whatever compressed result the compress thread has ready (non-blocking).
-            // Will be the frame from one iteration ago — acceptable 1-frame display lag.
-            CompressResult result;
-            if (!disableReadback) {
-                std::lock_guard<std::mutex> lock(crMutex);
-                if (compResult.valid) {
-                    result = std::move(compResult);
-                    compResult.valid = false;
+            auto session = std::make_unique<ClientSession>(
+                sid, vk.physicalDevice, vk.instance, hInstance);
+            session->start(cs);
+            // Apply cloak if checkbox is checked
+            if (g_cloakWindows && session->hwnd()) {
+                // Small delay — window created on worker thread, may not exist yet
+                Sleep(100);
+                if (session->hwnd()) {
+                    BOOL val = TRUE;
+                    DwmSetWindowAttribute(session->hwnd(), DWMWA_CLOAK, &val, sizeof(val));
                 }
             }
-
-            // Build response: [header(16)][LZ4 frame][bdaCount(4)][{bufId(8),addr(8)}*N]
-            auto* sc = decoder.getFirstSwapchain();
-            uint32_t imageIndex = sc ? sc->currentImageIndex : 0;
-            size_t payloadSize = 16; // minimum: 16-byte header
-
-            // FPS counter — print once per second
-            fpsFrameCount++;
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - fpsLastTime).count();
-            if (elapsed >= 1000) {
-                fprintf(stderr, "[Host] FPS: %.1f\n", fpsFrameCount * 1000.0 / elapsed);
-                fpsFrameCount = 0;
-                fpsLastTime = now;
-            }
-
-            size_t bdaBytes = 4 + decoder.pendingBdaResults_.size() * 16;
-            // Timing suffix: batch(20) + frame(28) = 48 bytes
-            // Batch: [seqId(4)][recvUs(8)][sendUs(8)]
-            // Frame: [frameId(4)][presentUs(8)][readbackUs(8)][compressDoneUs(8)]
-            constexpr size_t TIMING_BYTES = 48;
-            if (result.valid) {
-                uint32_t csz = result.compSize;
-                if (sendBuf.size() < 16 + csz + bdaBytes + TIMING_BYTES)
-                    sendBuf.resize(16 + csz + bdaBytes + TIMING_BYTES);
-                memcpy(sendBuf.data(),      &imageIndex,    4);
-                memcpy(sendBuf.data() + 4,  &result.w,      4);
-                memcpy(sendBuf.data() + 8,  &result.h,      4);
-                memcpy(sendBuf.data() + 12, &csz,           4);
-                memcpy(sendBuf.data() + 16, result.compData.data(), csz);
-                payloadSize = 16 + csz;
-
-                static int logCount = 0;
-                if (++logCount <= 3)
-                    fprintf(stderr, "[Host] Frame %ux%u: %u -> %u bytes (%.1fx)\n",
-                            result.w, result.h, result.rawSize, csz,
-                            (float)result.rawSize / csz);
-            } else {
-                if (sendBuf.size() < 16 + bdaBytes + TIMING_BYTES)
-                    sendBuf.resize(16 + bdaBytes + TIMING_BYTES);
-                memset(sendBuf.data(), 0, 16);
-                memcpy(sendBuf.data(), &imageIndex, 4);
-                payloadSize = 16;
-            }
-
-            // Append BDA query results
-            uint32_t bdaCount = static_cast<uint32_t>(decoder.pendingBdaResults_.size());
-            memcpy(sendBuf.data() + payloadSize, &bdaCount, 4);
-            for (uint32_t i = 0; i < bdaCount; i++) {
-                memcpy(sendBuf.data() + payloadSize + 4 + i * 16,
-                       &decoder.pendingBdaResults_[i].bufferId, 8);
-                memcpy(sendBuf.data() + payloadSize + 4 + i * 16 + 8,
-                       &decoder.pendingBdaResults_[i].address, 8);
-            }
-            payloadSize += 4 + bdaCount * 16;
-
-#if VBOXGPU_TIMING
-            // Append timing suffix: batch(20) + frame(28) = 48 bytes
-            uint64_t hostSendUs = rtNowUs();
-            if (sendBuf.size() < payloadSize + TIMING_BYTES)
-                sendBuf.resize(payloadSize + TIMING_BYTES);
-            // Batch timing: [seqId(4)][recvUs(8)][sendUs(8)]
-            size_t tp = payloadSize;
-            memcpy(sendBuf.data() + tp,      &decoder.currentSeqId_, 4);
-            memcpy(sendBuf.data() + tp + 4,  &decoder.batchRecvUs_,  8);
-            memcpy(sendBuf.data() + tp + 12, &hostSendUs,            8);
-            // Frame timing: [frameId(4)][presentUs(8)][readbackUs(8)][compressDoneUs(8)]
-            uint32_t ftFrameId = result.valid ? result.frameId : 0;
-            uint64_t ftPresentUs = result.valid ? result.presentUs : 0;
-            uint64_t ftReadbackUs = result.valid ? result.readbackUs : 0;
-            uint64_t ftCompressUs = result.valid ? result.compressDoneUs : 0;
-            memcpy(sendBuf.data() + tp + 20, &ftFrameId,     4);
-            memcpy(sendBuf.data() + tp + 24, &ftPresentUs,   8);
-            memcpy(sendBuf.data() + tp + 32, &ftReadbackUs,  8);
-            memcpy(sendBuf.data() + tp + 40, &ftCompressUs,  8);
-            payloadSize += TIMING_BYTES;
-            RT_LOG(decoder.currentSeqId_, "T6", "send %zu bytes, host=%.2fms frame=%u",
-                   payloadSize, (hostSendUs - decoder.batchRecvUs_) / 1000.0, ftFrameId);
-#endif
-
-            server.send(sendBuf.data(), payloadSize);
+            sessions.push_back(std::move(session));
         }
     });
 
     // --- Main thread: window message loop ---
     while (g_running) {
         MSG msg{};
-        BOOL ret = GetMessageA(&msg, nullptr, 0, 0);
-        if (ret == 0 || ret == -1) break; // WM_QUIT or error
-        TranslateMessage(&msg);
-        DispatchMessageA(&msg);
+        while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) { g_running = false; break; }
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+        if (!g_running) break;
+        Sleep(10);
     }
 
     // --- Cleanup ---
     g_running = false;
-    server.close(); // unblock recv() in worker thread
-    if (workerThread.joinable()) workerThread.join();
-    // Stop compress thread
-    compRunning = false;
-    cjCV.notify_all();
-    if (compressThread.joinable()) compressThread.join();
+    closesocket(listenSock); // unblock accept()
+    if (acceptThread.joinable()) acceptThread.join();
+    sessions.clear(); // destructor joins threads + cleans up
     if (dumpFile) fclose(dumpFile);
-    decoder.cleanup();
     cleanupVulkan(vk);
     DestroyWindow(hwnd);
     UnregisterClassA(wc.lpszClassName, hInstance);
+    WSACleanup();
     fprintf(stderr, "[Host] Shutdown complete.\n");
     return 0;
 }
