@@ -487,10 +487,19 @@ int main(int argc, char* argv[]) {
             // Receive a command stream message (blocking)
             size_t bytesRead = 0;
             if (!server.recv(recvBuf.data(), BUF_SIZE, bytesRead)) {
-                fprintf(stderr, "[Host] Client disconnected.\n");
-                g_running = false;
-                PostMessageA(hwnd, WM_CLOSE, 0, 0); // wake main thread
-                break;
+                fprintf(stderr, "[Host] Client disconnected. Waiting for reconnect...\n");
+                decoder.cleanup();
+                decoder.init(vk.physicalDevice, vk.device, vk.graphicsQueue,
+                             vk.graphicsFamily, vk.surface);
+                server.closeClient();
+                if (!server.accept()) {
+                    fprintf(stderr, "[Host] Re-accept failed, shutting down.\n");
+                    g_running = false;
+                    PostMessageA(hwnd, WM_CLOSE, 0, 0);
+                    break;
+                }
+                fprintf(stderr, "[Host] Client reconnected.\n");
+                continue;
             }
 
 #if VBOXGPU_TIMING

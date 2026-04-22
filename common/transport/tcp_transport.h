@@ -183,6 +183,11 @@ public:
         return ret > 0;
     }
 
+    // Close client connection only — keep listening for reconnect
+    void closeClient() {
+        if (clientSock_ != INVALID_SOCKET) { closesocket(clientSock_); clientSock_ = INVALID_SOCKET; }
+    }
+
     void close() {
         if (clientSock_ != INVALID_SOCKET) { closesocket(clientSock_); clientSock_ = INVALID_SOCKET; }
         if (listenSock_ != INVALID_SOCKET) { closesocket(listenSock_); listenSock_ = INVALID_SOCKET; }
