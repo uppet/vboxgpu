@@ -2527,11 +2527,21 @@ void VnDecoder::handleBridgeCreateSwapchain(VnStreamReader& r) {
     info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     info.preTransform = caps.currentTransform;
     info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-    info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
     info.clipped = VK_TRUE;
 
-    fprintf(stderr, "[Decoder] CreateSwapchain: format=%u extent=%ux%u imageCount=%u\n",
-            (unsigned)sc.format, sc.extent.width, sc.extent.height, imageCount);
+    // Prefer MAILBOX (no vsync wait, GPU runs full speed) with FIFO fallback
+    uint32_t pmCount = 0;
+    vkGetPhysicalDeviceSurfacePresentModesKHR(physDevice_, surface_, &pmCount, nullptr);
+    std::vector<VkPresentModeKHR> pms(pmCount);
+    vkGetPhysicalDeviceSurfacePresentModesKHR(physDevice_, surface_, &pmCount, pms.data());
+    info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    for (auto pm : pms) {
+        if (pm == VK_PRESENT_MODE_MAILBOX_KHR) { info.presentMode = pm; break; }
+    }
+
+    fprintf(stderr, "[Decoder] CreateSwapchain: format=%u extent=%ux%u imageCount=%u presentMode=%s\n",
+            (unsigned)sc.format, sc.extent.width, sc.extent.height, imageCount,
+            info.presentMode == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" : "FIFO");
     fflush(stderr);
 
     if (vkCreateSwapchainKHR(device_, &info, nullptr, &sc.swapchain) != VK_SUCCESS) {
