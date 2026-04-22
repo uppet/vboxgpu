@@ -86,14 +86,14 @@ taskkill /F /IM %TEST_EXE% >nul 2>&1
 REM Kill any Unity child processes (UnityCrashHandler, etc.)
 taskkill /F /IM UnityCrashHandler64.exe >nul 2>&1
 REM Wait for TCP TIME_WAIT cleanup + process tree teardown
-timeout /t 3 /nobreak >nul
+timeout /t 8 /nobreak >nul
 
 echo [1/3] Copying latest ICD DLL...
 copy /Y "%ICD_DLL%" "%TEST_DIR%\vbox_vulkan.dll" >nul
 
 echo [2/3] Starting host server...
 start "HostServer" /D "%ROOT%" cmd /c "%HOST_EXE% 2>%ROOT%\host_err.txt"
-timeout /t 2 /nobreak >nul
+timeout /t 5 /nobreak >nul
 
 set VK_ICD_FILENAMES=%TEST_DIR%\vbox_icd.json
 set VK_LOADER_LAYERS_DISABLE=*

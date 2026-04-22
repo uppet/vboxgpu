@@ -7,6 +7,48 @@
 #include <unordered_set>
 #include <vector>
 
+// --- Async BDA patching thread pool ---
+void VnDecoder::initWriteMemoryPool() {
+    wmShutdown_ = false;
+    for (int i = 0; i < kWriteMemoryThreads; i++)
+        wmThreads_.emplace_back(&VnDecoder::wmWorkerLoop, this);
+}
+void VnDecoder::shutdownWriteMemoryPool() {
+    { std::lock_guard<std::mutex> lk(wmMutex_); wmShutdown_ = true; }
+    wmCV_.notify_all();
+    for (auto& t : wmThreads_) if (t.joinable()) t.join();
+    wmThreads_.clear();
+}
+void VnDecoder::wmWorkerLoop() {
+    while (true) {
+        BdaPatchWork w;
+        { std::unique_lock<std::mutex> lk(wmMutex_);
+          wmCV_.wait(lk, [this]{ return !wmQueue_.empty() || wmShutdown_; });
+          if (wmShutdown_ && wmQueue_.empty()) return;
+          w = wmQueue_.front(); wmQueue_.pop(); }
+        for (uint32_t k = 0; k + 8 <= w.size; k += 8) {
+            uint64_t v; memcpy(&v, w.dst + k, 8);
+            auto it = w.bdaMap->find(v);
+            if (it != w.bdaMap->end()) memcpy(w.dst + k, &it->second, 8);
+        }
+        if (wmPending_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            std::lock_guard<std::mutex> lk(wmDoneMutex_);
+            wmDoneCV_.notify_all();
+        }
+    }
+}
+void VnDecoder::enqueueBdaPatch(uint8_t* dst, uint32_t size) {
+    wmPending_.fetch_add(1, std::memory_order_acq_rel);
+    { std::lock_guard<std::mutex> lk(wmMutex_);
+      wmQueue_.push({dst, size, &liveBdaToReplayBda_}); }
+    wmCV_.notify_one();
+}
+void VnDecoder::waitPendingWrites() {
+    if (wmPending_.load(std::memory_order_acquire) == 0) return;
+    std::unique_lock<std::mutex> lk(wmDoneMutex_);
+    wmDoneCV_.wait(lk, [this]{ return wmPending_.load(std::memory_order_acquire) == 0; });
+}
+
 void VnDecoder::init(VkPhysicalDevice physDevice, VkDevice device,
                      VkQueue graphicsQueue, uint32_t graphicsFamily,
                      VkSurfaceKHR surface) {
@@ -26,6 +68,7 @@ void VnDecoder::init(VkPhysicalDevice physDevice, VkDevice device,
     fi3.flags = VK_FENCE_CREATE_SIGNALED_BIT;
     vkCreateFence(device_, &fi3, nullptr, &readbackFences_[0]);
     vkCreateFence(device_, &fi3, nullptr, &readbackFences_[1]);
+    initWriteMemoryPool();
 }
 
 VkFence VnDecoder::allocateFence() {
@@ -119,7 +162,8 @@ bool VnDecoder::execute(const uint8_t* data, size_t size) {
     // Now flush deferred Presents so the GPU work is done before presenting.
     RT_LOG(currentSeqId_, "T4", "decode done, flushing presents");
     flushPendingPresents();
-    // Flush deferred destroys AFTER GPU is idle (presents do WaitIdle).
+    // Wait for async BDA patching before destroys can free memory
+    waitPendingWrites();
     flushPendingDestroys();
     RT_LOG(currentSeqId_, "T5", "execute done, total=%.2fms",
            (rtNowUs() - batchRecvUs_) / 1000.0);
@@ -858,11 +902,13 @@ void VnDecoder::handleBindBufferMemory(VnStreamReader& r) {
     VkResult vr = vkBindBufferMemory(device_, buf, mem, offset);
     bufferBindings_[bufferId] = {memoryId, offset};
 
-    // Auto-BDA: if buffer has SHADER_DEVICE_ADDRESS_BIT, proactively query and return
+    // Auto-BDA: if buffer has SHADER_DEVICE_ADDRESS_BIT, proactively query and return.
+    // Also record memoryId for BDA whitelist — only these memories need BDA patching.
     if (vr == VK_SUCCESS) {
         auto uit = bufferUsageFlags_.find(bufferId);
         if (uit != bufferUsageFlags_.end() &&
             (uit->second & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT)) {
+            bdaMemoryIds_.insert(memoryId);
             VkBufferDeviceAddressInfo bdaInfo{};
             bdaInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
             bdaInfo.buffer = buf;
@@ -1009,31 +1055,21 @@ void VnDecoder::handleWriteMemory(VnStreamReader& r) {
         }
         persistentMaps_[memId] = basePtr;
     }
-    void* mapped = static_cast<uint8_t*>(basePtr) + offset;
-    r.readBytes(mapped, size);
-    // BDA patching: replace live GPU addresses (from live recording session) with
-    // current replay GPU addresses. Only active once RecordBDA commands populate
-    // liveBdaToReplayBda_. Scans every 8-byte-aligned position in the write payload.
-    if (!liveBdaToReplayBda_.empty()) {
-        auto* b = static_cast<uint8_t*>(mapped);
-        uint32_t patchCount = 0;
-        for (uint32_t k = 0; k + 8 <= size; k += 8) {
-            uint64_t v;
-            memcpy(&v, b + k, 8);
-            auto it = liveBdaToReplayBda_.find(v);
-            if (it != liveBdaToReplayBda_.end()) {
-                uint64_t replayAddr = it->second;
-                memcpy(b + k, &replayAddr, 8);
-                patchCount++;
+    auto* mapped = static_cast<uint8_t*>(basePtr) + offset;
+    r.readBytes(mapped, size);  // sync copy — no batch buffer pointer stored
+    // BDA patching: only scan memory that has BDA buffers bound (bdaMemoryIds_ whitelist).
+    // Skipping texture-only memory eliminates ~62ms/4MB of useless scanning.
+    if (!liveBdaToReplayBda_.empty() && bdaMemoryIds_.count(memId)) {
+        if (size >= kAsyncBdaPatchThreshold) {
+            enqueueBdaPatch(mapped, size);
+        } else {
+            for (uint32_t k = 0; k + 8 <= size; k += 8) {
+                uint64_t v; memcpy(&v, mapped + k, 8);
+                auto it = liveBdaToReplayBda_.find(v);
+                if (it != liveBdaToReplayBda_.end()) memcpy(mapped + k, &it->second, 8);
             }
         }
-        static int bdaPatchLog = 0;
-        if (patchCount > 0 && bdaPatchLog++ < 50) {
-            fprintf(stderr, "[BDA-PATCH] mem=%llu off=%llu size=%u: patched %u addr(s)\n",
-                    (unsigned long long)memId, (unsigned long long)offset, size, patchCount);
-        }
     }
-    // No vkUnmapMemory: memory stays mapped for future writes (released in handleFreeMemory).
 }
 
 // Strip pipeline stage bits that require device features the Host GPU may not
@@ -2698,6 +2734,8 @@ HostSwapchain* VnDecoder::getSwapchain(uint64_t id) {
 
 void VnDecoder::cleanup() {
     fprintf(stderr, "[Decoder] cleanup() starting\n"); fflush(stderr);
+    waitPendingWrites();
+    shutdownWriteMemoryPool();
     vkDeviceWaitIdle(device_);
     // Cleanup per-CB fence pool
     for (auto& [id, f] : cbLastFence_) if (f) vkDestroyFence(device_, f, nullptr);

@@ -17,6 +17,11 @@
 #include <vector>
 #include <functional>
 #include <string>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <queue>
 
 // The decoder maintains a mapping from stream handle IDs to real Vulkan objects.
 // Swapchain is managed by the host (not a real Venus concept).
@@ -310,6 +315,9 @@ public:
     // Populated when RecordBDA command is processed after BindBufferMemory (AutoBDA).
     std::unordered_map<uint64_t, uint64_t> replayBdaByBufferId_; // bufId → replay GPU addr
     std::unordered_map<uint64_t, uint64_t> liveBdaToReplayBda_;  // live addr → replay addr
+    // Memory IDs that have BDA buffers bound — only these need BDA patching in WriteMemory.
+    // Populated in handleBindBufferMemory when buffer has SHADER_DEVICE_ADDRESS_BIT.
+    std::unordered_set<uint64_t> bdaMemoryIds_;
 
     // Roundtrip timing: seqId from the most recent TimingSeq command in this batch
     uint32_t currentSeqId_ = 0;
@@ -331,4 +339,25 @@ public:
     FrameTiming slotTiming_[2];
     // The timing for the frame whose pixels are currently in rbReady_
     FrameTiming readyFrameTiming_;
+
+    // --- Async BDA patching thread pool ---
+    static constexpr int kWriteMemoryThreads = 3;
+    static constexpr uint32_t kAsyncBdaPatchThreshold = 4096;
+    struct BdaPatchWork {
+        uint8_t* dst; uint32_t size;
+        const std::unordered_map<uint64_t, uint64_t>* bdaMap;
+    };
+    std::vector<std::thread> wmThreads_;
+    std::queue<BdaPatchWork> wmQueue_;
+    std::mutex wmMutex_;
+    std::condition_variable wmCV_;
+    std::atomic<int> wmPending_{0};
+    std::mutex wmDoneMutex_;
+    std::condition_variable wmDoneCV_;
+    bool wmShutdown_ = false;
+    void wmWorkerLoop();
+    void enqueueBdaPatch(uint8_t* dst, uint32_t size);
+    void waitPendingWrites();
+    void initWriteMemoryPool();
+    void shutdownWriteMemoryPool();
 };
