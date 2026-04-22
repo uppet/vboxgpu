@@ -23,30 +23,32 @@ public:
                            HINSTANCE hInstance);
     ~ClientSession();
 
-    // Start processing on the given connected client socket.
-    // Takes ownership of the socket. Spawns worker + compress threads.
-    // Returns immediately. Call isRunning() to check status.
-    void start(SOCKET clientSock);
+    // Start live TCP session. Takes ownership of the socket.
+    // dumpDir: if non-null, record command stream to <dumpDir>/session_<id>.bin
+    void start(SOCKET clientSock, const char* dumpDir = nullptr);
 
-    // Is the session still actively processing a client?
+    // Start replay session from recorded batches.
+    struct ReplayBatch { std::vector<uint8_t> data; };
+    void startReplay(std::vector<ReplayBatch> batches, const char* saveFramesDir = nullptr);
+
     bool isRunning() const { return running_; }
-
-    // Block until the session finishes (client disconnects + cleanup done).
+    bool isReplay() const { return replay_; }
     void join();
-
-    // Session ID
     int id() const { return id_; }
-
-    // Get render window handle (for cloaking)
     HWND hwnd() const { return hwnd_; }
 
 private:
     void workerLoop();
+    void replayLoop();
     void compressLoop();
     void createSessionWindow();
     void destroySessionWindow();
 
     int id_;
+    bool replay_ = false;
+    std::vector<ReplayBatch> replayBatches_;
+    const char* saveFramesDir_ = nullptr;
+    FILE* dumpFile_ = nullptr;  // record command stream (owned, session closes)
     VkPhysicalDevice physDevice_;
     VkInstance instance_;
     HINSTANCE hInstance_;

@@ -36,7 +36,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Venus protocol codegen 框架（59/67 API 可自动生成，7 个已集成到编解码链路）
 - 资源销毁全链路（15 个 vkDestroy*/vkFreeMemory 命令，host 端正确释放）
 - Present fence 转发（VkSwapchainPresentFenceInfoKHR pNext 解析）
-- Host server worker thread 架构（decoder 独立线程，窗口始终响应）
+- Host server 常驻多客户端架构（accept loop + ClientSession，每个连接独立 VkDevice/窗口/线程）
 - 命令 ID 全量迁移到 Venus VkCommandTypeEXT 标准值
 - 深度测试全链路（5 个 depth 动态状态命令 + BeginRendering depth attachment + pipeline depth/stencil state）
 - Alpha blend 支持（pipeline blend state 转发，blend enable/factors/op/mask）
@@ -48,6 +48,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 性能优化：双缓冲 readback + 异步 LZ4 压缩 + GDI 限速 60 FPS
 - 性能修复：删除 icd_vkCmdBindVertexBuffers2 的 explicit flush（44MB→270KB/帧）
 - 性能修复：删除 decoder 热路径 fprintf（800ms→9ms 批次解码）
+- BDA memory 白名单 + 线程池 async patching（纹理 batch 3585ms→16ms）
+- WriteMemory UAF 修复（readBytes 同步拷贝，不存储 batch buffer 指针）
 
 当前状态（M1.6 完成）：
 - **SortTheCourt（Unity 5.3, 32-bit）Host 窗口 + Guest 回传 60 FPS 可玩** ✓
@@ -71,9 +73,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 错误路径日志（`FAILED`、`SKIP` 等）始终保留
 
 M1.7 / 后续目标：
-
-架构升级（优先）：
-- **Host 常驻多客户端服务**：host 变为 1-to-N 服务进程，accept loop 接受多个连接，每个连接独立 VnDecoder + VkDevice 实例，TCP 断开时回收该客户端的设备资源，host 不退出
 
 性能优化：
 - **decode/GPU 流水线化（Method-A）**：当前 host 串行处理 batch（recv→decode→GPU→readback→send），GPU 和 CPU 互相等待。双缓冲流水线：decode batch N+1 同时 GPU 执行 batch N，预期提升 30-50% FPS
@@ -99,6 +98,15 @@ M1.7 / 后续目标：
 - DXVK 魔改点在 `DxvkDevice` 层，用 `RemoteVkDevice` 替换真实 Vulkan 设备，将调用路由到 Venus Encoder
 - Shader 编译 (DXBC→SPIR-V) 在 Guest 侧完成，SPIR-V 字节码直接序列化传输
 - 阶段一/二的 Host 侧代码完全共用
+
+Host server 架构（多客户端服务）：
+- `main_server.cpp`：主进程 — accept loop（线程）+ dashboard 窗口消息泵（主线程）
+- `client_session.h/cpp`：每个 TCP 连接一个 ClientSession 实例，包含独立 VkDevice + VnDecoder + 渲染窗口 + worker/compress 线程
+- 支持 live（TCP）和 replay（文件）两种 session 模式
+- `--dump file.bin`：录制命令流；`--replay file.bin`：回放命令流
+- 最大并发数由 `VBOXGPU_MAX_SESSIONS` 环境变量控制（默认 3）
+- Dashboard UI 显示运行时间、端口、session 列表；checkbox 控制渲染窗口 cloak
+- 辅助脚本：`man_run.bat`（构建+启动）、`man_run_only.bat`（只启动 guest）、`kill_host.bat`（停止 host）
 
 ## 构建系统（规划）
 
@@ -136,7 +144,8 @@ M1.7 / 后续目标：
 
 ## 调试策略
 
-- 命令流录制/回放：传输层插入钩子 dump 命令流，Host 独立回放（不需要 VM）
+- 命令流录制：`host.exe --dump file.bin`，录制第一个连接的 TCP 命令流
+- 命令流回放：`host.exe --replay file.bin [--save-frames dir]`，复用 ClientSession 回放
 - Host Vulkan：RenderDoc + Validation Layers 截帧分析
 - DXVK：Visual Studio 附加进程 + DXVK_LOG
 - KMD：WinDbg 通过 VBox 串口内核调试

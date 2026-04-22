@@ -138,8 +138,10 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         if (g_sessions) {
             for (auto& s : *g_sessions) {
                 if (!s) continue;
-                snprintf(buf, sizeof(buf), "  [%d] %s",
-                         s->id(), s->isRunning() ? "ACTIVE" : "ended");
+                snprintf(buf, sizeof(buf), "  [%d] %s%s",
+                         s->id(),
+                         s->isRunning() ? "ACTIVE" : "ended",
+                         s->isReplay() ? " (replay)" : "");
                 SetTextColor(hdc, s->isRunning() ? RGB(0, 128, 0) : RGB(128, 128, 128));
                 TextOutA(hdc, 10, y, buf, (int)strlen(buf)); y += 18;
             }
@@ -189,116 +191,36 @@ static std::vector<DumpBatch> loadDumpFile(const char* path) {
 }
 
 static int replayMode(const char* dumpPath, const char* saveFramesDir = nullptr) {
-    auto batches = loadDumpFile(dumpPath);
-    if (batches.empty()) { fprintf(stderr, "[Replay] No batches.\n"); return 1; }
+    auto fileBatches = loadDumpFile(dumpPath);
+    if (fileBatches.empty()) { fprintf(stderr, "[Replay] No batches.\n"); return 1; }
+
+    // Convert to ClientSession::ReplayBatch
+    std::vector<ClientSession::ReplayBatch> batches;
+    batches.reserve(fileBatches.size());
+    for (auto& fb : fileBatches)
+        batches.push_back({std::move(fb.data)});
 
     HINSTANCE hInstance = GetModuleHandle(nullptr);
-    WNDCLASSEXA wc{};
-    wc.cbSize = sizeof(wc);
-    wc.style = CS_HREDRAW | CS_VREDRAW;
-    wc.lpfnWndProc = WindowProc;
-    wc.hInstance = hInstance;
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.lpszClassName = "VBoxGPUReplay";
-    RegisterClassExA(&wc);
 
-    RECT rect = { 0, 0, (LONG)WINDOW_WIDTH, (LONG)WINDOW_HEIGHT };
-    AdjustWindowRect(&rect, WS_OVERLAPPEDWINDOW, FALSE);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName,
-                                "VBox GPU Bridge - Replay",
-                                WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-                                rect.right - rect.left, rect.bottom - rect.top,
-                                nullptr, nullptr, hInstance, nullptr);
-    ShowWindow(hwnd, SW_SHOW);
-
+    // Shared Vulkan instance + physical device
     VulkanContext vk{};
     try {
         createInstance(vk);
-        createSurface(vk, hwnd, hInstance);
         pickPhysicalDevice(vk);
-        createLogicalDevice(vk);
     } catch (const std::exception& e) {
         fprintf(stderr, "Vulkan Init Error: %s\n", e.what());
         return 1;
     }
 
-    VnDecoder decoder;
-    decoder.init(vk.physicalDevice, vk.device, vk.graphicsQueue, vk.graphicsFamily, vk.surface);
+    // Create replay session via ClientSession
+    ClientSession session(0, vk.physicalDevice, vk.instance, hInstance);
+    session.startReplay(std::move(batches), saveFramesDir);
 
-    // Execute all batches once.
-    // When --save-frames DIR is set, capture a BMP after every batch that
-    // contains a Present command (frame boundary).
-    size_t frameNum = 0;
-    bool hadPresent = false;
-    for (size_t i = 0; i < batches.size() && g_running; i++) {
-        MSG msg{};
-        while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
-            TranslateMessage(&msg);
-            DispatchMessageA(&msg);
-        }
-        if (!g_running) break;
-        if (!decoder.execute(batches[i].data.data(), batches[i].data.size())) {
-            fprintf(stderr, "[Replay] Batch %zu failed\n", i);
-            break;
-        }
+    // Wait for replay to finish
+    session.join();
 
-        // Detect Present command (0x10002) in this batch.
-        // sz field includes the 8-byte header, so advance by sz (not 8+sz).
-        bool batchHasPresent = false;
-        if (batches[i].data.size() >= 8) {
-            const uint8_t* p = batches[i].data.data();
-            const uint8_t* end = p + batches[i].data.size();
-            while (p + 8 <= end) {
-                uint32_t cmd = *reinterpret_cast<const uint32_t*>(p);
-                uint32_t sz  = *reinterpret_cast<const uint32_t*>(p + 4);
-                if (cmd == 0x10002) { batchHasPresent = true; break; }
-                if (sz < 8 || p + sz > end) break;
-                p += sz;
-            }
-        }
-        if (batchHasPresent) hadPresent = true;
-
-        if (saveFramesDir && hadPresent && batchHasPresent) {
-            char path[512];
-            snprintf(path, sizeof(path), "%s/frame_%04zu.bmp", saveFramesDir, frameNum++);
-            decoder.captureScreenshot(path);
-            if (frameNum % 10 == 0)
-                fprintf(stderr, "[Replay] Saved frame %zu\n", frameNum);
-        } else if (!saveFramesDir) {
-            // Legacy debug screenshots at key batches
-            if (i < 5 || i == 10 || i == 50 || i == 100 || i == 150) {
-                char path[256];
-                snprintf(path, sizeof(path), "%s_batch%zu.bmp", dumpPath, i);
-                decoder.captureScreenshot(path);
-                fprintf(stderr, "[Replay] Batch %zu done, screenshot: %s\n", i, path);
-            }
-        }
-    }
-    if (saveFramesDir)
-        fprintf(stderr, "[Replay] Saved %zu frames to %s\n", frameNum, saveFramesDir);
-
-    // Screenshot
-    std::string ssPath = dumpPath;
-    auto dotPos = ssPath.rfind('.');
-    if (dotPos != std::string::npos) ssPath = ssPath.substr(0, dotPos);
-    ssPath += "_screenshot.bmp";
-    fprintf(stderr, "[Replay] All batches done. Capturing screenshot.\n");
-    decoder.captureScreenshot(ssPath.c_str());
-
-    fprintf(stderr, "[Replay] Keeping window open (ESC to exit).\n");
-    while (g_running) {
-        MSG msg{};
-        while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
-            TranslateMessage(&msg);
-            DispatchMessageA(&msg);
-        }
-        Sleep(50);
-    }
-
-    decoder.cleanup();
     cleanupVulkan(vk);
-    DestroyWindow(hwnd);
-    UnregisterClassA(wc.lpszClassName, hInstance);
+    fprintf(stderr, "[Replay] Done.\n");
     return 0;
 }
 
@@ -324,22 +246,17 @@ int main(int argc, char* argv[]) {
         return replayMode(replayDump, saveFramesDir);
 
     uint16_t port = DEFAULT_PORT;
-    const char* dumpPath = nullptr;
+    const char* dumpDir = nullptr;  // --dump DIR: each session writes session_N.bin
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--dump") == 0 && i + 1 < argc) {
-            dumpPath = argv[++i];
+            dumpDir = argv[++i];
         } else {
             port = static_cast<uint16_t>(atoi(argv[i]));
         }
     }
-    FILE* dumpFile = nullptr;
-    if (dumpPath) {
-        dumpFile = fopen(dumpPath, "wb");
-        if (!dumpFile) {
-            fprintf(stderr, "[Host] Failed to open dump file: %s\n", dumpPath);
-            return 1;
-        }
-        fprintf(stderr, "[Host] Dumping command stream to: %s\n", dumpPath);
+    if (dumpDir) {
+        CreateDirectoryA(dumpDir, NULL);
+        fprintf(stderr, "[Host] Recording sessions to: %s\\session_*.bin\n", dumpDir);
     }
 
     HINSTANCE hInstance = GetModuleHandle(nullptr);
@@ -544,7 +461,7 @@ int main(int argc, char* argv[]) {
 
             auto session = std::make_unique<ClientSession>(
                 sid, vk.physicalDevice, vk.instance, hInstance);
-            session->start(cs);
+            session->start(cs, dumpDir);
             // Apply cloak if checkbox is checked
             if (g_cloakWindows && session->hwnd()) {
                 // Small delay — window created on worker thread, may not exist yet
@@ -575,7 +492,6 @@ int main(int argc, char* argv[]) {
     closesocket(listenSock); // unblock accept()
     if (acceptThread.joinable()) acceptThread.join();
     sessions.clear(); // destructor joins threads + cleans up
-    if (dumpFile) fclose(dumpFile);
     cleanupVulkan(vk);
     DestroyWindow(hwnd);
     UnregisterClassA(wc.lpszClassName, hInstance);

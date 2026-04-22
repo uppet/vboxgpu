@@ -57,13 +57,32 @@ void ClientSession::destroySessionWindow() {
     }
 }
 
-void ClientSession::start(SOCKET clientSock) {
+void ClientSession::start(SOCKET clientSock, const char* dumpDir) {
     clientSock_ = clientSock;
+    if (dumpDir) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s\\session_%d.bin", dumpDir, id_);
+        dumpFile_ = fopen(path, "wb");
+        if (dumpFile_)
+            fprintf(stderr, "[Session %d] Recording to %s\n", id_, path);
+    }
+    replay_ = false;
     running_ = true;
     compRunning_ = true;
     compressThread_ = std::thread(&ClientSession::compressLoop, this);
     workerThread_ = std::thread(&ClientSession::workerLoop, this);
-    fprintf(stderr, "[Session %d] Started\n", id_);
+    fprintf(stderr, "[Session %d] Started (live%s)\n", id_, dumpFile_ ? ", recording" : "");
+}
+
+void ClientSession::startReplay(std::vector<ReplayBatch> batches, const char* saveFramesDir) {
+    replay_ = true;
+    replayBatches_ = std::move(batches);
+    saveFramesDir_ = saveFramesDir;
+    running_ = true;
+    compRunning_ = true;
+    compressThread_ = std::thread(&ClientSession::compressLoop, this);
+    workerThread_ = std::thread(&ClientSession::replayLoop, this);
+    fprintf(stderr, "[Session %d] Started (replay, %zu batches)\n", id_, replayBatches_.size());
 }
 
 void ClientSession::join() {
@@ -143,6 +162,14 @@ void ClientSession::workerLoop() {
             break;
         }
         bytesRead = frameLen;
+
+        // Record to dump file if enabled
+        if (dumpFile_) {
+            uint32_t sz = static_cast<uint32_t>(bytesRead);
+            fwrite(&sz, sizeof(sz), 1, dumpFile_);
+            fwrite(recvBuf.data(), 1, bytesRead, dumpFile_);
+            fflush(dumpFile_);
+        }
 
 #if VBOXGPU_TIMING
         decoder_.batchRecvUs_ = rtNowUs();
@@ -261,6 +288,7 @@ void ClientSession::workerLoop() {
 
     // Cleanup
     running_ = false;
+    if (dumpFile_) { fclose(dumpFile_); dumpFile_ = nullptr; }
     decoder_.cleanup();
     if (clientSock_ != INVALID_SOCKET) {
         closesocket(clientSock_);
@@ -276,4 +304,65 @@ void ClientSession::workerLoop() {
     // Destroy window immediately so it doesn't linger as "not responding"
     destroySessionWindow();
     fprintf(stderr, "[Session %d] Ended, resources released.\n", id_);
+}
+
+void ClientSession::replayLoop() {
+    // Create window + Vulkan (same as live)
+    createSessionWindow();
+    vk_.instance = instance_;
+    vk_.physicalDevice = physDevice_;
+    createSurface(vk_, hwnd_, hInstance_);
+    createLogicalDevice(vk_);
+    decoder_.init(vk_.physicalDevice, vk_.device, vk_.graphicsQueue,
+                  vk_.graphicsFamily, vk_.surface);
+
+    fprintf(stderr, "[Session %d] Replaying %zu batches...\n", id_, replayBatches_.size());
+
+    // Find first batch with a present (setup vs render split)
+    size_t setupEnd = 0;
+    for (size_t i = 0; i < replayBatches_.size(); i++) {
+        // Heuristic: batches after the first large one are render batches
+        if (replayBatches_[i].data.size() > 1024 * 1024) { setupEnd = i + 1; break; }
+    }
+    if (setupEnd == 0) setupEnd = replayBatches_.size();
+
+    // Execute all batches
+    for (size_t i = 0; i < replayBatches_.size() && running_; i++) {
+        // Pump window messages between batches
+        MSG msg;
+        while (PeekMessageA(&msg, hwnd_, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+
+        fprintf(stderr, "[Replay %d] Batch %zu (%zu bytes)%s\n",
+                id_, i, replayBatches_[i].data.size(),
+                i < setupEnd ? "" : " [render]");
+
+        if (!decoder_.execute(replayBatches_[i].data.data(), replayBatches_[i].data.size())) {
+            fprintf(stderr, "[Replay %d] Batch %zu failed\n", id_, i);
+            break;
+        }
+
+        // Save screenshot if requested
+        if (saveFramesDir_ && i >= setupEnd) {
+            char path[512];
+            snprintf(path, sizeof(path), "%s\\replay_%d_batch%zu.bmp", saveFramesDir_, id_, i);
+            decoder_.captureScreenshot(path);
+        }
+    }
+
+    fprintf(stderr, "[Replay %d] Done.\n", id_);
+
+    // Cleanup (same as live)
+    running_ = false;
+    decoder_.cleanup();
+    if (vk_.device) {
+        vkDeviceWaitIdle(vk_.device);
+        if (vk_.surface) { vkDestroySurfaceKHR(vk_.instance, vk_.surface, nullptr); vk_.surface = VK_NULL_HANDLE; }
+        vkDestroyDevice(vk_.device, nullptr);
+        vk_.device = VK_NULL_HANDLE;
+    }
+    destroySessionWindow();
+    fprintf(stderr, "[Session %d] Replay ended, resources released.\n", id_);
 }
