@@ -187,15 +187,7 @@ void IcdState::flushBufferRange(uint64_t bufferId, VkDeviceSize offset, VkDevice
 void IcdState::flushMappedMemory() {
     std::lock_guard<std::mutex> lock(mappedMutex);
 #if VBOXGPU_PERF_DIRTY_TRACK
-    // Clean up freed shadow entries (lazy deletion from icd_vkFreeMemory)
-    for (auto it = memoryShadows.begin(); it != memoryShadows.end(); ) {
-        if (it->second.freed) {
-            if (it->second.ptr) VirtualFree(it->second.ptr, 0, MEM_RELEASE);
-            it = memoryShadows.erase(it);
-        } else {
-            ++it;
-        }
-    }
+    // (freed shadows are now cleaned up immediately in icd_vkFreeMemory)
 
     // Phase 1: GetWriteWatch per shadow — atomically get dirty pages + reset tracking.
     // No race window: kernel does get+reset in one operation.
@@ -205,7 +197,7 @@ void IcdState::flushMappedMemory() {
     std::unordered_map<uint64_t, ShadowDirty> dirtyMap;
 
     for (auto& [memId, shadow] : memoryShadows) {
-        if (!shadow.ptr || shadow.freed) continue;
+        if (!shadow.ptr) continue;
 
         // Large shadows: reset dirty bits to prevent stale accumulation,
         // but do not send data (handled by explicit flushBufferRange).
@@ -1986,16 +1978,20 @@ static VkResult VKAPI_CALL icd_vkAllocateMemory(VkDevice, const VkMemoryAllocate
 }
 static void VKAPI_CALL icd_vkFreeMemory(VkDevice, VkDeviceMemory mem, const VkAllocationCallbacks*) {
     uint64_t id = (uint64_t)mem;
-    auto it = g_icd.memoryShadows.find(id);
-    if (it != g_icd.memoryShadows.end()) {
-        it->second.freed = true;
+    // Free shadow buffer + remove mapped regions under lock
+    {
+        std::lock_guard<std::mutex> lock(g_icd.mappedMutex);
+        auto it = g_icd.memoryShadows.find(id);
+        if (it != g_icd.memoryShadows.end()) {
+            if (it->second.ptr) VirtualFree(it->second.ptr, 0, MEM_RELEASE);
+            g_icd.memoryShadows.erase(it);
+        }
+        g_icd.mappedRegions.erase(
+            std::remove_if(g_icd.mappedRegions.begin(), g_icd.mappedRegions.end(),
+                            [id](const IcdState::MappedRegion& r) { return r.memoryId == id; }),
+            g_icd.mappedRegions.end());
     }
-    // Also remove any mapped regions referencing this memory
-    std::lock_guard<std::mutex> lock(g_icd.mappedMutex);
-    g_icd.mappedRegions.erase(
-        std::remove_if(g_icd.mappedRegions.begin(), g_icd.mappedRegions.end(),
-                        [id](const IcdState::MappedRegion& r) { return r.memoryId == id; }),
-        g_icd.mappedRegions.end());
+    // Encoder call outside lock to avoid deadlock (encoder flush → flushMappedMemory → mappedMutex)
     g_icd.encoder.cmdFreeMemory(1, (uint64_t)mem);
 }
 static VkResult VKAPI_CALL icd_vkMapMemory(VkDevice, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size, VkMemoryMapFlags, void** ppData) {
@@ -2121,6 +2117,7 @@ static void VKAPI_CALL icd_vkDestroyBuffer(VkDevice, VkBuffer v, const VkAllocat
     uint64_t id = (uint64_t)v;
     g_icd.bdaCache.erase(id);
     g_icd.bdaNeedBuffers_.erase(id);
+    { std::lock_guard<std::mutex> lk(g_icd.bdaMutex_); g_icd.bdaRecorded_.erase(id); }
     g_icd.encoder.cmdDestroyBuffer(1, id);
 }
 static VkResult VKAPI_CALL icd_vkCreateImage(VkDevice, const VkImageCreateInfo* pInfo, const VkAllocationCallbacks*, VkImage* p) {

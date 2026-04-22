@@ -94,7 +94,6 @@ struct IcdState {
     struct MemoryShadow {
         void* ptr;
         VkDeviceSize size;
-        bool freed = false;    // set by FreeMemory, cleaned up by flushMappedMemory
     };
     std::unordered_map<uint64_t, MemoryShadow> memoryShadows;
 

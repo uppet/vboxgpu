@@ -86,7 +86,11 @@ VkFence VnDecoder::allocateFence() {
 }
 
 void VnDecoder::recycleFence(VkFence f) {
-    fencePool_.push_back(f);
+    if (fencePool_.size() < 64) {
+        fencePool_.push_back(f);
+    } else {
+        vkDestroyFence(device_, f, nullptr);  // cap pool at 64
+    }
 }
 
 bool VnDecoder::execute(const uint8_t* data, size_t size) {
@@ -165,6 +169,8 @@ bool VnDecoder::execute(const uint8_t* data, size_t size) {
     // Wait for async BDA patching before destroys can free memory
     waitPendingWrites();
     flushPendingDestroys();
+    // Ensure destroys are flushed even on error path (defence in depth)
+    if (!pendingDestroys_.empty()) flushPendingDestroys();
     RT_LOG(currentSeqId_, "T5", "execute done, total=%.2fms",
            (rtNowUs() - batchRecvUs_) / 1000.0);
     return !error_;
@@ -1008,6 +1014,7 @@ void VnDecoder::handleFreeMemory(VnStreamReader& r) {
             vkUnmapMemory(device_, mem);
             persistentMaps_.erase(mapIt);
         }
+        bdaMemoryIds_.erase(memId);
         pendingDestroys_.push_back([this, mem]() { vkFreeMemory(device_, mem, nullptr); });
     }
 }
