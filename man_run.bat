@@ -83,7 +83,10 @@ if /I "%MODE%"=="nohook" (
 REM === Normal mode: DXVK + ICD + Host ===
 taskkill /F /IM vbox_host_server.exe >nul 2>&1
 taskkill /F /IM %TEST_EXE% >nul 2>&1
-timeout /t 1 /nobreak >nul
+REM Kill any Unity child processes (UnityCrashHandler, etc.)
+taskkill /F /IM UnityCrashHandler64.exe >nul 2>&1
+REM Wait for TCP TIME_WAIT cleanup + process tree teardown
+timeout /t 3 /nobreak >nul
 
 echo [1/3] Copying latest ICD DLL...
 copy /Y "%ICD_DLL%" "%TEST_DIR%\vbox_vulkan.dll" >nul
