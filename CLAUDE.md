@@ -49,7 +49,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 性能修复：删除 icd_vkCmdBindVertexBuffers2 的 explicit flush（44MB→270KB/帧）
 - 性能修复：删除 decoder 热路径 fprintf（800ms→9ms 批次解码）
 - BDA memory 白名单 + 线程池 async patching（纹理 batch 3585ms→16ms）
+- BDA identity skip（本机运行时 live==replay，零扫描开销）
+- MAILBOX present mode（不等 vsync，FPS 大幅提升）
 - WriteMemory UAF 修复（readBytes 同步拷贝，不存储 batch buffer 指针）
+- 6 项资源泄漏修复（memoryShadows/fencePool/bdaRecorded 等）
 
 当前状态（M1.6 完成）：
 - **SortTheCourt（Unity 5.3, 32-bit）Host 窗口 + Guest 回传 60 FPS 可玩** ✓
