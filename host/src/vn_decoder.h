@@ -198,6 +198,7 @@ private:
     std::unordered_map<uint64_t, VkBuffer> buffers_;
     std::unordered_map<uint64_t, VkImage> images_;
     std::unordered_map<uint64_t, VkFormat> imageFormats_; // image ID → format
+    std::unordered_map<uint64_t, VkExtent2D> imageSizes_; // image ID → width/height
     std::unordered_map<uint64_t, VkImageLayout> imageLayouts_; // image ID → current layout on host
     std::unordered_map<uint64_t, VkDeviceMemory> deviceMemories_;
     // Persistent memory maps: memId → base pointer (kept mapped across WriteMemory calls).

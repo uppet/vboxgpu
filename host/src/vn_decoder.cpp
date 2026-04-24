@@ -498,6 +498,7 @@ void VnDecoder::handleCreateImage(VnStreamReader& r) {
     if (vr != VK_SUCCESS) return;
     store(images_, imageId, image);
     imageFormats_[imageId] = static_cast<VkFormat>(format);
+    imageSizes_[imageId] = {w, h};
     imageLayouts_[imageId] = VK_IMAGE_LAYOUT_UNDEFINED; // newly created image starts in UNDEFINED
 }
 
@@ -1872,6 +1873,11 @@ void VnDecoder::handleCmdEndRendering(VnStreamReader& r) {
     bool isSwapchainCB = it->second;
     cbIsSwapchain_.erase(it);  // erase (not reset to false) to prevent spurious second call
 
+    // Guard: if BeginRendering was skipped (e.g. swapchain/view creation failed),
+    // calling vkCmdEndRendering without an active render pass crashes NVIDIA drivers.
+    if (!activeRendering_) return;
+    activeRendering_ = false;
+
     vkCmdEndRendering(cb);
     // DXVK sends its own vkCmdPipelineBarrier2 in the command stream to transition
     // the swapchain image COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR before QueuePresent.
@@ -2704,8 +2710,14 @@ void VnDecoder::handleBridgeCreateSwapchain(VnStreamReader& r) {
     fflush(stderr);
 
     if (vkCreateSwapchainKHR(device_, &info, nullptr, &sc.swapchain) != VK_SUCCESS) {
-        error_ = true;
-        return;
+        // Fallback: retry without mutable format (RenderDoc may not support it)
+        fprintf(stderr, "[Decoder] CreateSwapchain: mutable format failed, retrying without\n");
+        info.flags = 0;
+        info.pNext = nullptr;
+        if (vkCreateSwapchainKHR(device_, &info, nullptr, &sc.swapchain) != VK_SUCCESS) {
+            error_ = true;
+            return;
+        }
     }
 
     uint32_t count = 0;
@@ -2826,20 +2838,47 @@ void VnDecoder::flushPendingPresents() {
 
         uint32_t presentIdx = it->second.currentImageIndex;
 
-#ifdef VBOXGPU_DEBUG_SCREENSHOTS
-        // Capture screenshots at specific frames for animation debugging
-        static int dbgFr2 = 0;
-        dbgFr2++;
-        if (dbgFr2 == 5 || dbgFr2 == 50 || dbgFr2 == 150) {
-            uint32_t savedLPI = lastPresentedImageIndex_;
-            lastPresentedImageIndex_ = presentIdx;
-            char path[256];
-            snprintf(path, sizeof(path), "S:/bld/vboxgpu/dbg_frame%d.bmp", dbgFr2);
-            captureScreenshot(path);
-            lastPresentedImageIndex_ = savedLPI;
-            fprintf(stderr, "[Decoder] Screenshot saved: %s (presentIdx=%u)\n", path, presentIdx);
+        // Diagnostic capture: at frame 200, save swapchain + internal RT images
+        static int diagFrame = 0;
+        diagFrame++;
+        if (diagFrame == 300) {
+            vkQueueWaitIdle(graphicsQueue_); // ensure all GPU work done
+            // 1. Swapchain image (after blit)
+            debugCaptureImage(it->second.images[presentIdx], it->second.format,
+                              it->second.extent.width, it->second.extent.height,
+                              VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                              "S:/bld/vboxgpu/diag_swapchain.bmp");
+            fprintf(stderr, "[Diag] Saved swapchain image (%ux%u)\n",
+                    it->second.extent.width, it->second.extent.height);
+            // 2. All non-swapchain images that are render-target sized
+            int rtIdx = 0;
+            for (auto& [id, img] : images_) {
+                if ((id & 0xFFF00000ull) == 0xFFF00000ull) continue;
+                auto fmtIt = imageFormats_.find(id);
+                if (fmtIt == imageFormats_.end()) continue;
+                auto layIt = imageLayouts_.find(id);
+                VkImageLayout layout = layIt != imageLayouts_.end() ?
+                    layIt->second : VK_IMAGE_LAYOUT_GENERAL;
+                // Only capture color RT-sized images (skip tiny textures)
+                // We don't know exact size, so capture images with common RT formats
+                VkFormat fmt = fmtIt->second;
+                if (fmt == VK_FORMAT_R8G8B8A8_UNORM || fmt == VK_FORMAT_R8G8B8A8_SRGB ||
+                    fmt == VK_FORMAT_B8G8R8A8_UNORM || fmt == VK_FORMAT_R16G16B16A16_SFLOAT) {
+                    char path[256];
+                    snprintf(path, sizeof(path), "S:/bld/vboxgpu/diag_rt_%d_id%llu_fmt%u.bmp",
+                             rtIdx, (unsigned long long)id, (unsigned)fmt);
+                    auto szIt = imageSizes_.find(id);
+                    if (szIt == imageSizes_.end()) continue;
+                    uint32_t iw = szIt->second.width, ih = szIt->second.height;
+                    if (iw < 256 || ih < 256) continue; // skip small textures
+                    debugCaptureImage(img, fmt, iw, ih, layout, path);
+                    fprintf(stderr, "[Diag] Saved RT id=%llu fmt=%u layout=%u\n",
+                            (unsigned long long)id, (unsigned)fmt, (unsigned)layout);
+                    rtIdx++;
+                    if (rtIdx >= 5) break; // limit to 5
+                }
+            }
         }
-#endif
 
         // Submit async readback to current slot (non-blocking).
         // GPU copies swapchain image → readback_[curSlot] staging buffer.

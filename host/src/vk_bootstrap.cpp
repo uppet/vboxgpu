@@ -179,10 +179,24 @@ void createLogicalDevice(VulkanContext& ctx) {
     vkGetPhysicalDeviceFeatures2(ctx.physicalDevice, &deviceFeatures2);
     // Pass the same struct chain to vkCreateDevice — enables everything supported.
 
-    const char* deviceExtensions[] = {
+    // Required extensions
+    std::vector<const char*> deviceExtensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-        VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
     };
+    // Optional extensions — add only if supported (RenderDoc may not expose all)
+    uint32_t extCount = 0;
+    vkEnumerateDeviceExtensionProperties(ctx.physicalDevice, nullptr, &extCount, nullptr);
+    std::vector<VkExtensionProperties> availExts(extCount);
+    vkEnumerateDeviceExtensionProperties(ctx.physicalDevice, nullptr, &extCount, availExts.data());
+    auto hasExt = [&](const char* name) {
+        for (auto& e : availExts)
+            if (strcmp(e.extensionName, name) == 0) return true;
+        return false;
+    };
+    if (hasExt(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME))
+        deviceExtensions.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
+    if (hasExt(VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME))
+        deviceExtensions.push_back(VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME);
 
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -190,11 +204,27 @@ void createLogicalDevice(VulkanContext& ctx) {
     createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueInfos.size());
     createInfo.pQueueCreateInfos = queueInfos.data();
     createInfo.pEnabledFeatures = nullptr; // using pNext chain instead
-    createInfo.enabledExtensionCount = 2;
-    createInfo.ppEnabledExtensionNames = deviceExtensions;
+    createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
+    createInfo.ppEnabledExtensionNames = deviceExtensions.data();
 
-    if (vkCreateDevice(ctx.physicalDevice, &createInfo, nullptr, &ctx.device) != VK_SUCCESS)
+    VkResult devResult = vkCreateDevice(ctx.physicalDevice, &createInfo, nullptr, &ctx.device);
+    if (devResult != VK_SUCCESS) {
+        // Fallback: RenderDoc may reject pNext feature chains or optional extensions.
+        // Retry with only core features and required extensions.
+        fprintf(stderr, "[Bootstrap] vkCreateDevice failed (result=%d), retrying minimal\n", (int)devResult);
+        static const char* minExts[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+        VkPhysicalDeviceFeatures basicFeatures{};
+        vkGetPhysicalDeviceFeatures(ctx.physicalDevice, &basicFeatures);
+        createInfo.pNext = nullptr;
+        createInfo.pEnabledFeatures = &basicFeatures;
+        createInfo.enabledExtensionCount = 1;
+        createInfo.ppEnabledExtensionNames = minExts;
+        devResult = vkCreateDevice(ctx.physicalDevice, &createInfo, nullptr, &ctx.device);
+    }
+    if (devResult != VK_SUCCESS) {
+        fprintf(stderr, "[Bootstrap] vkCreateDevice final failure (result=%d)\n", (int)devResult);
         throw std::runtime_error("Failed to create logical device");
+    }
 
     vkGetDeviceQueue(ctx.device, ctx.graphicsFamily, 0, &ctx.graphicsQueue);
     vkGetDeviceQueue(ctx.device, ctx.presentFamily, 0, &ctx.presentQueue);
