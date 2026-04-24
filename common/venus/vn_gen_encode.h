@@ -265,6 +265,65 @@ static inline void vn_encode_vkCmdSetFrontFace(VnStreamWriter* w
     w->writeU32(frontFace);
 }
 
+static inline void vn_encode_vkCmdSetStencilTestEnable(VnStreamWriter* w
+    , uint64_t commandBuffer
+    , uint32_t stencilTestEnable
+)
+{
+    w->writeU64(commandBuffer);
+    w->writeU32(stencilTestEnable);
+}
+
+static inline void vn_encode_vkCmdSetStencilOp(VnStreamWriter* w
+    , uint64_t commandBuffer
+    , uint32_t faceMask
+    , uint32_t failOp
+    , uint32_t passOp
+    , uint32_t depthFailOp
+    , uint32_t compareOp
+)
+{
+    w->writeU64(commandBuffer);
+    w->writeU32(faceMask);
+    w->writeU32(failOp);
+    w->writeU32(passOp);
+    w->writeU32(depthFailOp);
+    w->writeU32(compareOp);
+}
+
+static inline void vn_encode_vkCmdSetStencilCompareMask(VnStreamWriter* w
+    , uint64_t commandBuffer
+    , uint32_t faceMask
+    , uint32_t compareMask
+)
+{
+    w->writeU64(commandBuffer);
+    w->writeU32(faceMask);
+    w->writeU32(compareMask);
+}
+
+static inline void vn_encode_vkCmdSetStencilWriteMask(VnStreamWriter* w
+    , uint64_t commandBuffer
+    , uint32_t faceMask
+    , uint32_t writeMask
+)
+{
+    w->writeU64(commandBuffer);
+    w->writeU32(faceMask);
+    w->writeU32(writeMask);
+}
+
+static inline void vn_encode_vkCmdSetStencilReference(VnStreamWriter* w
+    , uint64_t commandBuffer
+    , uint32_t faceMask
+    , uint32_t reference
+)
+{
+    w->writeU64(commandBuffer);
+    w->writeU32(faceMask);
+    w->writeU32(reference);
+}
+
 static inline void vn_encode_vkCmdUpdateBuffer(VnStreamWriter* w
     , uint64_t commandBuffer
     , uint64_t dstBuffer

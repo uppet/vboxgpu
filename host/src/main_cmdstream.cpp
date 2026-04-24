@@ -203,6 +203,7 @@ static int replayMode(const char* dumpPath, const char* saveFramesDir = nullptr)
 
     VnDecoder decoder;
     decoder.init(vk.physicalDevice, vk.device, vk.graphicsQueue, vk.graphicsFamily, vk.surface);
+    decoder.setHwnd(hwnd);
 
     // Execute setup batches (all batches before first Present)
     // Then loop the rendering batches
@@ -361,6 +362,7 @@ int main(int argc, char* argv[]) {
     // --- Init decoder ---
     VnDecoder decoder;
     decoder.init(vk.physicalDevice, vk.device, vk.graphicsQueue, vk.graphicsFamily, vk.surface);
+    decoder.setHwnd(hwnd);
 
     // --- Execute setup stream ---
     try {

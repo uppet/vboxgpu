@@ -229,6 +229,11 @@ void VnDecoder::dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdS
     case VN_CMD_vkCmdSetDepthCompareOp:   handleCmdSetDepthCompareOp(reader); break;
     case VN_CMD_vkCmdSetDepthBoundsTestEnable: handleCmdSetDepthBoundsTestEnable(reader); break;
     case VN_CMD_vkCmdSetDepthBiasEnable:  handleCmdSetDepthBiasEnable(reader); break;
+    case VN_CMD_vkCmdSetStencilTestEnable: handleCmdSetStencilTestEnable(reader); break;
+    case VN_CMD_vkCmdSetStencilOp:        handleCmdSetStencilOp(reader); break;
+    case VN_CMD_vkCmdSetStencilCompareMask: handleCmdSetStencilCompareMask(reader); break;
+    case VN_CMD_vkCmdSetStencilWriteMask: handleCmdSetStencilWriteMask(reader); break;
+    case VN_CMD_vkCmdSetStencilReference: handleCmdSetStencilReference(reader); break;
     case VN_CMD_vkCmdBindVertexBuffers:   handleCmdBindVertexBuffers(reader); break;
     case VN_CMD_vkCmdBindIndexBuffer:     handleCmdBindIndexBuffer(reader); break;
     case VN_CMD_vkCmdDrawIndexed:         handleCmdDrawIndexed(reader); break;
@@ -488,8 +493,8 @@ void VnDecoder::handleCreateImage(VnStreamReader& r) {
 
     VkImage image;
     VkResult vr = vkCreateImage(device_, &ci, nullptr, &image);
-    fprintf(stderr, "[Decoder] CreateImage: id=%llu %ux%u fmt=%u usage=0x%x result=%d\n",
-            (unsigned long long)imageId, w, h, format, usage, (int)vr);
+    fprintf(stderr, "[Decoder] CreateImage: id=%llu %ux%u fmt=%u usage=0x%x mip=%u result=%d\n",
+            (unsigned long long)imageId, w, h, format, usage, mipLevels, (int)vr);
     if (vr != VK_SUCCESS) return;
     store(images_, imageId, image);
     imageFormats_[imageId] = static_cast<VkFormat>(format);
@@ -987,7 +992,21 @@ void VnDecoder::HandlerName(VnStreamReader& r) { \
 }
 
 IMPL_DESTROY(handleDestroyBuffer,              VkBuffer,              vkDestroyBuffer,              buffers_)
-IMPL_DESTROY(handleDestroyImage,               VkImage,               vkDestroyImage,               images_)
+// Swapchain images (sentinel 0xFFF00000+i) must not be destroyed individually
+void VnDecoder::handleDestroyImage(VnStreamReader& r) {
+    uint64_t deviceId = r.readU64();
+    uint64_t objId = r.readU64();
+    (void)deviceId;
+    if ((objId & 0xFFF00000ull) == 0xFFF00000ull) {
+        images_.erase(objId); // remove from map but don't vkDestroyImage
+        return;
+    }
+    VkImage obj = lookup(images_, objId);
+    if (obj) {
+        images_.erase(objId);
+        pendingDestroys_.push_back([this, obj]() { vkDestroyImage(device_, obj, nullptr); });
+    }
+}
 IMPL_DESTROY(handleDestroyImageView,           VkImageView,           vkDestroyImageView,           imageViews_)
 IMPL_DESTROY(handleDestroyShaderModule,        VkShaderModule,        vkDestroyShaderModule,        shaderModules_)
 IMPL_DESTROY(handleDestroyPipeline,            VkPipeline,            vkDestroyPipeline,            pipelines_)
@@ -1280,6 +1299,8 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
     uint32_t depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
     uint32_t depthBoundsTestEnable = VK_FALSE;
     uint32_t stencilTestEnable = VK_FALSE;
+    VkStencilOpState stencilFront{};
+    VkStencilOpState stencilBack{};
     std::vector<VkDynamicState> dynStates;
     if (r.remaining() >= 4) {
         uint32_t hasPipelineState = r.readU32();
@@ -1300,17 +1321,29 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
             uint32_t dynamicStateCount = r.readU32();
             for (uint32_t i = 0; i < dynamicStateCount && r.remaining() >= 4; i++)
                 dynStates.push_back(static_cast<VkDynamicState>(r.readU32()));
+            // Stencil front/back ops (appended after dynamic states — 14 u32s)
+            if (r.remaining() >= 56) { // 14 * 4 bytes
+                stencilFront.failOp = static_cast<VkStencilOp>(r.readU32());
+                stencilFront.passOp = static_cast<VkStencilOp>(r.readU32());
+                stencilFront.depthFailOp = static_cast<VkStencilOp>(r.readU32());
+                stencilFront.compareOp = static_cast<VkCompareOp>(r.readU32());
+                stencilFront.compareMask = r.readU32();
+                stencilFront.writeMask = r.readU32();
+                stencilFront.reference = r.readU32();
+                stencilBack.failOp = static_cast<VkStencilOp>(r.readU32());
+                stencilBack.passOp = static_cast<VkStencilOp>(r.readU32());
+                stencilBack.depthFailOp = static_cast<VkStencilOp>(r.readU32());
+                stencilBack.compareOp = static_cast<VkCompareOp>(r.readU32());
+                stencilBack.compareMask = r.readU32();
+                stencilBack.writeMask = r.readU32();
+                stencilBack.reference = r.readU32();
+            }
         }
     }
     dynStates.erase(std::remove_if(dynStates.begin(), dynStates.end(),
         [](VkDynamicState state) {
             return state == VK_DYNAMIC_STATE_DEPTH_BIAS ||
-                   state == VK_DYNAMIC_STATE_DEPTH_BOUNDS ||
-                   state == VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK ||
-                   state == VK_DYNAMIC_STATE_STENCIL_WRITE_MASK ||
-                   state == VK_DYNAMIC_STATE_STENCIL_REFERENCE ||
-                   state == VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE ||
-                   state == VK_DYNAMIC_STATE_STENCIL_OP;
+                   state == VK_DYNAMIC_STATE_DEPTH_BOUNDS;
         }), dynStates.end());
 
     // Ensure VERTEX_INPUT_BINDING_STRIDE is always dynamic when using dynamic rendering.
@@ -1410,6 +1443,8 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
     depthStencil.depthCompareOp = static_cast<VkCompareOp>(depthCompareOp);
     depthStencil.depthBoundsTestEnable = depthBoundsTestEnable;
     depthStencil.stencilTestEnable = stencilTestEnable;
+    depthStencil.front = stencilFront;
+    depthStencil.back = stencilBack;
 
     // Dynamic rendering info (Vulkan 1.3)
     VkPipelineRenderingCreateInfo renderingInfo{};
@@ -1447,8 +1482,14 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
         renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
         renderingInfo.colorAttachmentCount = 1;
         renderingInfo.pColorAttachmentFormats = &colorFormat;
-        if (depthFmt)
+        if (depthFmt) {
             renderingInfo.depthAttachmentFormat = depthFormat;
+            // For combined depth-stencil formats, also set stencilAttachmentFormat
+            if (depthFormat == VK_FORMAT_D24_UNORM_S8_UINT ||
+                depthFormat == VK_FORMAT_D32_SFLOAT_S8_UINT ||
+                depthFormat == VK_FORMAT_D16_UNORM_S8_UINT)
+                renderingInfo.stencilAttachmentFormat = depthFormat;
+        }
         pInfo.pNext = &renderingInfo;
         pInfo.renderPass = VK_NULL_HANDLE;
     } else {
@@ -1680,6 +1721,21 @@ void VnDecoder::handleCmdBeginRendering(VnStreamReader& r) {
         }
     }
 
+    // Stencil attachment (appended after depth — check remaining for backward compat)
+    uint32_t hasStencil = 0;
+    uint64_t stencilViewId = 0;
+    uint32_t stencilLoadOp = 0, stencilStoreOp = 0;
+    uint32_t clearStencil = 0;
+    if (r.remaining() >= 4) {
+        hasStencil = r.readU32();
+        if (hasStencil && r.remaining() >= 20) { // u64 + u32 + u32 + u32 = 20 bytes
+            stencilViewId = r.readU64();
+            stencilLoadOp = r.readU32();
+            stencilStoreOp = r.readU32();
+            clearStencil = r.readU32();
+        }
+    }
+
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     if (!cb) return;
 
@@ -1742,7 +1798,22 @@ void VnDecoder::handleCmdBeginRendering(VnStreamReader& r) {
             depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
             depthAttachment.loadOp = static_cast<VkAttachmentLoadOp>(depthLoadOp);
             depthAttachment.storeOp = static_cast<VkAttachmentStoreOp>(depthStoreOp);
-            depthAttachment.clearValue.depthStencil = {clearDepth, 0};
+            depthAttachment.clearValue.depthStencil = {clearDepth, clearStencil};
+        }
+    }
+
+    // Stencil attachment info
+    VkRenderingAttachmentInfo stencilAttachment{};
+    VkImageView stencilView = VK_NULL_HANDLE;
+    if (hasStencil) {
+        stencilView = lookup(imageViews_, stencilViewId);
+        if (stencilView) {
+            stencilAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+            stencilAttachment.imageView = stencilView;
+            stencilAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            stencilAttachment.loadOp = static_cast<VkAttachmentLoadOp>(stencilLoadOp);
+            stencilAttachment.storeOp = static_cast<VkAttachmentStoreOp>(stencilStoreOp);
+            stencilAttachment.clearValue.depthStencil = {clearDepth, clearStencil};
         }
     }
 
@@ -1754,6 +1825,8 @@ void VnDecoder::handleCmdBeginRendering(VnStreamReader& r) {
     renderingInfo.pColorAttachments = &colorAttachment;
     if (hasDepth && depthView)
         renderingInfo.pDepthAttachment = &depthAttachment;
+    if (hasStencil && stencilView)
+        renderingInfo.pStencilAttachment = &stencilAttachment;
 
     // Transition image to COLOR_ATTACHMENT_OPTIMAL (only for swapchain — non-swapchain images
     // are transitioned by the rendering commands themselves)
@@ -1904,6 +1977,50 @@ void VnDecoder::handleCmdSetDepthBiasEnable(VnStreamReader& r) {
     uint32_t enable = r.readU32();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     if (cb) vkCmdSetDepthBiasEnable(cb, enable);
+}
+
+void VnDecoder::handleCmdSetStencilTestEnable(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint32_t enable = r.readU32();
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    if (cb) vkCmdSetStencilTestEnable(cb, enable);
+}
+
+void VnDecoder::handleCmdSetStencilOp(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint32_t faceMask = r.readU32();
+    uint32_t failOp = r.readU32();
+    uint32_t passOp = r.readU32();
+    uint32_t depthFailOp = r.readU32();
+    uint32_t compareOp = r.readU32();
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    if (cb) vkCmdSetStencilOp(cb, static_cast<VkStencilFaceFlags>(faceMask),
+        static_cast<VkStencilOp>(failOp), static_cast<VkStencilOp>(passOp),
+        static_cast<VkStencilOp>(depthFailOp), static_cast<VkCompareOp>(compareOp));
+}
+
+void VnDecoder::handleCmdSetStencilCompareMask(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint32_t faceMask = r.readU32();
+    uint32_t compareMask = r.readU32();
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    if (cb) vkCmdSetStencilCompareMask(cb, static_cast<VkStencilFaceFlags>(faceMask), compareMask);
+}
+
+void VnDecoder::handleCmdSetStencilWriteMask(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint32_t faceMask = r.readU32();
+    uint32_t writeMask = r.readU32();
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    if (cb) vkCmdSetStencilWriteMask(cb, static_cast<VkStencilFaceFlags>(faceMask), writeMask);
+}
+
+void VnDecoder::handleCmdSetStencilReference(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint32_t faceMask = r.readU32();
+    uint32_t reference = r.readU32();
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    if (cb) vkCmdSetStencilReference(cb, static_cast<VkStencilFaceFlags>(faceMask), reference);
 }
 
 void VnDecoder::handleCmdBindVertexBuffers(VnStreamReader& r) {
@@ -2503,6 +2620,22 @@ void VnDecoder::handleBridgeCreateSwapchain(VnStreamReader& r) {
     uint32_t height = r.readU32();
     uint32_t imageCount = r.readU32();
 
+    // Resize host window to match guest-requested extent before querying surface caps.
+    // Without this, Windows surface capabilities return the old window size (e.g. 800x600),
+    // overriding the guest's requested extent and causing resolution mismatch / corruption.
+    if (hwnd_) {
+        RECT wr = { 0, 0, (LONG)width, (LONG)height };
+        AdjustWindowRect(&wr, GetWindowLongA(hwnd_, GWL_STYLE), FALSE);
+        SetWindowPos(hwnd_, nullptr, 0, 0, wr.right - wr.left, wr.bottom - wr.top,
+                     SWP_NOMOVE | SWP_NOZORDER);
+        // Pump messages so the resize is fully processed before querying surface caps
+        MSG msg;
+        while (PeekMessageA(&msg, hwnd_, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+    }
+
     // Query surface capabilities
     VkSurfaceCapabilitiesKHR caps;
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physDevice_, surface_, &caps);
@@ -2522,15 +2655,34 @@ void VnDecoder::handleBridgeCreateSwapchain(VnStreamReader& r) {
     if (caps.currentExtent.width != UINT32_MAX)
         sc.extent = caps.currentExtent;
 
+    // DXVK creates ImageViews with SRGB format on UNORM swapchain images (and vice versa).
+    // This requires mutable format support on the swapchain.
+    VkFormat viewFormats[2] = { sc.format, VK_FORMAT_UNDEFINED };
+    if (sc.format == VK_FORMAT_B8G8R8A8_UNORM)
+        viewFormats[1] = VK_FORMAT_B8G8R8A8_SRGB;
+    else if (sc.format == VK_FORMAT_R8G8B8A8_UNORM)
+        viewFormats[1] = VK_FORMAT_R8G8B8A8_SRGB;
+    else if (sc.format == VK_FORMAT_B8G8R8A8_SRGB)
+        viewFormats[1] = VK_FORMAT_B8G8R8A8_UNORM;
+    else if (sc.format == VK_FORMAT_R8G8B8A8_SRGB)
+        viewFormats[1] = VK_FORMAT_R8G8B8A8_UNORM;
+
+    VkImageFormatListCreateInfo fmtList{};
+    fmtList.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO;
+    fmtList.viewFormatCount = viewFormats[1] != VK_FORMAT_UNDEFINED ? 2 : 1;
+    fmtList.pViewFormats = viewFormats;
+
     VkSwapchainCreateInfoKHR info{};
     info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+    info.pNext = &fmtList;
+    info.flags = VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR;
     info.surface = surface_;
     info.minImageCount = imageCount;
     info.imageFormat = sc.format;
     info.imageColorSpace = surfFmt.colorSpace;
     info.imageExtent = sc.extent;
     info.imageArrayLayers = 1;
-    info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     info.preTransform = caps.currentTransform;
     info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
@@ -2561,7 +2713,14 @@ void VnDecoder::handleBridgeCreateSwapchain(VnStreamReader& r) {
     sc.images.resize(count);
     vkGetSwapchainImagesKHR(device_, sc.swapchain, &count, sc.images.data());
 
-    // Create image views and register them with sequential IDs starting from scId+1
+    // Register swapchain images with sentinel IDs matching ICD's convention (0xFFF00000+i).
+    // This allows DXVK's CreateImageView / UpdateDescriptorSets for swapchain images
+    // to find them via the normal lookup(images_, id) path.
+    for (uint32_t i = 0; i < count; i++) {
+        store(images_, 0xFFF00000ull + i, sc.images[i]);
+    }
+
+    // Create image views and register them
     sc.imageViews.resize(count);
     for (uint32_t i = 0; i < count; i++) {
         VkImageViewCreateInfo ivInfo{};
@@ -2571,7 +2730,7 @@ void VnDecoder::handleBridgeCreateSwapchain(VnStreamReader& r) {
         ivInfo.format = sc.format;
         ivInfo.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
         vkCreateImageView(device_, &ivInfo, nullptr, &sc.imageViews[i]);
-        // Register image views with IDs: scId*100 + i + 1
+        // Register with scId-based IDs (used by BeginRendering swapchain redirect)
         store(imageViews_, scId * 100 + i + 1, sc.imageViews[i]);
     }
 
@@ -2799,7 +2958,10 @@ void VnDecoder::cleanup() {
         for (auto iv : sc.imageViews) scViews.insert(iv);
     for (auto& [id, iv] : imageViews_)
         if (scViews.find(iv) == scViews.end()) vkDestroyImageView(device_, iv, nullptr);
-    for (auto& [id, img] : images_) vkDestroyImage(device_, img, nullptr);
+    for (auto& [id, img] : images_) {
+        if ((id & 0xFFF00000ull) == 0xFFF00000ull) continue; // swapchain images — owned by swapchain
+        vkDestroyImage(device_, img, nullptr);
+    }
     // Unmap all persistently mapped memories before freeing them.
     for (auto& [id, ptr] : persistentMaps_) {
         auto it = deviceMemories_.find(id);

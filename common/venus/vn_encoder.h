@@ -106,6 +106,15 @@ public:
         uint32_t srcAlphaBlendFactor, dstAlphaBlendFactor, alphaBlendOp;
         uint32_t colorWriteMask;
     };
+    struct StencilOpState {
+        uint32_t failOp;
+        uint32_t passOp;
+        uint32_t depthFailOp;
+        uint32_t compareOp;
+        uint32_t compareMask;
+        uint32_t writeMask;
+        uint32_t reference;
+    };
     struct PipelineState {
         uint32_t topology;
         uint32_t primitiveRestartEnable;
@@ -122,6 +131,8 @@ public:
         uint32_t stencilTestEnable;
         uint32_t dynamicStateCount;
         const uint32_t* dynamicStates;
+        StencilOpState stencilFront;
+        StencilOpState stencilBack;
     };
 
     // Legacy overload (no vertex input) for guest_sim / host_cmd compatibility
@@ -203,6 +214,21 @@ public:
             w_.writeU32(pipelineState->dynamicStateCount);
             for (uint32_t i = 0; i < pipelineState->dynamicStateCount; i++)
                 w_.writeU32(pipelineState->dynamicStates[i]);
+            // Stencil front/back ops (appended after dynamic states)
+            w_.writeU32(pipelineState->stencilFront.failOp);
+            w_.writeU32(pipelineState->stencilFront.passOp);
+            w_.writeU32(pipelineState->stencilFront.depthFailOp);
+            w_.writeU32(pipelineState->stencilFront.compareOp);
+            w_.writeU32(pipelineState->stencilFront.compareMask);
+            w_.writeU32(pipelineState->stencilFront.writeMask);
+            w_.writeU32(pipelineState->stencilFront.reference);
+            w_.writeU32(pipelineState->stencilBack.failOp);
+            w_.writeU32(pipelineState->stencilBack.passOp);
+            w_.writeU32(pipelineState->stencilBack.depthFailOp);
+            w_.writeU32(pipelineState->stencilBack.compareOp);
+            w_.writeU32(pipelineState->stencilBack.compareMask);
+            w_.writeU32(pipelineState->stencilBack.writeMask);
+            w_.writeU32(pipelineState->stencilBack.reference);
         }
         w_.endCommand(off);
     }
@@ -514,7 +540,10 @@ public:
                            uint64_t imageViewId = 0,
                            uint32_t hasDepth = 0, uint64_t depthViewId = 0,
                            uint32_t depthLoadOp = 0, uint32_t depthStoreOp = 0,
-                           float clearDepth = 1.0f) {
+                           float clearDepth = 1.0f,
+                           uint32_t hasStencil = 0, uint64_t stencilViewId = 0,
+                           uint32_t stencilLoadOp = 0, uint32_t stencilStoreOp = 0,
+                           uint32_t clearStencil = 0) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdBeginRendering);
         w_.writeU64(cmdBufferId);
@@ -536,6 +565,14 @@ public:
             w_.writeU32(depthLoadOp);
             w_.writeU32(depthStoreOp);
             w_.writeF32(clearDepth);
+        }
+        // Stencil attachment (appended after depth — decoder checks remaining)
+        w_.writeU32(hasStencil);
+        if (hasStencil) {
+            w_.writeU64(stencilViewId);
+            w_.writeU32(stencilLoadOp);
+            w_.writeU32(stencilStoreOp);
+            w_.writeU32(clearStencil);
         }
         w_.endCommand(off);
     }
@@ -670,6 +707,44 @@ public:
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdSetDepthBiasEnable);
         vn_encode_vkCmdSetDepthBiasEnable(&w_, cmdBufferId, enable);
+        w_.endCommand(off);
+    }
+
+    void cmdSetStencilTestEnable(uint64_t cmdBufferId, uint32_t enable) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdSetStencilTestEnable);
+        vn_encode_vkCmdSetStencilTestEnable(&w_, cmdBufferId, enable);
+        w_.endCommand(off);
+    }
+
+    void cmdSetStencilOp(uint64_t cmdBufferId, uint32_t faceMask,
+                         uint32_t failOp, uint32_t passOp,
+                         uint32_t depthFailOp, uint32_t compareOp) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdSetStencilOp);
+        vn_encode_vkCmdSetStencilOp(&w_, cmdBufferId, faceMask,
+                                     failOp, passOp, depthFailOp, compareOp);
+        w_.endCommand(off);
+    }
+
+    void cmdSetStencilCompareMask(uint64_t cmdBufferId, uint32_t faceMask, uint32_t compareMask) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdSetStencilCompareMask);
+        vn_encode_vkCmdSetStencilCompareMask(&w_, cmdBufferId, faceMask, compareMask);
+        w_.endCommand(off);
+    }
+
+    void cmdSetStencilWriteMask(uint64_t cmdBufferId, uint32_t faceMask, uint32_t writeMask) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdSetStencilWriteMask);
+        vn_encode_vkCmdSetStencilWriteMask(&w_, cmdBufferId, faceMask, writeMask);
+        w_.endCommand(off);
+    }
+
+    void cmdSetStencilReference(uint64_t cmdBufferId, uint32_t faceMask, uint32_t reference) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdSetStencilReference);
+        vn_encode_vkCmdSetStencilReference(&w_, cmdBufferId, faceMask, reference);
         w_.endCommand(off);
     }
 

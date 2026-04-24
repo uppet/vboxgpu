@@ -42,6 +42,9 @@ public:
               VkQueue graphicsQueue, uint32_t graphicsFamily,
               VkSurfaceKHR surface);
 
+    // Set host render window handle — decoder resizes it on swapchain create
+    void setHwnd(HWND hwnd) { hwnd_ = hwnd; }
+
     // Set to true to skip GPU readback (saves ~5ms/frame, no frame return to guest)
     bool noReadback_ = false;
 
@@ -129,6 +132,11 @@ private:
     void handleCmdSetDepthCompareOp(VnStreamReader& r);
     void handleCmdSetDepthBoundsTestEnable(VnStreamReader& r);
     void handleCmdSetDepthBiasEnable(VnStreamReader& r);
+    void handleCmdSetStencilTestEnable(VnStreamReader& r);
+    void handleCmdSetStencilOp(VnStreamReader& r);
+    void handleCmdSetStencilCompareMask(VnStreamReader& r);
+    void handleCmdSetStencilWriteMask(VnStreamReader& r);
+    void handleCmdSetStencilReference(VnStreamReader& r);
     void handleCmdBindVertexBuffers(VnStreamReader& r);
     void handleCmdBindIndexBuffer(VnStreamReader& r);
     void handleCmdDrawIndexed(VnStreamReader& r);
@@ -183,6 +191,7 @@ private:
     VkQueue graphicsQueue_ = VK_NULL_HANDLE;
     uint32_t graphicsFamily_ = 0;
     VkSurfaceKHR surface_ = VK_NULL_HANDLE;
+    HWND hwnd_ = nullptr;  // host render window — resized on swapchain create
 
     std::unordered_map<uint64_t, VkRenderPass> renderPasses_;
     std::unordered_map<uint64_t, VkShaderModule> shaderModules_;

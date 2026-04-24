@@ -902,7 +902,15 @@ static VkResult VKAPI_CALL icd_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
     memset(p, 0, sizeof(*p));
     p->minImageCount = 2;
     p->maxImageCount = 8;
-    p->currentExtent = g_icd.swapchainExtent;
+    // Use the actual game window size (not the previous swapchain extent)
+    // so DXVK creates a swapchain matching the current resolution.
+    if (g_icd.presentHwnd) {
+        RECT cr;
+        GetClientRect(g_icd.presentHwnd, &cr);
+        p->currentExtent = { (uint32_t)(cr.right - cr.left), (uint32_t)(cr.bottom - cr.top) };
+    } else {
+        p->currentExtent = g_icd.swapchainExtent;
+    }
     p->minImageExtent = { 1, 1 };
     p->maxImageExtent = { 16384, 16384 };
     p->maxImageArrayLayers = 1;
@@ -1063,13 +1071,27 @@ static void VKAPI_CALL icd_vkCmdBeginRendering(VkCommandBuffer cb, const VkRende
         clearDepth = pInfo->pDepthAttachment->clearValue.depthStencil.depth;
     }
 
+    // Stencil attachment
+    uint32_t hasStencil = 0;
+    uint64_t stencilViewId = 0;
+    uint32_t stencilLoadOp = 0, stencilStoreOp = 0;
+    uint32_t clearStencil = 0;
+    if (pInfo && pInfo->pStencilAttachment && pInfo->pStencilAttachment->imageView != VK_NULL_HANDLE) {
+        hasStencil = 1;
+        stencilViewId = (uint64_t)pInfo->pStencilAttachment->imageView;
+        stencilLoadOp = pInfo->pStencilAttachment->loadOp;
+        stencilStoreOp = pInfo->pStencilAttachment->storeOp;
+        clearStencil = pInfo->pStencilAttachment->clearValue.depthStencil.stencil;
+    }
+
     g_icd.encoder.cmdBeginRendering(toId(cb),
         pInfo ? pInfo->renderArea.offset.x : 0,
         pInfo ? pInfo->renderArea.offset.y : 0,
         pInfo ? pInfo->renderArea.extent.width : 800,
         pInfo ? pInfo->renderArea.extent.height : 600,
         loadOp, storeOp, cr, cg, cb_, ca, imageViewId,
-        hasDepth, depthViewId, depthLoadOp, depthStoreOp, clearDepth);
+        hasDepth, depthViewId, depthLoadOp, depthStoreOp, clearDepth,
+        hasStencil, stencilViewId, stencilLoadOp, stencilStoreOp, clearStencil);
 }
 static void VKAPI_CALL icd_vkCmdEndRendering(VkCommandBuffer cb) {
     g_icd.encoder.cmdEndRendering(toId(cb));
@@ -1103,8 +1125,14 @@ static void VKAPI_CALL icd_vkCmdSetDepthCompareOp(VkCommandBuffer cb, VkCompareO
 static void VKAPI_CALL icd_vkCmdSetDepthBoundsTestEnable(VkCommandBuffer cb, VkBool32 enable) {
     g_icd.encoder.cmdSetDepthBoundsTestEnable(toId(cb), enable);
 }
-static void VKAPI_CALL icd_vkCmdSetStencilTestEnable(VkCommandBuffer, VkBool32) {}
-static void VKAPI_CALL icd_vkCmdSetStencilOp(VkCommandBuffer, VkStencilFaceFlags, VkStencilOp, VkStencilOp, VkStencilOp, VkCompareOp) {}
+static void VKAPI_CALL icd_vkCmdSetStencilTestEnable(VkCommandBuffer cb, VkBool32 enable) {
+    g_icd.encoder.cmdSetStencilTestEnable(toId(cb), enable);
+}
+static void VKAPI_CALL icd_vkCmdSetStencilOp(VkCommandBuffer cb, VkStencilFaceFlags faceMask,
+    VkStencilOp failOp, VkStencilOp passOp, VkStencilOp depthFailOp, VkCompareOp compareOp) {
+    g_icd.encoder.cmdSetStencilOp(toId(cb), (uint32_t)faceMask,
+        (uint32_t)failOp, (uint32_t)passOp, (uint32_t)depthFailOp, (uint32_t)compareOp);
+}
 static void VKAPI_CALL icd_vkCmdSetRasterizerDiscardEnable(VkCommandBuffer, VkBool32) {}
 static void VKAPI_CALL icd_vkCmdSetDepthBiasEnable(VkCommandBuffer cb, VkBool32 enable) {
     g_icd.encoder.cmdSetDepthBiasEnable(toId(cb), enable);
@@ -1123,6 +1151,12 @@ static void VKAPI_CALL icd_vkCmdBindVertexBuffers2(VkCommandBuffer cb, uint32_t 
         ids.data(), offs.data(), szs.data(), strs.data());
 }
 static void VKAPI_CALL icd_vkCmdSetDepthBounds(VkCommandBuffer, float, float) {}
+static void VKAPI_CALL icd_vkCmdSetStencilCompareMask(VkCommandBuffer cb, VkStencilFaceFlags faceMask, uint32_t compareMask) {
+    g_icd.encoder.cmdSetStencilCompareMask(toId(cb), (uint32_t)faceMask, compareMask);
+}
+static void VKAPI_CALL icd_vkCmdSetStencilWriteMask(VkCommandBuffer cb, VkStencilFaceFlags faceMask, uint32_t writeMask) {
+    g_icd.encoder.cmdSetStencilWriteMask(toId(cb), (uint32_t)faceMask, writeMask);
+}
 static void VKAPI_CALL icd_vkCmdDrawIndirect(VkCommandBuffer, VkBuffer, VkDeviceSize, uint32_t, uint32_t) {}
 static void VKAPI_CALL icd_vkCmdDrawIndexedIndirect(VkCommandBuffer, VkBuffer, VkDeviceSize, uint32_t, uint32_t) {}
 
@@ -1733,6 +1767,16 @@ static VkResult VKAPI_CALL icd_vkCreateGraphicsPipelines(
             pipelineState.depthCompareOp = (uint32_t)ds->depthCompareOp;
             pipelineState.depthBoundsTestEnable = ds->depthBoundsTestEnable;
             pipelineState.stencilTestEnable = ds->stencilTestEnable;
+            pipelineState.stencilFront = {
+                (uint32_t)ds->front.failOp, (uint32_t)ds->front.passOp,
+                (uint32_t)ds->front.depthFailOp, (uint32_t)ds->front.compareOp,
+                ds->front.compareMask, ds->front.writeMask, ds->front.reference
+            };
+            pipelineState.stencilBack = {
+                (uint32_t)ds->back.failOp, (uint32_t)ds->back.passOp,
+                (uint32_t)ds->back.depthFailOp, (uint32_t)ds->back.compareOp,
+                ds->back.compareMask, ds->back.writeMask, ds->back.reference
+            };
         }
         pipelineState.dynamicStateCount = (uint32_t)dynamicStates.size();
         pipelineState.dynamicStates = dynamicStates.data();
@@ -2635,7 +2679,9 @@ static void VKAPI_CALL icd_vkCmdClearColorImage(VkCommandBuffer, VkImage, VkImag
 static void VKAPI_CALL icd_vkCmdClearAttachments(VkCommandBuffer cb, uint32_t attachmentCount, const VkClearAttachment* pAttachments, uint32_t rectCount, const VkClearRect* pRects) {
     g_icd.encoder.cmdClearAttachments(toId(cb), attachmentCount, pAttachments, rectCount, pRects);
 }
-static void VKAPI_CALL icd_vkCmdSetStencilReference(VkCommandBuffer, VkStencilFaceFlags, uint32_t) {}
+static void VKAPI_CALL icd_vkCmdSetStencilReference(VkCommandBuffer cb, VkStencilFaceFlags faceMask, uint32_t reference) {
+    g_icd.encoder.cmdSetStencilReference(toId(cb), (uint32_t)faceMask, reference);
+}
 static void VKAPI_CALL icd_vkCmdSetBlendConstants(VkCommandBuffer, const float[4]) {}
 static void VKAPI_CALL icd_vkCmdPushConstants(VkCommandBuffer cb, VkPipelineLayout layout,
     VkShaderStageFlags stageFlags, uint32_t offset, uint32_t size, const void* pValues) {
@@ -2982,6 +3028,8 @@ static const FuncEntry g_funcTable[] = {
     ENTRY(vkCmdClearColorImage),
     ENTRY(vkCmdClearAttachments),
     ENTRY(vkCmdSetStencilReference),
+    ENTRY(vkCmdSetStencilCompareMask),
+    ENTRY(vkCmdSetStencilWriteMask),
     ENTRY(vkCmdSetBlendConstants),
     ENTRY(vkCmdPushConstants),
     ENTRY(vkCmdDispatch),

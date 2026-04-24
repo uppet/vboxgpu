@@ -140,6 +140,7 @@ void ClientSession::workerLoop() {
     createLogicalDevice(vk_);
     decoder_.init(vk_.physicalDevice, vk_.device, vk_.graphicsQueue,
                   vk_.graphicsFamily, vk_.surface);
+    decoder_.setHwnd(hwnd_);
     bool disableReadback = (getenv("VBOXGPU_NO_READBACK") != nullptr);
     decoder_.noReadback_ = disableReadback;
 
@@ -315,6 +316,7 @@ void ClientSession::replayLoop() {
     createLogicalDevice(vk_);
     decoder_.init(vk_.physicalDevice, vk_.device, vk_.graphicsQueue,
                   vk_.graphicsFamily, vk_.surface);
+    decoder_.setHwnd(hwnd_);
 
     fprintf(stderr, "[Session %d] Replaying %zu batches...\n", id_, replayBatches_.size());
 
