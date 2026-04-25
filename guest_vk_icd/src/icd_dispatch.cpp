@@ -271,10 +271,10 @@ void IcdState::flushMappedMemory() {
         }
     }
 #else
+    // Full flush: send ALL mapped regions regardless of size.
+    // Slow for complex games (144MB+ batch for UltraKill) but guaranteed correct.
     for (auto& m : mappedRegions) {
-        if (m.size <= VBOXGPU_DIRTY_TRACK_SIZE_LIMIT) {
-            encoder.cmdWriteMemory(m.memoryId, m.offset, (uint32_t)m.size, m.ptr);
-        }
+        encoder.cmdWriteMemory(m.memoryId, m.offset, (uint32_t)m.size, m.ptr);
     }
 #endif
 }
@@ -2359,13 +2359,35 @@ static uint32_t formatBpp(VkFormat fmt) {
     }
 }
 
+// For block-compressed formats: returns block size in bytes (0 = not BC).
+// BC formats use 4x4 texel blocks; buffer layout uses block counts, not pixel counts.
+static uint32_t formatBlockSize(VkFormat fmt) {
+    switch (fmt) {
+    // 8 bytes per 4x4 block
+    case VK_FORMAT_BC1_RGB_UNORM_BLOCK: case VK_FORMAT_BC1_RGB_SRGB_BLOCK:
+    case VK_FORMAT_BC1_RGBA_UNORM_BLOCK: case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
+    case VK_FORMAT_BC4_UNORM_BLOCK: case VK_FORMAT_BC4_SNORM_BLOCK:
+        return 8;
+    // 16 bytes per 4x4 block
+    case VK_FORMAT_BC2_UNORM_BLOCK: case VK_FORMAT_BC2_SRGB_BLOCK:
+    case VK_FORMAT_BC3_UNORM_BLOCK: case VK_FORMAT_BC3_SRGB_BLOCK:
+    case VK_FORMAT_BC5_UNORM_BLOCK: case VK_FORMAT_BC5_SNORM_BLOCK:
+    case VK_FORMAT_BC6H_UFLOAT_BLOCK: case VK_FORMAT_BC6H_SFLOAT_BLOCK:
+    case VK_FORMAT_BC7_UNORM_BLOCK: case VK_FORMAT_BC7_SRGB_BLOCK:
+        return 16;
+    default:
+        return 0;
+    }
+}
+
 // Helper: gather pixel data from mapped buffer memory for inline CopyBufToImg.
 // Returns the contiguous data span [minOff, maxEnd) and adjusts bufOffsets to be relative to 0.
-// bRL[i]: bufferRowLength (0 = tight), bIH[i]: bufferImageHeight (0 = tight), bpp: bytes/texel.
+// bRL[i]: bufferRowLength (0 = tight), bIH[i]: bufferImageHeight (0 = tight).
+// bpp: bytes/texel (non-BC) or 0 (unknown). blockSize: bytes/block for BC formats (0 = non-BC).
 static std::vector<uint8_t> gatherCopySourceData(uint64_t bufId, uint32_t regionCount,
     uint32_t* bufOffsets, const uint32_t* extW, const uint32_t* extH, const uint32_t* extD,
-    const uint32_t* bRL, const uint32_t* bIH, uint32_t bpp) {
-    if (bpp == 0) return {};  // unknown format — can't calculate region size
+    const uint32_t* bRL, const uint32_t* bIH, uint32_t bpp, uint32_t blockSize) {
+    if (bpp == 0 && blockSize == 0) return {};  // unknown format
     auto bit = g_icd.bufferBindings.find(bufId);
     if (bit == g_icd.bufferBindings.end()) return {};
     uint64_t memId = bit->second.memoryId;
@@ -2374,13 +2396,21 @@ static std::vector<uint8_t> gatherCopySourceData(uint64_t bufId, uint32_t region
     if (sit == g_icd.memoryShadows.end() || !sit->second.ptr) return {};
 
     // Find span [minOff, maxEnd) across all regions
-    // rowPitch = (bufferRowLength != 0 ? bufferRowLength : imageExtent.width) * bpp
-    // imgH     = (bufferImageHeight != 0 ? bufferImageHeight : imageExtent.height)
     uint32_t minOff = UINT32_MAX, maxEnd = 0;
     for (uint32_t i = 0; i < regionCount; i++) {
-        uint32_t rowPitch = (bRL[i] != 0 ? bRL[i] : extW[i]) * bpp;
-        uint32_t imgH     = (bIH[i] != 0 ? bIH[i] : extH[i]);
-        uint32_t regSize  = rowPitch * imgH * extD[i];
+        uint32_t regSize;
+        if (blockSize != 0) {
+            // BC format: 4x4 blocks. bufferRowLength/bufferImageHeight are in texels.
+            uint32_t bw = (bRL[i] != 0 ? bRL[i] : extW[i]);
+            uint32_t bh = (bIH[i] != 0 ? bIH[i] : extH[i]);
+            uint32_t blocksPerRow = (bw + 3) / 4;
+            uint32_t blockRows    = (bh + 3) / 4;
+            regSize = blocksPerRow * blockRows * blockSize * extD[i];
+        } else {
+            uint32_t rowPitch = (bRL[i] != 0 ? bRL[i] : extW[i]) * bpp;
+            uint32_t imgH     = (bIH[i] != 0 ? bIH[i] : extH[i]);
+            regSize = rowPitch * imgH * extD[i];
+        }
         if (bufOffsets[i] < minOff) minOff = bufOffsets[i];
         uint32_t end = bufOffsets[i] + regSize;
         if (end > maxEnd) maxEnd = end;
@@ -2427,8 +2457,13 @@ static void VKAPI_CALL icd_vkCmdCopyBufferToImage2(VkCommandBuffer cb, const voi
         dstBpp = (fit != g_icd.imageFormats.end()) ? formatBpp(fit->second) : 4u;
     }
     // Inline data: gather pixel data and encode atomically with copy command
+    uint32_t dstBlockSize = 0;
+    {
+        auto fit2 = g_icd.imageFormats.find((uint64_t)info->dstImage);
+        if (fit2 != g_icd.imageFormats.end()) dstBlockSize = formatBlockSize(fit2->second);
+    }
     auto pixelData = gatherCopySourceData((uint64_t)info->srcBuffer, info->regionCount,
-        bOff.data(), iEW.data(), iEH.data(), iED.data(), bRL.data(), bIH.data(), dstBpp);
+        bOff.data(), iEW.data(), iEH.data(), iED.data(), bRL.data(), bIH.data(), dstBpp, dstBlockSize);
     if (!pixelData.empty()) {
         g_icd.encoder.cmdCopyBufferToImageInline(toId(cb), (uint64_t)info->dstImage,
             info->dstImageLayout, info->regionCount,
@@ -2505,8 +2540,13 @@ static void VKAPI_CALL icd_vkCmdCopyBufferToImage(VkCommandBuffer cb, VkBuffer b
         auto fit = g_icd.imageFormats.find((uint64_t)img);
         dstBpp = (fit != g_icd.imageFormats.end()) ? formatBpp(fit->second) : 4u;
     }
+    uint32_t dstBlockSize = 0;
+    {
+        auto fit2 = g_icd.imageFormats.find((uint64_t)img);
+        if (fit2 != g_icd.imageFormats.end()) dstBlockSize = formatBlockSize(fit2->second);
+    }
     auto pixelData = gatherCopySourceData((uint64_t)buf, regionCount,
-        bOff.data(), iEW.data(), iEH.data(), iED.data(), bRL.data(), bIH.data(), dstBpp);
+        bOff.data(), iEW.data(), iEH.data(), iED.data(), bRL.data(), bIH.data(), dstBpp, dstBlockSize);
     if (!pixelData.empty()) {
         g_icd.encoder.cmdCopyBufferToImageInline(toId(cb), (uint64_t)img, layout, regionCount,
             bOff.data(), bRL.data(), bIH.data(), iAsp.data(), iMip.data(), iBL.data(), iLC.data(),
