@@ -1172,8 +1172,18 @@ void VnDecoder::handleCmdPipelineBarrier(VnStreamReader& r) {
 
     // Filter out barriers with null images
     std::vector<VkImageMemoryBarrier> validBarriers;
-    for (auto& b : barriers)
-        if (b.image) validBarriers.push_back(b);
+    for (uint32_t i = 0; i < barriers.size(); i++) {
+        if (barriers[i].image) {
+            validBarriers.push_back(barriers[i]);
+        } else {
+            static int nullBarrierLog = 0;
+            if (nullBarrierLog < 20) {
+                nullBarrierLog++;
+                fprintf(stderr, "[Decoder] Barrier SKIP: null image (barrier %u/%u layout %u->%u)\n",
+                        i, imageBarrierCount, barriers[i].oldLayout, barriers[i].newLayout);
+            }
+        }
+    }
 
     if (!validBarriers.empty()) {
         vkCmdPipelineBarrier(cb, srcStage, dstStage, 0,
@@ -2838,10 +2848,12 @@ void VnDecoder::flushPendingPresents() {
 
         uint32_t presentIdx = it->second.currentImageIndex;
 
-        // Diagnostic capture: at frame 200, save swapchain + internal RT images
-        static int diagFrame = 0;
-        diagFrame++;
-        if (diagFrame == 300) {
+        // Diagnostic capture: 30 seconds after first present
+        static bool diagDone = false;
+        static uint64_t firstPresentMs = 0;
+        if (!firstPresentMs) firstPresentMs = GetTickCount64();
+        if (!diagDone && (GetTickCount64() - firstPresentMs) >= 30000) {
+            diagDone = true;
             vkQueueWaitIdle(graphicsQueue_); // ensure all GPU work done
             // 1. Swapchain image (after blit)
             debugCaptureImage(it->second.images[presentIdx], it->second.format,
@@ -2863,7 +2875,8 @@ void VnDecoder::flushPendingPresents() {
                 // We don't know exact size, so capture images with common RT formats
                 VkFormat fmt = fmtIt->second;
                 if (fmt == VK_FORMAT_R8G8B8A8_UNORM || fmt == VK_FORMAT_R8G8B8A8_SRGB ||
-                    fmt == VK_FORMAT_B8G8R8A8_UNORM || fmt == VK_FORMAT_R16G16B16A16_SFLOAT) {
+                    fmt == VK_FORMAT_B8G8R8A8_UNORM || fmt == VK_FORMAT_R16G16B16A16_SFLOAT ||
+                    fmt == VK_FORMAT_R32G32B32A32_SFLOAT || fmt == VK_FORMAT_A2B10G10R10_UNORM_PACK32) {
                     char path[256];
                     snprintf(path, sizeof(path), "S:/bld/vboxgpu/diag_rt_%d_id%llu_fmt%u.bmp",
                              rtIdx, (unsigned long long)id, (unsigned)fmt);
@@ -2875,7 +2888,7 @@ void VnDecoder::flushPendingPresents() {
                     fprintf(stderr, "[Diag] Saved RT id=%llu fmt=%u layout=%u\n",
                             (unsigned long long)id, (unsigned)fmt, (unsigned)layout);
                     rtIdx++;
-                    if (rtIdx >= 5) break; // limit to 5
+                    if (rtIdx >= 15) break;
                 }
             }
         }

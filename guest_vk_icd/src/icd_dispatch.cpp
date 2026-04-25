@@ -1106,6 +1106,10 @@ static void VKAPI_CALL icd_vkCmdSetPrimitiveTopology(VkCommandBuffer cb, VkPrimi
     g_icd.encoder.cmdSetPrimitiveTopology(toId(cb), (uint32_t)topology);
 }
 static void VKAPI_CALL icd_vkCmdSetViewportWithCount(VkCommandBuffer cb, uint32_t count, const VkViewport* vps) {
+    if (count > 1) {
+        static int vpWarn = 0;
+        if (vpWarn < 5) { vpWarn++; fprintf(stderr, "[ICD] WARNING: SetViewportWithCount count=%u (only first used)\n", count); }
+    }
     if (count > 0 && vps)
         g_icd.encoder.cmdSetViewport(toId(cb), vps[0].x, vps[0].y, vps[0].width, vps[0].height, vps[0].minDepth, vps[0].maxDepth);
 }
