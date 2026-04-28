@@ -446,7 +446,9 @@ public:
                             uint32_t srcStage, uint32_t dstStage,
                             uint32_t imageBarrierCount,
                             const uint64_t* images, const uint32_t* oldLayouts, const uint32_t* newLayouts,
-                            const uint32_t* srcAccess, const uint32_t* dstAccess) {
+                            const uint32_t* srcAccess, const uint32_t* dstAccess,
+                            const uint32_t* baseMipLevels = nullptr,
+                            const uint32_t* levelCounts = nullptr) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCmdPipelineBarrier2);
         w_.writeU64(cbId);
@@ -456,6 +458,8 @@ public:
             w_.writeU64(images[i]);
             w_.writeU32(oldLayouts[i]); w_.writeU32(newLayouts[i]);
             w_.writeU32(srcAccess[i]); w_.writeU32(dstAccess[i]);
+            w_.writeU32(baseMipLevels ? baseMipLevels[i] : 0);
+            w_.writeU32(levelCounts ? levelCounts[i] : VK_REMAINING_MIP_LEVELS);
         }
         w_.endCommand(off);
     }
@@ -765,6 +769,64 @@ public:
         auto off = w_.beginCommand(VN_CMD_vkCmdDrawIndexed);
         vn_encode_vkCmdDrawIndexed(&w_, cmdBufferId, indexCount, instanceCount,
                                    firstIndex, vertexOffset, firstInstance);
+        w_.endCommand(off);
+    }
+
+    void cmdDrawIndirect(uint64_t cmdBufferId, uint64_t bufferId,
+                         uint64_t offset, uint32_t drawCount, uint32_t stride) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdDrawIndirect);
+        w_.writeU64(cmdBufferId);
+        w_.writeU64(bufferId);
+        w_.writeU64(offset);
+        w_.writeU32(drawCount);
+        w_.writeU32(stride);
+        w_.endCommand(off);
+    }
+
+    void cmdDrawIndexedIndirect(uint64_t cmdBufferId, uint64_t bufferId,
+                                uint64_t offset, uint32_t drawCount, uint32_t stride) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdDrawIndexedIndirect);
+        w_.writeU64(cmdBufferId);
+        w_.writeU64(bufferId);
+        w_.writeU64(offset);
+        w_.writeU32(drawCount);
+        w_.writeU32(stride);
+        w_.endCommand(off);
+    }
+
+    void cmdSetRasterizerDiscardEnable(uint64_t cmdBufferId, uint32_t enable) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdSetRasterizerDiscardEnable);
+        w_.writeU64(cmdBufferId);
+        w_.writeU32(enable);
+        w_.endCommand(off);
+    }
+
+    void cmdSetPrimitiveRestartEnable(uint64_t cmdBufferId, uint32_t enable) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdSetPrimitiveRestartEnable);
+        w_.writeU64(cmdBufferId);
+        w_.writeU32(enable);
+        w_.endCommand(off);
+    }
+
+    void cmdSetBlendConstants(uint64_t cmdBufferId, float r, float g, float b, float a) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdSetBlendConstants);
+        w_.writeU64(cmdBufferId);
+        w_.writeF32(r); w_.writeF32(g); w_.writeF32(b); w_.writeF32(a);
+        w_.endCommand(off);
+    }
+
+    void cmdSetDepthBias(uint64_t cmdBufferId, float constantFactor, float clamp, float slopeFactor) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdSetDepthBias);
+        w_.writeU64(cmdBufferId);
+        w_.writeF32(constantFactor);
+        w_.writeF32(clamp);
+        w_.writeF32(slopeFactor);
         w_.endCommand(off);
     }
 

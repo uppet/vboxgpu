@@ -16,9 +16,8 @@
 #include <cstddef>
 #include <stdexcept>
 
-// MEM_WRITE_WATCH dirty tracking: no VEH handler needed.
-// The kernel tracks writes at page granularity; GetWriteWatch atomically
-// returns dirty pages and resets tracking — zero race window.
+// MEM_WRITE_WATCH dirty tracking: kernel tracks writes at page granularity;
+// GetWriteWatch atomically returns dirty pages and resets tracking.
 
 IcdState g_icd;
 
@@ -171,6 +170,8 @@ void IcdState::flushBufferRange(uint64_t bufferId, VkDeviceSize offset, VkDevice
 #endif
             encoder.cmdWriteMemory(memId, dataStart, sz,
                                    (const uint8_t*)m.ptr + localOff);
+            // Record this range to prevent flushMappedMemory from overwriting
+            flushedRangesThisBatch_.push_back({memId, dataStart, sz});
             return;
         }
     }
@@ -187,89 +188,83 @@ void IcdState::flushBufferRange(uint64_t bufferId, VkDeviceSize offset, VkDevice
 void IcdState::flushMappedMemory() {
     std::lock_guard<std::mutex> lock(mappedMutex);
 #if VBOXGPU_PERF_DIRTY_TRACK
-    // (freed shadows are now cleaned up immediately in icd_vkFreeMemory)
+    // Two-pass GetWriteWatch: catches concurrent DXVK writes during flush.
+    // Pass 1: GetWriteWatch(RESET) → collect + send dirty pages.
+    // Pass 2: GetWriteWatch(RESET) again → catch pages written during pass 1.
+    // Fixes gun model mask offset caused by stale MVP matrix (CS thread writes
+    // constant buffer page AFTER pass 1 reset → page missed in single-pass).
 
-    // Phase 1: GetWriteWatch per shadow — atomically get dirty pages + reset tracking.
-    // No race window: kernel does get+reset in one operation.
-    struct ShadowDirty {
-        std::vector<uintptr_t> offsets; // page-aligned byte offsets from shadow base
-    };
-    std::unordered_map<uint64_t, ShadowDirty> dirtyMap;
+    auto collectAndSendDirty = [&]() {
+        struct ShadowDirty { std::vector<uintptr_t> offsets; };
+        std::unordered_map<uint64_t, ShadowDirty> dirtyMap;
 
-    for (auto& [memId, shadow] : memoryShadows) {
-        if (!shadow.ptr) continue;
-
-        // Large shadows: reset dirty bits to prevent stale accumulation,
-        // but do not send data (handled by explicit flushBufferRange).
-        if (shadow.size > VBOXGPU_DIRTY_TRACK_SIZE_LIMIT) {
-            ResetWriteWatch(shadow.ptr, (SIZE_T)shadow.size);
-            continue;
+        for (auto& [memId, shadow] : memoryShadows) {
+            if (!shadow.ptr) continue;
+            if (shadow.size > VBOXGPU_DIRTY_TRACK_SIZE_LIMIT) {
+                ResetWriteWatch(shadow.ptr, (SIZE_T)shadow.size);
+                continue;
+            }
+            ULONG_PTR maxPages = (ULONG_PTR)((shadow.size + 4095) / 4096);
+            std::vector<void*> pages(maxPages);
+            ULONG_PTR count = maxPages;
+            ULONG granularity = 0;
+            UINT res = GetWriteWatch(WRITE_WATCH_FLAG_RESET,
+                                      shadow.ptr, (SIZE_T)shadow.size,
+                                      pages.data(), &count, &granularity);
+            if (res != 0 || count == 0) continue;
+            auto& info = dirtyMap[memId];
+            info.offsets.reserve(count);
+            uintptr_t base = (uintptr_t)shadow.ptr;
+            for (ULONG_PTR i = 0; i < count; i++)
+                info.offsets.push_back((uintptr_t)pages[i] - base);
         }
 
-        ULONG_PTR maxPages = (ULONG_PTR)((shadow.size + 4095) / 4096);
-        std::vector<void*> pages(maxPages);
-        ULONG_PTR count = maxPages;
-        ULONG granularity = 0;
+        for (auto& m : mappedRegions) {
+            if (m.size > VBOXGPU_DIRTY_TRACK_SIZE_LIMIT) continue;
+            auto dit = dirtyMap.find(m.memoryId);
+            if (dit == dirtyMap.end()) continue;
+            auto sit = memoryShadows.find(m.memoryId);
+            if (sit == memoryShadows.end()) continue;
+            auto& shadow = sit->second;
 
-        UINT res = GetWriteWatch(WRITE_WATCH_FLAG_RESET,
-                                  shadow.ptr, (SIZE_T)shadow.size,
-                                  pages.data(), &count, &granularity);
-        if (res != 0 || count == 0) continue;
+            VkDeviceSize regStart = m.offset;
+            VkDeviceSize regEnd = m.offset + m.size;
+            VkDeviceSize runStart = VK_WHOLE_SIZE, runEnd = 0;
 
-        auto& info = dirtyMap[memId];
-        info.offsets.reserve(count);
-        uintptr_t base = (uintptr_t)shadow.ptr;
-        for (ULONG_PTR i = 0; i < count; i++)
-            info.offsets.push_back((uintptr_t)pages[i] - base);
-        // offsets are sorted ascending (guaranteed by GetWriteWatch)
-    }
+            for (auto off : dit->second.offsets) {
+                VkDeviceSize pageStart = (VkDeviceSize)off;
+                VkDeviceSize pageEnd = pageStart + 4096;
+                if (pageEnd <= regStart || pageStart >= regEnd) continue;
+                // Skip pages that overlap with flushBufferRange regions
+                // to prevent temporal aliasing (overwriting staging data)
+                bool skipPage = false;
+                for (auto& fr : flushedRangesThisBatch_) {
+                    if (fr.memId == m.memoryId &&
+                        pageStart < fr.offset + fr.size && pageEnd > fr.offset) {
+                        skipPage = true; break;
+                    }
+                }
+                if (skipPage) continue;
+                VkDeviceSize clipStart = pageStart < regStart ? regStart : pageStart;
+                VkDeviceSize clipEnd = pageEnd > regEnd ? regEnd : pageEnd;
 
-    // Phase 2: For each mapped region, find overlapping dirty pages → merge runs → send.
-    for (auto& m : mappedRegions) {
-        if (m.size > VBOXGPU_DIRTY_TRACK_SIZE_LIMIT) continue;
-        auto dit = dirtyMap.find(m.memoryId);
-        if (dit == dirtyMap.end()) continue;
-        auto sit = memoryShadows.find(m.memoryId);
-        if (sit == memoryShadows.end()) continue;
-        auto& shadow = sit->second;
-
-        VkDeviceSize regStart = m.offset;
-        VkDeviceSize regEnd = m.offset + m.size;
-
-        // Merge contiguous dirty pages into runs for efficient WriteMemory
-        VkDeviceSize runStart = VK_WHOLE_SIZE, runEnd = 0;
-
-        for (auto off : dit->second.offsets) {
-            VkDeviceSize pageStart = (VkDeviceSize)off;
-            VkDeviceSize pageEnd = pageStart + 4096;
-
-            // Skip pages outside this mapped region
-            if (pageEnd <= regStart || pageStart >= regEnd) continue;
-
-            // Clip to region bounds
-            VkDeviceSize clipStart = pageStart < regStart ? regStart : pageStart;
-            VkDeviceSize clipEnd = pageEnd > regEnd ? regEnd : pageEnd;
-
-            if (runStart == VK_WHOLE_SIZE) {
-                runStart = clipStart;
-                runEnd = clipEnd;
-            } else if (clipStart <= runEnd) {
-                // Extend current run
-                if (clipEnd > runEnd) runEnd = clipEnd;
-            } else {
-                // Emit previous run
+                if (runStart == VK_WHOLE_SIZE) {
+                    runStart = clipStart; runEnd = clipEnd;
+                } else if (clipStart <= runEnd) {
+                    if (clipEnd > runEnd) runEnd = clipEnd;
+                } else {
+                    encoder.cmdWriteMemory(m.memoryId, runStart, (uint32_t)(runEnd - runStart),
+                                           (const uint8_t*)shadow.ptr + runStart);
+                    runStart = clipStart; runEnd = clipEnd;
+                }
+            }
+            if (runStart != VK_WHOLE_SIZE)
                 encoder.cmdWriteMemory(m.memoryId, runStart, (uint32_t)(runEnd - runStart),
                                        (const uint8_t*)shadow.ptr + runStart);
-                runStart = clipStart;
-                runEnd = clipEnd;
-            }
         }
-        // Emit final run
-        if (runStart != VK_WHOLE_SIZE) {
-            encoder.cmdWriteMemory(m.memoryId, runStart, (uint32_t)(runEnd - runStart),
-                                   (const uint8_t*)shadow.ptr + runStart);
-        }
-    }
+    };
+
+    collectAndSendDirty();
 #else
     // Full flush: send ALL mapped regions regardless of size.
     // Slow for complex games (144MB+ batch for UltraKill) but guaranteed correct.
@@ -291,6 +286,7 @@ bool IcdState::sendBatchLocked(bool isPresent) {
     size_t sendSize = encoder.size();
     bool ok = transport.send(encoder.data(), sendSize);
     encoder.w_ = VnStreamWriter();
+    flushedRangesThisBatch_.clear(); // reset per-batch staging protection
     if (!ok) return false;
     // Record response type — atomic with TCP send under encoder.mutex_
     {
@@ -838,6 +834,13 @@ static VkResult VKAPI_CALL icd_vkEnumerateInstanceExtensionProperties(
 static void VKAPI_CALL icd_vkGetPhysicalDeviceFormatProperties(
     VkPhysicalDevice, VkFormat format, VkFormatProperties* p)
 {
+    // Extension formats from VK_KHR_maintenance5: A1B5G5R5 has only 1-bit alpha.
+    // Block A1B5G5R5: 1-bit alpha causes YCbCr quality issues. Logo video black is a
+    // separate issue (YCbCr pipeline fundamentally not rendering, regardless of format).
+    if ((uint32_t)format == 1000470001) {
+        memset(p, 0, sizeof(*p));
+        return;
+    }
     // Report broad format support — depth/stencil formats get appropriate bits
     bool isDS = (format >= VK_FORMAT_D16_UNORM && format <= VK_FORMAT_D32_SFLOAT_S8_UINT);
     VkFormatFeatureFlags optBits =
@@ -1034,12 +1037,76 @@ static VkResult VKAPI_CALL icd_vkGetSemaphoreCounterValue(VkDevice, VkSemaphore,
 static VkResult VKAPI_CALL icd_vkWaitSemaphores(VkDevice, const VkSemaphoreWaitInfo*, uint64_t) { return VK_SUCCESS; }
 static VkResult VKAPI_CALL icd_vkSignalSemaphore(VkDevice, const VkSemaphoreSignalInfo*) { return VK_SUCCESS; }
 
+// Helper: resolve swapchain sentinel imageViewId → 0
+static uint64_t resolveViewId(uint64_t viewId) {
+    auto ivIt = g_icd.imageViewToImage.find(viewId);
+    if (ivIt != g_icd.imageViewToImage.end() && (ivIt->second & 0xFFF00000) == 0xFFF00000)
+        return 0;
+    return viewId;
+}
+
 // Vulkan 1.3 dynamic rendering
 static void VKAPI_CALL icd_vkCmdBeginRendering(VkCommandBuffer cb, const VkRenderingInfo* pInfo) {
+    if (!pInfo) return;
+
+    // Diagnostic: log colorAttachmentCount for MRT detection
+    {
+        static int brLog = 0;
+        if (brLog++ < 20) {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "[ICD] BeginRendering: colorAttachmentCount=%u area=%ux%u",
+                     pInfo->colorAttachmentCount, pInfo->renderArea.extent.width, pInfo->renderArea.extent.height);
+            icdDbg(buf);
+        }
+    }
+
+    // MRT path: use separate command to avoid changing existing wire format
+    if (pInfo->colorAttachmentCount > 1) {
+        ENC_LOCK;
+        auto off = g_icd.encoder.w_.beginCommand(VN_CMD_BRIDGE_BeginRenderingMRT);
+        g_icd.encoder.w_.writeU64(toId(cb));
+        g_icd.encoder.w_.writeU32(pInfo->renderArea.offset.x);
+        g_icd.encoder.w_.writeU32(pInfo->renderArea.offset.y);
+        g_icd.encoder.w_.writeU32(pInfo->renderArea.extent.width);
+        g_icd.encoder.w_.writeU32(pInfo->renderArea.extent.height);
+        g_icd.encoder.w_.writeU32(pInfo->colorAttachmentCount);
+        for (uint32_t i = 0; i < pInfo->colorAttachmentCount; i++) {
+            const auto& att = pInfo->pColorAttachments[i];
+            g_icd.encoder.w_.writeU64(resolveViewId((uint64_t)att.imageView));
+            g_icd.encoder.w_.writeU32(att.loadOp);
+            g_icd.encoder.w_.writeU32(att.storeOp);
+            g_icd.encoder.w_.writeF32(att.clearValue.color.float32[0]);
+            g_icd.encoder.w_.writeF32(att.clearValue.color.float32[1]);
+            g_icd.encoder.w_.writeF32(att.clearValue.color.float32[2]);
+            g_icd.encoder.w_.writeF32(att.clearValue.color.float32[3]);
+        }
+        // Depth
+        uint32_t hasD = (pInfo->pDepthAttachment && pInfo->pDepthAttachment->imageView) ? 1 : 0;
+        g_icd.encoder.w_.writeU32(hasD);
+        if (hasD) {
+            g_icd.encoder.w_.writeU64((uint64_t)pInfo->pDepthAttachment->imageView);
+            g_icd.encoder.w_.writeU32(pInfo->pDepthAttachment->loadOp);
+            g_icd.encoder.w_.writeU32(pInfo->pDepthAttachment->storeOp);
+            g_icd.encoder.w_.writeF32(pInfo->pDepthAttachment->clearValue.depthStencil.depth);
+        }
+        // Stencil
+        uint32_t hasS = (pInfo->pStencilAttachment && pInfo->pStencilAttachment->imageView) ? 1 : 0;
+        g_icd.encoder.w_.writeU32(hasS);
+        if (hasS) {
+            g_icd.encoder.w_.writeU64((uint64_t)pInfo->pStencilAttachment->imageView);
+            g_icd.encoder.w_.writeU32(pInfo->pStencilAttachment->loadOp);
+            g_icd.encoder.w_.writeU32(pInfo->pStencilAttachment->storeOp);
+            g_icd.encoder.w_.writeU32(pInfo->pStencilAttachment->clearValue.depthStencil.stencil);
+        }
+        g_icd.encoder.w_.endCommand(off);
+        return;
+    }
+
+    // Single color attachment — use existing encoder function (unchanged wire format)
     uint32_t loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     uint32_t storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     float cr = 0, cg = 0, cb_ = 0, ca = 1;
-    if (pInfo && pInfo->colorAttachmentCount > 0 && pInfo->pColorAttachments) {
+    if (pInfo->colorAttachmentCount > 0 && pInfo->pColorAttachments) {
         loadOp = pInfo->pColorAttachments[0].loadOp;
         storeOp = pInfo->pColorAttachments[0].storeOp;
         cr = pInfo->pColorAttachments[0].clearValue.color.float32[0];
@@ -1047,48 +1114,27 @@ static void VKAPI_CALL icd_vkCmdBeginRendering(VkCommandBuffer cb, const VkRende
         cb_ = pInfo->pColorAttachments[0].clearValue.color.float32[2];
         ca = pInfo->pColorAttachments[0].clearValue.color.float32[3];
     }
-    // Extract the imageView from the first color attachment
     uint64_t imageViewId = 0;
-    if (pInfo && pInfo->colorAttachmentCount > 0 && pInfo->pColorAttachments)
-        imageViewId = (uint64_t)pInfo->pColorAttachments[0].imageView;
+    if (pInfo->colorAttachmentCount > 0 && pInfo->pColorAttachments)
+        imageViewId = resolveViewId((uint64_t)pInfo->pColorAttachments[0].imageView);
 
-    // Check if this imageView references a swapchain image (sentinel 0xFFF00000+i)
-    // If so, send imageViewId=0 to tell host to use swapchain target
-    auto ivIt = g_icd.imageViewToImage.find(imageViewId);
-    if (ivIt != g_icd.imageViewToImage.end() && (ivIt->second & 0xFFF00000) == 0xFFF00000)
-        imageViewId = 0;
-
-    // Depth attachment
-    uint32_t hasDepth = 0;
-    uint64_t depthViewId = 0;
-    uint32_t depthLoadOp = 0, depthStoreOp = 0;
-    float clearDepth = 1.0f;
-    if (pInfo && pInfo->pDepthAttachment && pInfo->pDepthAttachment->imageView != VK_NULL_HANDLE) {
-        hasDepth = 1;
-        depthViewId = (uint64_t)pInfo->pDepthAttachment->imageView;
-        depthLoadOp = pInfo->pDepthAttachment->loadOp;
-        depthStoreOp = pInfo->pDepthAttachment->storeOp;
+    uint32_t hasDepth = 0; uint64_t depthViewId = 0;
+    uint32_t depthLoadOp = 0, depthStoreOp = 0; float clearDepth = 1.0f;
+    if (pInfo->pDepthAttachment && pInfo->pDepthAttachment->imageView != VK_NULL_HANDLE) {
+        hasDepth = 1; depthViewId = (uint64_t)pInfo->pDepthAttachment->imageView;
+        depthLoadOp = pInfo->pDepthAttachment->loadOp; depthStoreOp = pInfo->pDepthAttachment->storeOp;
         clearDepth = pInfo->pDepthAttachment->clearValue.depthStencil.depth;
     }
-
-    // Stencil attachment
-    uint32_t hasStencil = 0;
-    uint64_t stencilViewId = 0;
-    uint32_t stencilLoadOp = 0, stencilStoreOp = 0;
-    uint32_t clearStencil = 0;
-    if (pInfo && pInfo->pStencilAttachment && pInfo->pStencilAttachment->imageView != VK_NULL_HANDLE) {
-        hasStencil = 1;
-        stencilViewId = (uint64_t)pInfo->pStencilAttachment->imageView;
-        stencilLoadOp = pInfo->pStencilAttachment->loadOp;
-        stencilStoreOp = pInfo->pStencilAttachment->storeOp;
+    uint32_t hasStencil = 0; uint64_t stencilViewId = 0;
+    uint32_t stencilLoadOp = 0, stencilStoreOp = 0; uint32_t clearStencil = 0;
+    if (pInfo->pStencilAttachment && pInfo->pStencilAttachment->imageView != VK_NULL_HANDLE) {
+        hasStencil = 1; stencilViewId = (uint64_t)pInfo->pStencilAttachment->imageView;
+        stencilLoadOp = pInfo->pStencilAttachment->loadOp; stencilStoreOp = pInfo->pStencilAttachment->storeOp;
         clearStencil = pInfo->pStencilAttachment->clearValue.depthStencil.stencil;
     }
-
     g_icd.encoder.cmdBeginRendering(toId(cb),
-        pInfo ? pInfo->renderArea.offset.x : 0,
-        pInfo ? pInfo->renderArea.offset.y : 0,
-        pInfo ? pInfo->renderArea.extent.width : 800,
-        pInfo ? pInfo->renderArea.extent.height : 600,
+        pInfo->renderArea.offset.x, pInfo->renderArea.offset.y,
+        pInfo->renderArea.extent.width, pInfo->renderArea.extent.height,
         loadOp, storeOp, cr, cg, cb_, ca, imageViewId,
         hasDepth, depthViewId, depthLoadOp, depthStoreOp, clearDepth,
         hasStencil, stencilViewId, stencilLoadOp, stencilStoreOp, clearStencil);
@@ -1137,11 +1183,18 @@ static void VKAPI_CALL icd_vkCmdSetStencilOp(VkCommandBuffer cb, VkStencilFaceFl
     g_icd.encoder.cmdSetStencilOp(toId(cb), (uint32_t)faceMask,
         (uint32_t)failOp, (uint32_t)passOp, (uint32_t)depthFailOp, (uint32_t)compareOp);
 }
-static void VKAPI_CALL icd_vkCmdSetRasterizerDiscardEnable(VkCommandBuffer, VkBool32) {}
+static void VKAPI_CALL icd_vkCmdSetRasterizerDiscardEnable(VkCommandBuffer cb, VkBool32 enable) {
+    g_icd.encoder.cmdSetRasterizerDiscardEnable(toId(cb), enable);
+}
+static void VKAPI_CALL icd_vkCmdSetDepthBias(VkCommandBuffer cb, float constantFactor, float clamp, float slopeFactor) {
+    g_icd.encoder.cmdSetDepthBias(toId(cb), constantFactor, clamp, slopeFactor);
+}
 static void VKAPI_CALL icd_vkCmdSetDepthBiasEnable(VkCommandBuffer cb, VkBool32 enable) {
     g_icd.encoder.cmdSetDepthBiasEnable(toId(cb), enable);
 }
-static void VKAPI_CALL icd_vkCmdSetPrimitiveRestartEnable(VkCommandBuffer, VkBool32) {}
+static void VKAPI_CALL icd_vkCmdSetPrimitiveRestartEnable(VkCommandBuffer cb, VkBool32 enable) {
+    g_icd.encoder.cmdSetPrimitiveRestartEnable(toId(cb), enable);
+}
 static void VKAPI_CALL icd_vkCmdBindVertexBuffers2(VkCommandBuffer cb, uint32_t firstBinding, uint32_t bindingCount,
     const VkBuffer* pBuffers, const VkDeviceSize* pOffsets, const VkDeviceSize* pSizes, const VkDeviceSize* pStrides) {
     std::vector<uint64_t> ids(bindingCount), offs(bindingCount), szs(bindingCount), strs(bindingCount);
@@ -1161,8 +1214,12 @@ static void VKAPI_CALL icd_vkCmdSetStencilCompareMask(VkCommandBuffer cb, VkSten
 static void VKAPI_CALL icd_vkCmdSetStencilWriteMask(VkCommandBuffer cb, VkStencilFaceFlags faceMask, uint32_t writeMask) {
     g_icd.encoder.cmdSetStencilWriteMask(toId(cb), (uint32_t)faceMask, writeMask);
 }
-static void VKAPI_CALL icd_vkCmdDrawIndirect(VkCommandBuffer, VkBuffer, VkDeviceSize, uint32_t, uint32_t) {}
-static void VKAPI_CALL icd_vkCmdDrawIndexedIndirect(VkCommandBuffer, VkBuffer, VkDeviceSize, uint32_t, uint32_t) {}
+static void VKAPI_CALL icd_vkCmdDrawIndirect(VkCommandBuffer cb, VkBuffer buffer, VkDeviceSize offset, uint32_t drawCount, uint32_t stride) {
+    g_icd.encoder.cmdDrawIndirect(toId(cb), (uint64_t)buffer, offset, drawCount, stride);
+}
+static void VKAPI_CALL icd_vkCmdDrawIndexedIndirect(VkCommandBuffer cb, VkBuffer buffer, VkDeviceSize offset, uint32_t drawCount, uint32_t stride) {
+    g_icd.encoder.cmdDrawIndexedIndirect(toId(cb), (uint64_t)buffer, offset, drawCount, stride);
+}
 
 // Descriptor update template
 static VkResult VKAPI_CALL icd_vkCreateDescriptorUpdateTemplate(VkDevice,
@@ -2118,8 +2175,12 @@ static void VKAPI_CALL icd_vkGetBufferMemoryRequirements(VkDevice, VkBuffer buf,
     sz = (sz + 255) & ~(VkDeviceSize)255;
     p->size = sz; p->alignment = 256; p->memoryTypeBits = 0x3;
 }
-static void VKAPI_CALL icd_vkGetImageMemoryRequirements(VkDevice, VkImage, VkMemoryRequirements* p) {
-    p->size = 4 * 1024 * 1024; p->alignment = 256; p->memoryTypeBits = 0x3;
+static void VKAPI_CALL icd_vkGetImageMemoryRequirements(VkDevice, VkImage img, VkMemoryRequirements* p) {
+    uint64_t id = (uint64_t)img;
+    auto it = g_icd.imageMemSizes.find(id);
+    p->size = (it != g_icd.imageMemSizes.end()) ? it->second : 32 * 1024 * 1024;
+    p->alignment = 1024;
+    p->memoryTypeBits = 0x3;
 }
 static void VKAPI_CALL icd_vkGetBufferMemoryRequirements2(VkDevice, const VkBufferMemoryRequirementsInfo2* pInfo, VkMemoryRequirements2* p) {
     uint64_t id = pInfo ? (uint64_t)pInfo->buffer : 0;
@@ -2128,8 +2189,12 @@ static void VKAPI_CALL icd_vkGetBufferMemoryRequirements2(VkDevice, const VkBuff
     sz = (sz + 255) & ~(VkDeviceSize)255;
     p->memoryRequirements.size = sz; p->memoryRequirements.alignment = 256; p->memoryRequirements.memoryTypeBits = 0x3;
 }
-static void VKAPI_CALL icd_vkGetImageMemoryRequirements2(VkDevice, const VkImageMemoryRequirementsInfo2*, VkMemoryRequirements2* p) {
-    p->memoryRequirements.size = 4*1024*1024; p->memoryRequirements.alignment = 256; p->memoryRequirements.memoryTypeBits = 0x3;
+static void VKAPI_CALL icd_vkGetImageMemoryRequirements2(VkDevice, const VkImageMemoryRequirementsInfo2* pInfo, VkMemoryRequirements2* p) {
+    uint64_t id = pInfo ? (uint64_t)pInfo->image : 0;
+    auto it = g_icd.imageMemSizes.find(id);
+    p->memoryRequirements.size = (it != g_icd.imageMemSizes.end()) ? it->second : 32 * 1024 * 1024;
+    p->memoryRequirements.alignment = 1024;
+    p->memoryRequirements.memoryTypeBits = 0x3;
 }
 // Vulkan 1.3 / VK_KHR_maintenance4: query memory requirements without creating objects.
 // DXVK calls this at init to probe which memory types support each buffer usage flag.
@@ -2142,10 +2207,27 @@ static void VKAPI_CALL icd_vkGetDeviceBufferMemoryRequirements(VkDevice, const V
     p->memoryRequirements.alignment = 256;
     p->memoryRequirements.memoryTypeBits = 0x3;
 }
-static void VKAPI_CALL icd_vkGetDeviceImageMemoryRequirements(VkDevice, const VkDeviceImageMemoryRequirements*, VkMemoryRequirements2* p) {
+static void VKAPI_CALL icd_vkGetDeviceImageMemoryRequirements(VkDevice, const VkDeviceImageMemoryRequirements* pInfo, VkMemoryRequirements2* p) {
+    // Pre-creation query (Vulkan 1.3): estimate from the image create info
+    VkDeviceSize sz = 32 * 1024 * 1024; // default
+    if (pInfo && pInfo->pCreateInfo) {
+        auto* ci = pInfo->pCreateInfo;
+        uint32_t bpp = 4; // default RGBA8
+        VkFormat fmt = ci->format;
+        if (fmt == VK_FORMAT_R8_UNORM || fmt == VK_FORMAT_R8_SRGB) bpp = 1;
+        else if (fmt == VK_FORMAT_R16_SFLOAT || fmt == VK_FORMAT_R8G8_UNORM) bpp = 2;
+        else if (fmt == VK_FORMAT_R16G16B16A16_SFLOAT || fmt == VK_FORMAT_R16G16B16A16_UNORM) bpp = 8;
+        else if (fmt == VK_FORMAT_R32G32B32A32_SFLOAT) bpp = 16;
+        sz = (VkDeviceSize)ci->extent.width * ci->extent.height * ci->extent.depth * bpp * ci->arrayLayers;
+        // Account for mipmaps (~33% extra)
+        if (ci->mipLevels > 1) sz = sz * 4 / 3;
+        // Align up to 4KB page
+        sz = (sz + 4095) & ~(VkDeviceSize)4095;
+        if (sz < 4096) sz = 4096;
+    }
     p->sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2;
-    p->memoryRequirements.size = 4*1024*1024;
-    p->memoryRequirements.alignment = 256;
+    p->memoryRequirements.size = sz;
+    p->memoryRequirements.alignment = 1024;
     p->memoryRequirements.memoryTypeBits = 0x3;
 }
 
@@ -2168,10 +2250,41 @@ static void VKAPI_CALL icd_vkDestroyBuffer(VkDevice, VkBuffer v, const VkAllocat
     { std::lock_guard<std::mutex> lk(g_icd.bdaMutex_); g_icd.bdaRecorded_.erase(id); }
     g_icd.encoder.cmdDestroyBuffer(1, id);
 }
+// Forward declarations for formatBpp/formatBlockSize (defined in CBI section below)
+static uint32_t formatBpp(VkFormat fmt);
+static uint32_t formatBlockSize(VkFormat fmt);
+
 static VkResult VKAPI_CALL icd_vkCreateImage(VkDevice, const VkImageCreateInfo* pInfo, const VkAllocationCallbacks*, VkImage* p) {
+    // Block A1B5G5R5 at CreateImage as safety net (FormatProperties also blocks it).
+    if ((uint32_t)pInfo->format == 1000470001)
+        return VK_ERROR_FORMAT_NOT_SUPPORTED;
     uint64_t id = g_icd.handles.alloc();
     *p = (VkImage)id;
     g_icd.imageFormats[id] = pInfo->format;
+    // Compute estimated memory size for GetImageMemoryRequirements
+    {
+        uint32_t bpp = formatBpp(pInfo->format);
+        uint32_t bs = formatBlockSize(pInfo->format);
+        VkDeviceSize sz;
+        if (bs > 0) {
+            // Block-compressed: 4x4 blocks
+            uint32_t bw = (pInfo->extent.width + 3) / 4;
+            uint32_t bh = (pInfo->extent.height + 3) / 4;
+            sz = (VkDeviceSize)bw * bh * pInfo->extent.depth * bs * pInfo->arrayLayers;
+        } else {
+            if (bpp == 0) bpp = 4; // unknown format → assume 4 bpp
+            sz = (VkDeviceSize)pInfo->extent.width * pInfo->extent.height * pInfo->extent.depth * bpp * pInfo->arrayLayers;
+        }
+        // Mipmaps add ~33%
+        if (pInfo->mipLevels > 1) sz = sz * 4 / 3;
+        // MSAA multiplier
+        if (pInfo->samples > VK_SAMPLE_COUNT_1_BIT) sz *= (uint32_t)pInfo->samples;
+        // Align to 4KB page + 50% headroom for GPU alignment/padding
+        sz = sz * 3 / 2;
+        sz = (sz + 4095) & ~(VkDeviceSize)4095;
+        if (sz < 4096) sz = 4096;
+        g_icd.imageMemSizes[id] = sz;
+    }
     g_icd.encoder.cmdCreateImage(1, id,
         pInfo->imageType, pInfo->format,
         pInfo->extent.width, pInfo->extent.height, pInfo->extent.depth,
@@ -2181,6 +2294,7 @@ static VkResult VKAPI_CALL icd_vkCreateImage(VkDevice, const VkImageCreateInfo* 
 }
 static void VKAPI_CALL icd_vkDestroyImage(VkDevice, VkImage v, const VkAllocationCallbacks*) {
     g_icd.imageFormats.erase((uint64_t)v);
+    g_icd.imageMemSizes.erase((uint64_t)v);
     g_icd.encoder.cmdDestroyImage(1, (uint64_t)v);
 }
 
@@ -2233,6 +2347,22 @@ static VkResult VKAPI_CALL icd_vkAllocateDescriptorSets(VkDevice, const VkDescri
 static VkResult VKAPI_CALL icd_vkFreeDescriptorSets(VkDevice, VkDescriptorPool, uint32_t, const VkDescriptorSet*) { return VK_SUCCESS; }
 static void VKAPI_CALL icd_vkUpdateDescriptorSets(VkDevice, uint32_t writeCount, const VkWriteDescriptorSet* pWrites, uint32_t, const VkCopyDescriptorSet*) {
     if (writeCount > 0 && pWrites) {
+        // AUDIT: check for texel buffer views and other missing descriptor types
+        for (uint32_t i = 0; i < writeCount; i++) {
+            uint32_t dt = pWrites[i].descriptorType;
+            if (dt == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER || dt == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) {
+                static int texelLog = 0;
+                if (texelLog++ < 10)
+                    icdDbg(("[ICD] *** TEXEL BUFFER VIEW descriptor! type=" + std::to_string(dt)
+                            + " count=" + std::to_string(pWrites[i].descriptorCount)
+                            + " binding=" + std::to_string(pWrites[i].dstBinding)).c_str());
+            }
+            if (dt == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
+                static int storImgLog = 0;
+                if (storImgLog++ < 10)
+                    icdDbg(("[ICD] *** STORAGE IMAGE descriptor! binding=" + std::to_string(pWrites[i].dstBinding)).c_str());
+            }
+        }
         // Flush buffer data for any buffer descriptors before encoding
         for (uint32_t i = 0; i < writeCount; i++) {
             if (pWrites[i].pBufferInfo) {
@@ -2355,11 +2485,22 @@ static uint32_t formatBpp(VkFormat fmt) {
     case VK_FORMAT_R16G16B16A16_UINT:  case VK_FORMAT_R16G16B16A16_SINT:
     case VK_FORMAT_R32G32_SFLOAT: case VK_FORMAT_R32G32_UINT:
         return 8;
+    // 12 bpp
+    case VK_FORMAT_R32G32B32_SFLOAT: case VK_FORMAT_R32G32B32_UINT:
+        return 12;
     // 16 bpp
     case VK_FORMAT_R32G32B32A32_SFLOAT: case VK_FORMAT_R32G32B32A32_UINT:
         return 16;
     default:
-        return 0; // unknown — caller falls back
+        // Catch extension formats by size: 16-bit packed = 2 bpp, 32-bit packed = 4 bpp
+        if (fmt >= 1000000000) {
+            // VK_FORMAT_A1B5G5R5_UNORM_PACK16_KHR (1000470001) and similar 16-bit packed
+            // VK_FORMAT_A4R4G4B4_UNORM_PACK16 (1000340000), VK_FORMAT_A4B4G4R4 (1000340001)
+            // VK_FORMAT_A8_UNORM_KHR (1000470000) = 1 bpp
+            // Conservative: assume 4 bpp for unknown extension formats (safe over-estimate)
+            return 4;
+        }
+        return 0; // unknown core format — caller falls back
     }
 }
 
@@ -2391,13 +2532,24 @@ static uint32_t formatBlockSize(VkFormat fmt) {
 static std::vector<uint8_t> gatherCopySourceData(uint64_t bufId, uint32_t regionCount,
     uint32_t* bufOffsets, const uint32_t* extW, const uint32_t* extH, const uint32_t* extD,
     const uint32_t* bRL, const uint32_t* bIH, uint32_t bpp, uint32_t blockSize) {
-    if (bpp == 0 && blockSize == 0) return {};  // unknown format
+    if (bpp == 0 && blockSize == 0) {
+        static int miss1 = 0; if (miss1++ < 5) icdDbg("[ICD] gatherCopy FAIL: unknown format");
+        return {};
+    }
     auto bit = g_icd.bufferBindings.find(bufId);
-    if (bit == g_icd.bufferBindings.end()) return {};
+    if (bit == g_icd.bufferBindings.end()) {
+        static int miss2 = 0; if (miss2++ < 5)
+            icdDbg(("[ICD] gatherCopy FAIL: buf " + std::to_string(bufId) + " no binding").c_str());
+        return {};
+    }
     uint64_t memId = bit->second.memoryId;
     VkDeviceSize memBase = bit->second.memoryOffset;
     auto sit = g_icd.memoryShadows.find(memId);
-    if (sit == g_icd.memoryShadows.end() || !sit->second.ptr) return {};
+    if (sit == g_icd.memoryShadows.end() || !sit->second.ptr) {
+        static int miss3 = 0; if (miss3++ < 5)
+            icdDbg(("[ICD] gatherCopy FAIL: mem " + std::to_string(memId) + " no shadow").c_str());
+        return {};
+    }
 
     // Find span [minOff, maxEnd) across all regions
     uint32_t minOff = UINT32_MAX, maxEnd = 0;
@@ -2425,7 +2577,12 @@ static std::vector<uint8_t> gatherCopySourceData(uint64_t bufId, uint32_t region
     // Copy from shadow memory
     const uint8_t* shadowBase = (const uint8_t*)sit->second.ptr;
     VkDeviceSize srcOff = memBase + minOff;
-    if (srcOff + spanSize > sit->second.size) return {};
+    if (srcOff + spanSize > sit->second.size) {
+        static int miss4 = 0; if (miss4++ < 5)
+            icdDbg(("[ICD] gatherCopy FAIL: OOB srcOff=" + std::to_string(srcOff)
+                    + " span=" + std::to_string(spanSize) + " shadowSz=" + std::to_string(sit->second.size)).c_str());
+        return {};
+    }
     std::vector<uint8_t> data(spanSize);
     memcpy(data.data(), shadowBase + srcOff, spanSize);
 
@@ -2443,6 +2600,14 @@ static void VKAPI_CALL icd_vkCmdCopyBufferToImage2(VkCommandBuffer cb, const voi
         const VkBufferImageCopy2* pRegions;
     };
     auto* info = static_cast<const CopyBufToImgInfo2*>(pCopyInfo);
+    {
+        static int cbi2all = 0;
+        if (cbi2all++ < 30)
+            icdDbg(("[ICD] CBI2-ALL: dst=" + std::to_string((uint64_t)info->dstImage)
+                    + " regions=" + std::to_string(info->regionCount)
+                    + " " + std::to_string(info->pRegions[0].imageExtent.width)
+                    + "x" + std::to_string(info->pRegions[0].imageExtent.height)).c_str());
+    }
     std::vector<uint32_t> bOff(info->regionCount), bRL(info->regionCount), bIH(info->regionCount);
     std::vector<uint32_t> iAsp(info->regionCount), iMip(info->regionCount), iBL(info->regionCount), iLC(info->regionCount);
     std::vector<int32_t> iOX(info->regionCount), iOY(info->regionCount), iOZ(info->regionCount);
@@ -2476,8 +2641,6 @@ static void VKAPI_CALL icd_vkCmdCopyBufferToImage2(VkCommandBuffer cb, const voi
             (uint32_t)pixelData.size(), pixelData.data());
     } else {
         // Fallback: use original path with separate WriteMemory.
-        // For unknown formats (dstBpp==0) default to 4 to preserve old behavior
-        // (over-estimate is clipped by flushBufferRange; compressed formats still work).
         uint32_t fbBpp = (dstBpp != 0) ? dstBpp : 4u;
         for (uint32_t i = 0; i < info->regionCount; i++) {
             uint32_t rowPitch = (bRL[i] != 0 ? bRL[i] : iEW[i]) * fbBpp;
@@ -2497,6 +2660,11 @@ static void VKAPI_CALL icd_vkCmdCopyBufferToImage2(VkCommandBuffer cb, const voi
 static void VKAPI_CALL icd_vkCmdCopyImage(VkCommandBuffer cb, VkImage srcImg, VkImageLayout srcLayout,
     VkImage dstImg, VkImageLayout dstLayout, uint32_t regionCount, const VkImageCopy* pRegions)
 {
+    static int ci1Log = 0;
+    if (ci1Log++ < 20)
+        icdDbg(("[ICD] CopyImage1: src=" + std::to_string((uint64_t)srcImg)
+                + " dst=" + std::to_string((uint64_t)dstImg)
+                + " regions=" + std::to_string(regionCount)).c_str());
     ENC_LOCK;
     auto off = g_icd.encoder.w_.beginCommand(VN_CMD_vkCmdCopyImage);
     g_icd.encoder.w_.writeU64(toId(cb));
@@ -2557,6 +2725,20 @@ static void VKAPI_CALL icd_vkCmdCopyBufferToImage(VkCommandBuffer cb, VkBuffer b
             iOX.data(), iOY.data(), iOZ.data(), iEW.data(), iEH.data(), iED.data(),
             (uint32_t)pixelData.size(), pixelData.data());
     } else {
+        // V1 CBI FALLBACK — gatherCopySourceData returned empty
+        {
+            auto fmtIt = g_icd.imageFormats.find((uint64_t)img);
+            VkFormat fmt = (fmtIt != g_icd.imageFormats.end()) ? fmtIt->second : VK_FORMAT_UNDEFINED;
+            static int v1fb = 0;
+            if (v1fb++ < 10)
+                icdDbg(("[ICD] CBI-v1 FALLBACK #" + std::to_string(v1fb)
+                        + " img=" + std::to_string((uint64_t)img)
+                        + " fmt=" + std::to_string((int)fmt)
+                        + " bpp=" + std::to_string(dstBpp)
+                        + " blk=" + std::to_string(dstBlockSize)
+                        + " buf=" + std::to_string((uint64_t)buf)
+                        + " " + std::to_string(iEW[0]) + "x" + std::to_string(iEH[0])).c_str());
+        }
         uint32_t fbBpp = (dstBpp != 0) ? dstBpp : 4u;
         for (uint32_t i = 0; i < regionCount; i++) {
             uint32_t rowPitch = (bRL[i] != 0 ? bRL[i] : iEW[i]) * fbBpp;
@@ -2573,6 +2755,11 @@ static void VKAPI_CALL icd_vkCmdCopyBufferToImage(VkCommandBuffer cb, VkBuffer b
 }
 // vkCmdCopyImage2 / vkCmdCopyImage2KHR (Vulkan 1.3)
 static void VKAPI_CALL icd_vkCmdCopyImage2(VkCommandBuffer cb, const VkCopyImageInfo2* pInfo) {
+    static int ci2Log = 0;
+    if (ci2Log++ < 20)
+        icdDbg(("[ICD] CopyImage2: src=" + std::to_string((uint64_t)pInfo->srcImage)
+                + " dst=" + std::to_string((uint64_t)pInfo->dstImage)
+                + " regions=" + std::to_string(pInfo->regionCount)).c_str());
     // Convert VkCopyImageInfo2 → encode as CmdCopyImage
     ENC_LOCK;
     auto off = g_icd.encoder.w_.beginCommand(VN_CMD_vkCmdCopyImage);
@@ -2685,23 +2872,26 @@ static void VKAPI_CALL icd_vkCmdPipelineBarrier(VkCommandBuffer cb, VkPipelineSt
     std::vector<uint64_t> images(imageBarrierCount);
     std::vector<uint32_t> oldLayouts(imageBarrierCount), newLayouts(imageBarrierCount);
     std::vector<uint32_t> srcAccess(imageBarrierCount), dstAccess(imageBarrierCount);
+    std::vector<uint32_t> baseMips(imageBarrierCount), levelCounts(imageBarrierCount);
     for (uint32_t i = 0; i < imageBarrierCount; i++) {
         images[i] = (uint64_t)pImageBarriers[i].image;
         oldLayouts[i] = pImageBarriers[i].oldLayout;
         newLayouts[i] = pImageBarriers[i].newLayout;
         srcAccess[i] = pImageBarriers[i].srcAccessMask;
         dstAccess[i] = pImageBarriers[i].dstAccessMask;
+        baseMips[i] = pImageBarriers[i].subresourceRange.baseMipLevel;
+        levelCounts[i] = pImageBarriers[i].subresourceRange.levelCount;
     }
     g_icd.encoder.cmdPipelineBarrier(toId(cb), srcStage, dstStage,
         imageBarrierCount, images.data(), oldLayouts.data(), newLayouts.data(),
-        srcAccess.data(), dstAccess.data());
+        srcAccess.data(), dstAccess.data(), baseMips.data(), levelCounts.data());
 }
 static void VKAPI_CALL icd_vkCmdPipelineBarrier2(VkCommandBuffer cb, const VkDependencyInfo* pInfo) {
     if (!pInfo || pInfo->imageMemoryBarrierCount == 0) return;
     std::vector<uint64_t> images(pInfo->imageMemoryBarrierCount);
     std::vector<uint32_t> oldLayouts(pInfo->imageMemoryBarrierCount), newLayouts(pInfo->imageMemoryBarrierCount);
     std::vector<uint32_t> srcAccess(pInfo->imageMemoryBarrierCount), dstAccess(pInfo->imageMemoryBarrierCount);
-    // VkImageMemoryBarrier2 uses VkPipelineStageFlags2 — take from first barrier for simplicity
+    std::vector<uint32_t> baseMips(pInfo->imageMemoryBarrierCount), levelCounts(pInfo->imageMemoryBarrierCount);
     uint32_t srcStage = 0, dstStage = 0;
     for (uint32_t i = 0; i < pInfo->imageMemoryBarrierCount; i++) {
         const auto& b = pInfo->pImageMemoryBarriers[i];
@@ -2710,15 +2900,19 @@ static void VKAPI_CALL icd_vkCmdPipelineBarrier2(VkCommandBuffer cb, const VkDep
         newLayouts[i] = b.newLayout;
         srcAccess[i] = (uint32_t)b.srcAccessMask;
         dstAccess[i] = (uint32_t)b.dstAccessMask;
+        baseMips[i] = b.subresourceRange.baseMipLevel;
+        levelCounts[i] = b.subresourceRange.levelCount;
         srcStage |= (uint32_t)b.srcStageMask;
         dstStage |= (uint32_t)b.dstStageMask;
     }
     g_icd.encoder.cmdPipelineBarrier(toId(cb), srcStage, dstStage,
         pInfo->imageMemoryBarrierCount, images.data(), oldLayouts.data(), newLayouts.data(),
-        srcAccess.data(), dstAccess.data());
+        srcAccess.data(), dstAccess.data(), baseMips.data(), levelCounts.data());
 }
-static void VKAPI_CALL icd_vkCmdClearColorImage(VkCommandBuffer, VkImage, VkImageLayout, const VkClearColorValue*, uint32_t, const VkImageSubresourceRange*) {
-    // No-op: handled by forcing LOAD_OP_CLEAR in host BeginRendering
+static void VKAPI_CALL icd_vkCmdClearColorImage(VkCommandBuffer cb, VkImage image, VkImageLayout layout, const VkClearColorValue* pColor, uint32_t rangeCount, const VkImageSubresourceRange*) {
+    if (!pColor) return;
+    g_icd.encoder.cmdClearColorImage(toId(cb), (uint64_t)image, (uint32_t)layout,
+        pColor->float32[0], pColor->float32[1], pColor->float32[2], pColor->float32[3]);
 }
 static void VKAPI_CALL icd_vkCmdClearAttachments(VkCommandBuffer cb, uint32_t attachmentCount, const VkClearAttachment* pAttachments, uint32_t rectCount, const VkClearRect* pRects) {
     g_icd.encoder.cmdClearAttachments(toId(cb), attachmentCount, pAttachments, rectCount, pRects);
@@ -2726,13 +2920,22 @@ static void VKAPI_CALL icd_vkCmdClearAttachments(VkCommandBuffer cb, uint32_t at
 static void VKAPI_CALL icd_vkCmdSetStencilReference(VkCommandBuffer cb, VkStencilFaceFlags faceMask, uint32_t reference) {
     g_icd.encoder.cmdSetStencilReference(toId(cb), (uint32_t)faceMask, reference);
 }
-static void VKAPI_CALL icd_vkCmdSetBlendConstants(VkCommandBuffer, const float[4]) {}
+static void VKAPI_CALL icd_vkCmdSetBlendConstants(VkCommandBuffer cb, const float blendConstants[4]) {
+    g_icd.encoder.cmdSetBlendConstants(toId(cb),
+        blendConstants[0], blendConstants[1], blendConstants[2], blendConstants[3]);
+}
 static void VKAPI_CALL icd_vkCmdPushConstants(VkCommandBuffer cb, VkPipelineLayout layout,
     VkShaderStageFlags stageFlags, uint32_t offset, uint32_t size, const void* pValues) {
     g_icd.encoder.cmdPushConstants(toId(cb), (uint64_t)layout, stageFlags, offset, size, pValues);
 }
-static void VKAPI_CALL icd_vkCmdDispatch(VkCommandBuffer, uint32_t, uint32_t, uint32_t) {}
-static void VKAPI_CALL icd_vkCmdFillBuffer(VkCommandBuffer, VkBuffer, VkDeviceSize, VkDeviceSize, uint32_t) {}
+static void VKAPI_CALL icd_vkCmdDispatch(VkCommandBuffer, uint32_t gx, uint32_t gy, uint32_t gz) {
+    static int dCnt = 0;
+    if (dCnt++ < 5) { char b[96]; snprintf(b, sizeof(b), "[ICD] NOOP Dispatch %ux%ux%u (total=%d)", gx, gy, gz, dCnt); icdDbg(b); }
+}
+static void VKAPI_CALL icd_vkCmdFillBuffer(VkCommandBuffer, VkBuffer buf, VkDeviceSize off, VkDeviceSize sz, uint32_t data) {
+    static int fCnt = 0;
+    if (fCnt++ < 5) { char b[128]; snprintf(b, sizeof(b), "[ICD] NOOP FillBuffer buf=%llu off=%llu sz=%llu data=0x%x (total=%d)", (unsigned long long)(uint64_t)buf, (unsigned long long)off, (unsigned long long)sz, data, fCnt); icdDbg(b); }
+}
 static void VKAPI_CALL icd_vkCmdUpdateBuffer(VkCommandBuffer cb, VkBuffer buf, VkDeviceSize offset, VkDeviceSize dataSize, const void* pData) {
     g_icd.encoder.cmdUpdateBuffer(toId(cb), (uint64_t)buf, offset, dataSize, pData);
 }
@@ -2875,16 +3078,23 @@ static VkResult VKAPI_CALL icd_vkGetDisplayPlaneCapabilities2KHR(VkPhysicalDevic
     memset(p, 0, sizeof(*p)); p->sType = VK_STRUCTURE_TYPE_DISPLAY_PLANE_CAPABILITIES_2_KHR; return VK_SUCCESS;
 }
 static VkResult VKAPI_CALL icd_vkReleaseDisplayEXT(VkPhysicalDevice, VkDisplayKHR) { return VK_SUCCESS; }
-static VkResult VKAPI_CALL icd_vkGetPhysicalDeviceSurfaceCapabilities2EXT(VkPhysicalDevice, VkSurfaceKHR, void* pCaps) {
+static VkResult VKAPI_CALL icd_vkGetPhysicalDeviceSurfaceCapabilities2EXT(VkPhysicalDevice pd, VkSurfaceKHR surface, void* pCaps) {
+    // Fill via the KHR path first (correct window size from GetClientRect)
+    VkSurfaceCapabilitiesKHR khrCaps;
+    icd_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(pd, surface, &khrCaps);
     memset(pCaps, 0, sizeof(VkSurfaceCapabilities2EXT));
     auto* c = static_cast<VkSurfaceCapabilities2EXT*>(pCaps);
     c->sType = VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_2_EXT;
-    c->minImageCount = 2; c->maxImageCount = 3;
-    c->currentExtent = {800, 600}; c->minImageExtent = {1,1}; c->maxImageExtent = {4096,4096};
-    c->maxImageArrayLayers = 1; c->supportedTransforms = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-    c->currentTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-    c->supportedCompositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-    c->supportedUsageFlags = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    c->minImageCount = khrCaps.minImageCount;
+    c->maxImageCount = khrCaps.maxImageCount;
+    c->currentExtent = khrCaps.currentExtent;
+    c->minImageExtent = khrCaps.minImageExtent;
+    c->maxImageExtent = khrCaps.maxImageExtent;
+    c->maxImageArrayLayers = khrCaps.maxImageArrayLayers;
+    c->supportedTransforms = khrCaps.supportedTransforms;
+    c->currentTransform = khrCaps.currentTransform;
+    c->supportedCompositeAlpha = khrCaps.supportedCompositeAlpha;
+    c->supportedUsageFlags = khrCaps.supportedUsageFlags | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     return VK_SUCCESS;
 }
 static VkResult VKAPI_CALL icd_vkGetDrmDisplayEXT(VkPhysicalDevice, int32_t, uint32_t, VkDisplayKHR* p) {
@@ -3069,6 +3279,7 @@ static const FuncEntry g_funcTable[] = {
     ENTRY(vkCmdCopyImageToBuffer),
     ENTRY(vkCmdPipelineBarrier),
     ENTRY(vkCmdPipelineBarrier2),
+    {"vkCmdPipelineBarrier2KHR", (PFN_vkVoidFunction)icd_vkCmdPipelineBarrier2},
     ENTRY(vkCmdClearColorImage),
     ENTRY(vkCmdClearAttachments),
     ENTRY(vkCmdSetStencilReference),
@@ -3098,7 +3309,21 @@ static const FuncEntry g_funcTable[] = {
     ENTRY(vkCmdSetFrontFace),
     ENTRY(vkCmdSetPrimitiveTopology),
     ENTRY(vkCmdSetViewportWithCount),
+    {"vkCmdSetViewportWithCountEXT", (PFN_vkVoidFunction)icd_vkCmdSetViewportWithCount},
     ENTRY(vkCmdSetScissorWithCount),
+    {"vkCmdSetScissorWithCountEXT", (PFN_vkVoidFunction)icd_vkCmdSetScissorWithCount},
+    {"vkCmdSetCullModeEXT", (PFN_vkVoidFunction)icd_vkCmdSetCullMode},
+    {"vkCmdSetFrontFaceEXT", (PFN_vkVoidFunction)icd_vkCmdSetFrontFace},
+    {"vkCmdSetPrimitiveTopologyEXT", (PFN_vkVoidFunction)icd_vkCmdSetPrimitiveTopology},
+    {"vkCmdSetDepthTestEnableEXT", (PFN_vkVoidFunction)icd_vkCmdSetDepthTestEnable},
+    {"vkCmdSetDepthWriteEnableEXT", (PFN_vkVoidFunction)icd_vkCmdSetDepthWriteEnable},
+    {"vkCmdSetDepthCompareOpEXT", (PFN_vkVoidFunction)icd_vkCmdSetDepthCompareOp},
+    {"vkCmdSetDepthBoundsTestEnableEXT", (PFN_vkVoidFunction)icd_vkCmdSetDepthBoundsTestEnable},
+    {"vkCmdSetStencilTestEnableEXT", (PFN_vkVoidFunction)icd_vkCmdSetStencilTestEnable},
+    {"vkCmdSetStencilOpEXT", (PFN_vkVoidFunction)icd_vkCmdSetStencilOp},
+    {"vkCmdSetRasterizerDiscardEnableEXT", (PFN_vkVoidFunction)icd_vkCmdSetRasterizerDiscardEnable},
+    {"vkCmdSetDepthBiasEnableEXT", (PFN_vkVoidFunction)icd_vkCmdSetDepthBiasEnable},
+    {"vkCmdSetPrimitiveRestartEnableEXT", (PFN_vkVoidFunction)icd_vkCmdSetPrimitiveRestartEnable},
     ENTRY(vkCmdSetDepthTestEnable),
     ENTRY(vkCmdSetDepthWriteEnable),
     ENTRY(vkCmdSetDepthCompareOp),
@@ -3106,6 +3331,7 @@ static const FuncEntry g_funcTable[] = {
     ENTRY(vkCmdSetStencilTestEnable),
     ENTRY(vkCmdSetStencilOp),
     ENTRY(vkCmdSetRasterizerDiscardEnable),
+    ENTRY(vkCmdSetDepthBias),
     ENTRY(vkCmdSetDepthBiasEnable),
     ENTRY(vkCmdSetPrimitiveRestartEnable),
     ENTRY(vkCmdBindVertexBuffers2),

@@ -103,6 +103,7 @@ private:
     void handleCmdBeginRenderPass(VnStreamReader& r);
     void handleCmdEndRenderPass(VnStreamReader& r);
     void handleCmdBeginRendering(VnStreamReader& r);
+    void handleCmdBeginRenderingMRT(VnStreamReader& r);
     void handleCmdEndRendering(VnStreamReader& r);
     void handleCmdBindPipeline(VnStreamReader& r);
     void handleCmdSetViewport(VnStreamReader& r);
@@ -140,6 +141,12 @@ private:
     void handleCmdBindVertexBuffers(VnStreamReader& r);
     void handleCmdBindIndexBuffer(VnStreamReader& r);
     void handleCmdDrawIndexed(VnStreamReader& r);
+    void handleCmdDrawIndirect(VnStreamReader& r);
+    void handleCmdDrawIndexedIndirect(VnStreamReader& r);
+    void handleCmdSetRasterizerDiscardEnable(VnStreamReader& r);
+    void handleCmdSetPrimitiveRestartEnable(VnStreamReader& r);
+    void handleCmdSetBlendConstants(VnStreamReader& r);
+    void handleCmdSetDepthBias(VnStreamReader& r);
     void handleCmdCopyBuffer(VnStreamReader& r);
     void handleCmdCopyImage(VnStreamReader& r);
     void handleCmdBlitImage(VnStreamReader& r);
@@ -218,6 +225,7 @@ private:
     std::unordered_map<uint64_t, VkImageView> imageViews_;
     std::unordered_map<uint64_t, HostSwapchain> swapchains_;
     bool activeRendering_ = false;
+    bool dbgIs1080p_ = false;  // DIAG: true when current RP targets 1920x1080 RT
     bool activeRenderingIsSwapchain_ = false; // true if current render pass targets swapchain
     // Per-CB swapchain tracking: cbId → true if that CB is currently in a swapchain render pass.
     // Needed because multiple CBs may be recorded concurrently and interleave BeginRendering calls,

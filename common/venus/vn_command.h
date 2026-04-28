@@ -87,11 +87,17 @@ enum VnCommandType : uint32_t {
     VN_CMD_vkCmdSetStencilTestEnable      = 225,   // Venus standard
     VN_CMD_vkCmdSetStencilOp              = 226,   // Venus standard
     VN_CMD_vkCmdSetDepthBiasEnable        = 228,   // Venus standard
+    VN_CMD_vkCmdSetRasterizerDiscardEnable = 227,  // Venus standard
+    VN_CMD_vkCmdSetPrimitiveRestartEnable = 229,   // Venus standard
+    VN_CMD_vkCmdSetDepthBias              = 97,    // Venus standard (core 1.0)
+    VN_CMD_vkCmdSetBlendConstants         = 98,    // Venus standard (core 1.0)
     VN_CMD_vkCmdSetStencilCompareMask     = 100,   // Venus standard (core 1.0)
     VN_CMD_vkCmdSetStencilWriteMask       = 101,   // Venus standard (core 1.0)
     VN_CMD_vkCmdSetStencilReference       = 102,   // Venus standard (core 1.0)
     VN_CMD_vkCmdBindVertexBuffers         = 0x100D,
     VN_CMD_vkCmdDrawIndexed               = 107,   // Venus standard (was 0x100F)
+    VN_CMD_vkCmdDrawIndirect              = 108,   // Venus standard
+    VN_CMD_vkCmdDrawIndexedIndirect       = 109,   // Venus standard
     VN_CMD_vkCmdCopyBuffer                = 0x1010,
     VN_CMD_vkCmdCopyBufferToImage         = 0x1011,
     VN_CMD_vkCmdUpdateBuffer              = 117,   // Venus standard (was 0x1012)
@@ -108,6 +114,7 @@ enum VnCommandType : uint32_t {
     VN_CMD_BRIDGE_TimingSeq                = 0x10005,  // roundtrip timing: [seqId(4)][guestTimestampUs(8)]
     VN_CMD_BRIDGE_CopyBufToImgInline       = 0x10006,  // CopyBufferToImage with inline pixel data (avoids staging overwrite)
     VN_CMD_BRIDGE_RecordBDA                = 0x10007,  // record live BDA for replay patching: [bufId(8)][liveAddr(8)]
+    VN_CMD_BRIDGE_BeginRenderingMRT        = 0x10008,  // BeginRendering with multiple color attachments (MRT)
     VN_CMD_BRIDGE_EndOfStream              = 0x1FFFF,
 };
 

@@ -203,17 +203,34 @@ static int replayMode(const char* dumpPath, const char* saveFramesDir = nullptr)
     HINSTANCE hInstance = GetModuleHandle(nullptr);
 
     // Shared Vulkan instance + physical device
+    fprintf(stderr, "[Replay] Creating Vulkan instance...\n"); fflush(stderr);
     VulkanContext vk{};
     try {
         createInstance(vk);
+        fprintf(stderr, "[Replay] Instance OK.\n"); fflush(stderr);
+
+        // Create a temporary window + surface for pickPhysicalDevice (needs surface for present support query)
+        WNDCLASSEXA wc{}; wc.cbSize = sizeof(wc); wc.lpfnWndProc = DefWindowProcA;
+        wc.hInstance = hInstance; wc.lpszClassName = "VBoxReplayTmp";
+        RegisterClassExA(&wc);
+        HWND tmpHwnd = CreateWindowExA(0, wc.lpszClassName, "Replay", WS_OVERLAPPEDWINDOW,
+                                       CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, nullptr, nullptr, hInstance, nullptr);
+        createSurface(vk, tmpHwnd, hInstance);
+        fprintf(stderr, "[Replay] Surface OK. Picking physical device...\n"); fflush(stderr);
         pickPhysicalDevice(vk);
+        // Destroy temp surface+window — session creates its own
+        vkDestroySurfaceKHR(vk.instance, vk.surface, nullptr);
+        vk.surface = VK_NULL_HANDLE;
+        DestroyWindow(tmpHwnd);
+        fprintf(stderr, "[Replay] Physical device OK.\n"); fflush(stderr);
     } catch (const std::exception& e) {
         fprintf(stderr, "Vulkan Init Error: %s\n", e.what());
         return 1;
     }
 
-    // Create replay session via ClientSession
+    fprintf(stderr, "[Replay] Creating session...\n"); fflush(stderr);
     ClientSession session(0, vk.physicalDevice, vk.instance, hInstance);
+    fprintf(stderr, "[Replay] Starting replay...\n"); fflush(stderr);
     session.startReplay(std::move(batches), saveFramesDir);
 
     // Wait for replay to finish

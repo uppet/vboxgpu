@@ -103,6 +103,9 @@ struct IcdState {
     // Image format tracking: image handle → VkFormat (needed for correct bpp in CopyBufferToImage)
     std::unordered_map<uint64_t, VkFormat> imageFormats;
 
+    // Image memory size tracking: image handle → estimated memory size (for GetImageMemoryRequirements)
+    std::unordered_map<uint64_t, VkDeviceSize> imageMemSizes;
+
     // Buffer size tracking: buffer handle → actual size
     std::unordered_map<uint64_t, VkDeviceSize> bufferSizes;
 
@@ -132,6 +135,12 @@ struct IcdState {
 
     // Flush all small mapped memory data to encoder (call before QueueSubmit)
     void flushMappedMemory();
+
+    // Per-batch tracking of regions already sent by flushBufferRange.
+    // flushMappedMemory skips these to avoid temporal aliasing (overwriting
+    // staging data with later buffer state before GPU executes the copy).
+    struct FlushedRange { uint64_t memId; VkDeviceSize offset; VkDeviceSize size; };
+    std::vector<FlushedRange> flushedRangesThisBatch_;
 
     // Flush specific buffer data based on its memory binding
     void flushBufferRange(uint64_t bufferId, VkDeviceSize offset, VkDeviceSize range);

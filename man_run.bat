@@ -63,7 +63,7 @@ goto :selected
 :sel_ultrakill
 set TEST_DIR=%ROOT%\tests\UltraKill
 set TEST_EXE=ULTRAKILL.exe
-set TEST_ARGS=-screen-width 800 -screen-height 600 -screen-fullscreen 0
+set TEST_ARGS=-screen-width 1280 -screen-height 720 -screen-fullscreen 0
 goto :selected
 
 :selected

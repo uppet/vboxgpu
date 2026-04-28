@@ -141,7 +141,7 @@ bool VnDecoder::execute(const uint8_t* data, size_t size) {
             reader.setPos(nextOff);
         }
     }
-    // Profiling report for large batches
+    // Profiling report: print FULL command census at batch 100
     if (size > 1024*1024) {
         double batchMs = (rtNowUs() - batchStart) / 1000.0;
         fprintf(stderr, "[Batch#%llu] %llu cmds / %zuMB in %.2fms → slowest: cmd=0x%x %.2fms\n",
@@ -216,6 +216,7 @@ void VnDecoder::dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdS
     case VN_CMD_vkEndCommandBuffer:       handleEndCommandBuffer(reader); break;
     case VN_CMD_vkCmdBeginRenderPass:     handleCmdBeginRenderPass(reader); break;
     case VN_CMD_vkCmdBeginRendering:      handleCmdBeginRendering(reader); break;
+    case VN_CMD_BRIDGE_BeginRenderingMRT: handleCmdBeginRenderingMRT(reader); break;
     case VN_CMD_vkCmdEndRendering:        handleCmdEndRendering(reader); break;
     case VN_CMD_vkCmdEndRenderPass:       handleCmdEndRenderPass(reader); break;
     case VN_CMD_vkCmdBindPipeline:        handleCmdBindPipeline(reader); break;
@@ -237,6 +238,12 @@ void VnDecoder::dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdS
     case VN_CMD_vkCmdBindVertexBuffers:   handleCmdBindVertexBuffers(reader); break;
     case VN_CMD_vkCmdBindIndexBuffer:     handleCmdBindIndexBuffer(reader); break;
     case VN_CMD_vkCmdDrawIndexed:         handleCmdDrawIndexed(reader); break;
+    case VN_CMD_vkCmdDrawIndirect:        handleCmdDrawIndirect(reader); break;
+    case VN_CMD_vkCmdDrawIndexedIndirect: handleCmdDrawIndexedIndirect(reader); break;
+    case VN_CMD_vkCmdSetRasterizerDiscardEnable: handleCmdSetRasterizerDiscardEnable(reader); break;
+    case VN_CMD_vkCmdSetPrimitiveRestartEnable: handleCmdSetPrimitiveRestartEnable(reader); break;
+    case VN_CMD_vkCmdSetBlendConstants:   handleCmdSetBlendConstants(reader); break;
+    case VN_CMD_vkCmdSetDepthBias:        handleCmdSetDepthBias(reader); break;
     case VN_CMD_vkCmdCopyBuffer:          handleCmdCopyBuffer(reader); break;
     case VN_CMD_vkCmdCopyImage:           handleCmdCopyImage(reader); break;
     case VN_CMD_vkCmdBlitImage:           handleCmdBlitImage(reader); break;
@@ -366,6 +373,24 @@ void VnDecoder::handleCreateShaderModule(VnStreamReader& r) {
     info.codeSize = codeSize;
     info.pCode = code.data();
 
+    // Verify SPIR-V integrity + dump shader for pipeline 351's modules (id=352,353)
+    static int smLog = 0;
+    if (smLog++ < 20) {
+        uint32_t magic = codeSize >= 4 ? code[0] : 0;
+        fprintf(stderr, "[ShaderMod] id=%llu size=%u magic=0x%08x %s\n",
+                (unsigned long long)moduleId, codeSize, magic,
+                magic == 0x07230203 ? "OK" : "BAD_MAGIC!");
+    }
+    // Dump SPIR-V for pipeline 351's shader modules (352=vert, 353=frag)
+    if (moduleId == 352 || moduleId == 353) {
+        char path[256];
+        snprintf(path, sizeof(path), "S:\\bld\\vboxgpu\\dumps\\shader_%llu.spv",
+                 (unsigned long long)moduleId);
+        FILE* f = fopen(path, "wb");
+        if (f) { fwrite(code.data(), 1, codeSize, f); fclose(f); }
+        fprintf(stderr, "[ShaderMod] Dumped id=%llu to %s (%u bytes)\n",
+                (unsigned long long)moduleId, path, codeSize);
+    }
     VkShaderModule mod;
     if (vkCreateShaderModule(device_, &info, nullptr, &mod) != VK_SUCCESS) {
         error_ = true;
@@ -581,7 +606,7 @@ void VnDecoder::handleBindImageMemory(VnStreamReader& r) {
     vkGetImageMemoryRequirements(device_, img, &reqs);
     VkResult vr = vkBindImageMemory(device_, img, mem, offset);
     static int bindImageLog = 0;
-    if (bindImageLog < 40 || vr != VK_SUCCESS) {
+    if (bindImageLog < 500 || vr != VK_SUCCESS) {
         fprintf(stderr, "[Decoder] BindImageMemory: img=%llu mem=%llu off=%llu reqSize=%llu reqAlign=%llu result=%d\n",
                 (unsigned long long)imageId, (unsigned long long)memoryId,
                 (unsigned long long)offset, (unsigned long long)reqs.size,
@@ -619,9 +644,12 @@ void VnDecoder::handleCreateImageView(VnStreamReader& r) {
 
     VkImageView view;
     VkResult vr = vkCreateImageView(device_, &ci, nullptr, &view);
-    fprintf(stderr, "[Decoder] CreateImageView: id=%llu img=%llu fmt=%u type=%u result=%d view=%p\n",
+    fprintf(stderr, "[Decoder] CreateImageView: id=%llu img=%llu fmt=%u type=%u swiz=(%u,%u,%u,%u) result=%d view=%p\n",
             (unsigned long long)a.pView, (unsigned long long)a.pCreateInfo_image,
-            a.pCreateInfo_format, a.pCreateInfo_viewType, (int)vr, (void*)view);
+            a.pCreateInfo_format, a.pCreateInfo_viewType,
+            a.pCreateInfo_components_r, a.pCreateInfo_components_g,
+            a.pCreateInfo_components_b, a.pCreateInfo_components_a,
+            (int)vr, (void*)view);
     if (vr != VK_SUCCESS) return;
     store(imageViews_, a.pView, view);
 }
@@ -743,9 +771,17 @@ void VnDecoder::handleUpdateDescriptorSets(VnStreamReader& r) {
             allBufferInfos[i][j].buffer = lookup(buffers_, bufId);
             allBufferInfos[i][j].offset = bufOff;
             allBufferInfos[i][j].range = bufRange;
-            // Debug: log a handful of image descriptor bindings for startup verification only
+            // DIAG: check for NULL handles
+            if (descType == 0 && samId != 0 && !allImageInfos[i][j].sampler) {
+                fprintf(stderr, "[WARN] NULL sampler lookup! samId=%llu arr=%u\n",
+                        (unsigned long long)samId, dstArrayElem + j);
+            }
+            if ((descType == 2 || descType == 1) && ivId != 0 && !allImageInfos[i][j].imageView) {
+                fprintf(stderr, "[WARN] NULL imageView lookup! ivId=%llu\n",
+                        (unsigned long long)ivId);
+            }
             static int descLog = 0;
-            if (descLog < 20 && (descType == 0 || descType == 1 || descType == 2)) {
+            if (descLog < 200) {
                 fprintf(stderr, "[Decoder] DescBind: dstSet=%llu bind=%u arr=%u type=%u iv=%llu sam=%llu\n",
                         (unsigned long long)dstSetId, dstBinding, dstArrayElem + j,
                         descType, (unsigned long long)ivId, (unsigned long long)samId);
@@ -778,8 +814,10 @@ void VnDecoder::handleCmdBindDescriptorSets(VnStreamReader& r) {
     uint32_t firstSet = r.readU32(), setCount = r.readU32();
 
     std::vector<VkDescriptorSet> sets(setCount);
+    std::vector<uint64_t> setIds(setCount); // track guest IDs for debug
     for (uint32_t i = 0; i < setCount; i++) {
         uint64_t setId = r.readU64();
+        setIds[i] = setId;
         sets[i] = lookup(descriptorSets_, setId);
     }
     uint32_t dynOffCount = r.readU32();
@@ -796,6 +834,15 @@ void VnDecoder::handleCmdBindDescriptorSets(VnStreamReader& r) {
         fprintf(stderr, "[Decoder] BindDescSets: cb=%llu bp=%u first=%u count=%u\n",
                 (unsigned long long)cbId, bindPoint, firstSet, setCount);
         dsLog++;
+    }
+    if (dbgIs1080p_) {
+        static int ds1080 = 0;
+        if (ds1080++ < 10) {
+            fprintf(stderr, "[1080p BINDDS] first=%u count=%u ids=", firstSet, setCount);
+            for (uint32_t i = 0; i < setCount; i++)
+                fprintf(stderr, "%s%llu", i?",":"", (unsigned long long)setIds[i]);
+            fprintf(stderr, "\n");
+        }
     }
 
     vkCmdBindDescriptorSets(cb, static_cast<VkPipelineBindPoint>(bindPoint), layout,
@@ -972,7 +1019,9 @@ void VnDecoder::handleCmdClearColorImage(VnStreamReader& r) {
     VkClearColorValue clearColor = {{cr, cg, cb_, ca}};
     VkImageSubresourceRange range{};
     range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    range.baseMipLevel = 0;
     range.levelCount = 1;
+    range.baseArrayLayer = 0;
     range.layerCount = 1;
     vkCmdClearColorImage(cb, img, static_cast<VkImageLayout>(layout), &clearColor, 1, &range);
 }
@@ -1044,6 +1093,12 @@ void VnDecoder::handleFreeMemory(VnStreamReader& r) {
 void VnDecoder::handleWriteMemory(VnStreamReader& r) {
     uint64_t memId = r.readU64();
     uint64_t offset = r.readU64();
+    // DIAG: check if video texture memory receives WriteMemory
+    if (memId == 97) {
+        static int wm97 = 0;
+        if (wm97++ < 5)
+            fprintf(stderr, "[DIAG] WriteMemory to mem=97! off=%llu\n", (unsigned long long)offset);
+    }
     uint32_t size = r.readU32();
 
     // Wait for the previous batch's GPU work before overwriting GPU-visible memory.
@@ -1134,7 +1189,7 @@ void VnDecoder::handleCmdPipelineBarrier(VnStreamReader& r) {
         // in a different order than they execute on GPU (e.g., init barrier CBs
         // recorded after main CB in stream, but submitted first on GPU).
         imageLayouts_[imgId] = static_cast<VkImageLayout>(newLayout);
-        barriers[i].oldLayout = static_cast<VkImageLayout>(oldLayout);  // trust DXVK
+        barriers[i].oldLayout = static_cast<VkImageLayout>(oldLayout);
         barriers[i].newLayout = static_cast<VkImageLayout>(newLayout);
         barriers[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barriers[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -1159,7 +1214,9 @@ void VnDecoder::handleCmdPipelineBarrier(VnStreamReader& r) {
                 aspect = VK_IMAGE_ASPECT_COLOR_BIT;
             }
         }
-        barriers[i].subresourceRange = { aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS };
+        uint32_t baseMip = r.readU32();
+        uint32_t levelCount = r.readU32();
+        barriers[i].subresourceRange = { aspect, baseMip, levelCount, 0, VK_REMAINING_ARRAY_LAYERS };
 
         // If image not found in our map, it might be a swapchain image — skip
         if (!barriers[i].image) {
@@ -1353,8 +1410,7 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
     }
     dynStates.erase(std::remove_if(dynStates.begin(), dynStates.end(),
         [](VkDynamicState state) {
-            return state == VK_DYNAMIC_STATE_DEPTH_BIAS ||
-                   state == VK_DYNAMIC_STATE_DEPTH_BOUNDS;
+            return state == VK_DYNAMIC_STATE_DEPTH_BOUNDS;
         }), dynStates.end());
 
     // Ensure VERTEX_INPUT_BINDING_STRIDE is always dynamic when using dynamic rendering.
@@ -1462,17 +1518,10 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
     VkFormat colorFormat = static_cast<VkFormat>(colorFmt);
     VkFormat depthFormat = static_cast<VkFormat>(depthFmt);
     HostSwapchain* scFmt = getFirstSwapchain();
-    // Only override colorFormat for blit/present pipelines (0 vertex bindings)
-    // that target the swapchain with an LDR format. HDR post-process pipelines
-    // (colorFmt >= VK_FORMAT_R16G16B16A16_SFLOAT=97) target internal render targets
-    // and must keep their original format to avoid pipeline/RT format mismatch.
+    // Only override colorFormat for blit/present pipelines (0 vertex bindings, single attachment)
     bool isLdrFormat = (colorFmt < 97);
     if (scFmt && dynamicRendering && vtxBindings.empty() && isLdrFormat) {
-        fprintf(stderr, "[Decoder] CreatePipeline colorFmt override: %u -> %u (swapchain fmt)\n",
-                colorFmt, (uint32_t)scFmt->format);
         colorFormat = scFmt->format;
-    } else if (scFmt && dynamicRendering && vtxBindings.empty() && !isLdrFormat) {
-        fprintf(stderr, "[Decoder] CreatePipeline colorFmt KEEP HDR: %u (no swapchain override)\n", colorFmt);
     }
 
     VkGraphicsPipelineCreateInfo pInfo{};
@@ -1779,9 +1828,10 @@ void VnDecoder::handleCmdBeginRendering(VnStreamReader& r) {
         activeRendering_ = false;
         return;
     }
+    dbgIs1080p_ = (areaW > 1280 || areaH > 720);
     activeRendering_ = true;
     activeRenderingIsSwapchain_ = isSwapchain;
-    cbIsSwapchain_[cbId] = isSwapchain; // per-CB tracking (survives interleaved CBs)
+    cbIsSwapchain_[cbId] = isSwapchain;
 
     VkRenderingAttachmentInfo colorAttachment{};
     colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
@@ -1894,6 +1944,128 @@ void VnDecoder::handleCmdEndRendering(VnStreamReader& r) {
     // Do NOT insert an extra barrier here — it causes double-transition → device lost.
 }
 
+void VnDecoder::handleCmdBeginRenderingMRT(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint32_t areaX = r.readU32(), areaY = r.readU32();
+    uint32_t areaW = r.readU32(), areaH = r.readU32();
+    uint32_t colorCount = r.readU32();
+
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    if (!cb) return;
+
+    HostSwapchain* sc = nullptr;
+    for (auto& [id, s] : swapchains_) { sc = &s; break; }
+
+    // Build color attachment array
+    std::vector<VkRenderingAttachmentInfo> colorAtts(colorCount);
+    bool isSwapchain = false;
+    VkImage swapImg = VK_NULL_HANDLE;
+    for (uint32_t i = 0; i < colorCount; i++) {
+        uint64_t viewId = r.readU64();
+        uint32_t loadOp = r.readU32(), storeOp = r.readU32();
+        float cr = r.readF32(), cg = r.readF32(), ccb = r.readF32(), ca = r.readF32();
+
+        VkImageView view = VK_NULL_HANDLE;
+        if (viewId != 0) {
+            view = lookup(imageViews_, viewId);
+        }
+        if (viewId == 0 && sc && !sc->imageViews.empty()) {
+            view = sc->imageViews[sc->currentImageIndex];
+            if (i == 0) { swapImg = sc->images[sc->currentImageIndex]; isSwapchain = true; }
+        } else if (!view && sc && !sc->imageViews.empty() && i == 0) {
+            view = sc->imageViews[sc->currentImageIndex];
+            swapImg = sc->images[sc->currentImageIndex]; isSwapchain = true;
+        }
+
+        colorAtts[i] = {};
+        colorAtts[i].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        colorAtts[i].imageView = view;
+        colorAtts[i].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        colorAtts[i].loadOp = static_cast<VkAttachmentLoadOp>(loadOp);
+        colorAtts[i].storeOp = static_cast<VkAttachmentStoreOp>(storeOp);
+        colorAtts[i].clearValue.color = {{cr, cg, ccb, ca}};
+    }
+
+    // Remove attachments with NULL imageView (keep count correct but use VK_NULL_HANDLE)
+    // Vulkan allows NULL imageView for unused MRT slots
+
+    // Depth
+    uint32_t hasDepth = r.readU32();
+    VkRenderingAttachmentInfo depthAtt{};
+    VkImageView depthView = VK_NULL_HANDLE;
+    if (hasDepth) {
+        depthView = lookup(imageViews_, r.readU64());
+        if (depthView) {
+            depthAtt.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+            depthAtt.imageView = depthView;
+            depthAtt.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            depthAtt.loadOp = static_cast<VkAttachmentLoadOp>(r.readU32());
+            depthAtt.storeOp = static_cast<VkAttachmentStoreOp>(r.readU32());
+            depthAtt.clearValue.depthStencil.depth = r.readF32();
+        } else { r.readU32(); r.readU32(); r.readF32(); } // skip fields
+    }
+
+    // Stencil
+    uint32_t hasStencil = r.readU32();
+    VkRenderingAttachmentInfo stencilAtt{};
+    VkImageView stencilView = VK_NULL_HANDLE;
+    if (hasStencil) {
+        stencilView = lookup(imageViews_, r.readU64());
+        if (stencilView) {
+            stencilAtt.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+            stencilAtt.imageView = stencilView;
+            stencilAtt.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            stencilAtt.loadOp = static_cast<VkAttachmentLoadOp>(r.readU32());
+            stencilAtt.storeOp = static_cast<VkAttachmentStoreOp>(r.readU32());
+            stencilAtt.clearValue.depthStencil.stencil = r.readU32();
+        } else { r.readU32(); r.readU32(); r.readU32(); }
+    }
+
+    if (colorAtts.empty() || !colorAtts[0].imageView) {
+        activeRendering_ = false; return;
+    }
+
+    activeRendering_ = true;
+    activeRenderingIsSwapchain_ = isSwapchain;
+    cbIsSwapchain_[cbId] = isSwapchain;
+
+    uint32_t clampedW = areaW, clampedH = areaH;
+    if (isSwapchain && sc) {
+        clampedW = std::min(areaW, sc->extent.width);
+        clampedH = std::min(areaH, sc->extent.height);
+    }
+
+    VkRenderingInfo ri{};
+    ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    ri.renderArea = {{(int32_t)areaX, (int32_t)areaY}, {clampedW, clampedH}};
+    ri.layerCount = 1;
+    ri.colorAttachmentCount = (uint32_t)colorAtts.size();
+    ri.pColorAttachments = colorAtts.data();
+    if (hasDepth && depthView) ri.pDepthAttachment = &depthAtt;
+    if (hasStencil && stencilView) ri.pStencilAttachment = &stencilAtt;
+
+    if (isSwapchain && swapImg) {
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = swapImg;
+        barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        barrier.srcAccessMask = 0;
+        barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    }
+
+    static int mrtLog = 0;
+    if (mrtLog++ < 5)
+        fprintf(stderr, "[Decoder] MRT BeginRendering: %u color attachments\n", colorCount);
+
+    vkCmdBeginRendering(cb, &ri);
+}
+
 void VnDecoder::handleCmdBindPipeline(VnStreamReader& r) {
     uint64_t cbId = r.readU64();
     uint32_t bindPoint = r.readU32();
@@ -1904,6 +2076,11 @@ void VnDecoder::handleCmdBindPipeline(VnStreamReader& r) {
         fprintf(stderr, "[Decoder] BindPipeline SKIP: cb=%p pip=%p (cbId=%llu pipId=%llu)\n",
                 (void*)cb, (void*)pip, (unsigned long long)cbId, (unsigned long long)pipId);
         return;
+    }
+    if (dbgIs1080p_) {
+        static int bp1080 = 0;
+        if (bp1080++ < 10)
+            fprintf(stderr, "[1080p BINDPIP] pipId=%llu\n", (unsigned long long)pipId);
     }
     vkCmdBindPipeline(cb, static_cast<VkPipelineBindPoint>(bindPoint), pip);
     // Dynamic state (viewport, scissor, cull mode, etc.) persists across pipeline
@@ -1916,6 +2093,11 @@ void VnDecoder::handleCmdSetViewport(VnStreamReader& r) {
     vp.x = r.readF32(); vp.y = r.readF32();
     vp.width = r.readF32(); vp.height = r.readF32();
     vp.minDepth = r.readF32(); vp.maxDepth = r.readF32();
+    if (dbgIs1080p_) {
+        static int vp1080 = 0;
+        if (vp1080++ < 10)
+            fprintf(stderr, "[1080p VP] x=%.0f y=%.0f w=%.0f h=%.0f\n", vp.x, vp.y, vp.width, vp.height);
+    }
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     if (!cb) return;
     // Use WithCount — pipeline declares VIEWPORT_WITH_COUNT for dynamic rendering
@@ -2055,6 +2237,17 @@ void VnDecoder::handleCmdBindVertexBuffers(VnStreamReader& r) {
     }
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     if (!cb) return;
+    if (dbgIs1080p_) {
+        static int vb1080 = 0;
+        if (vb1080++ < 5) {
+            for (uint32_t i = 0; i < bindingCount; i++)
+                fprintf(stderr, "[1080p VB] bind=%u buf=%p off=%llu sz=%llu stride=%llu\n",
+                        firstBinding+i, (void*)buffers[i],
+                        (unsigned long long)offsets[i],
+                        (unsigned long long)sizes[i],
+                        (unsigned long long)strides[i]);
+        }
+    }
     if (hasStrides) {
         vkCmdBindVertexBuffers2(cb, firstBinding, bindingCount,
             buffers.data(), offsets.data(), sizes.data(), strides.data());
@@ -2082,7 +2275,93 @@ void VnDecoder::handleCmdDrawIndexed(VnStreamReader& r) {
     uint32_t firstInstance = r.readU32();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     if (!cb || !activeRendering_) return;
+    if (dbgIs1080p_) {
+        static int di1080 = 0;
+        if (di1080++ < 2) {
+            fprintf(stderr, "[1080p DRAWIDX] idx=%u inst=%u\n", indexCount, instanceCount);
+            // Dump VB data at the bound offset to check vertex positions
+            // VB was bound from global buffer at offset ~63MB, stride=20
+            // Find the persistent map for the buffer's memory and read vertex data
+            for (auto& [memId, ptr] : persistentMaps_) {
+                // The global buffer is mem=13 (64MB HOST_VISIBLE)
+                // VB offset was ~63111168. Check if this memory contains it.
+                auto* base = static_cast<const uint8_t*>(ptr);
+                // Try reading 120 bytes (6 verts × 20 bytes) at approximate offset
+                // We logged VB off=63111168 earlier
+                uint64_t vbOff = 63111168; // from the VB bind log
+                fprintf(stderr, "[1080p VB DATA] memId=%llu reading %llu bytes at off=%llu: ",
+                        (unsigned long long)memId, 120ULL, (unsigned long long)vbOff);
+                for (int b = 0; b < 120 && b < 60; b++) // first 60 bytes (3 verts)
+                    fprintf(stderr, "%02x ", base[vbOff + b]);
+                fprintf(stderr, "...\n");
+                // Interpret as vec3 pos + rgba8 color (stride=20: 12 bytes pos + 4 bytes color + 4 pad?)
+                for (int v = 0; v < 3; v++) {
+                    const float* pos = (const float*)(base + vbOff + v * 20);
+                    const uint8_t* col = base + vbOff + v * 20 + 12;
+                    fprintf(stderr, "[1080p VERT %d] pos=(%.3f, %.3f, %.3f) col=(%u,%u,%u,%u)\n",
+                            v, pos[0], pos[1], pos[2], col[0], col[1], col[2], col[3]);
+                }
+                break; // only first memory
+            }
+        }
+    }
     vkCmdDrawIndexed(cb, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+}
+
+void VnDecoder::handleCmdDrawIndirect(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint64_t bufId = r.readU64();
+    uint64_t offset = r.readU64();
+    uint32_t drawCount = r.readU32();
+    uint32_t stride = r.readU32();
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    VkBuffer buf = lookup(buffers_, bufId);
+    if (!cb || !buf || !activeRendering_) return;
+    vkCmdDrawIndirect(cb, buf, offset, drawCount, stride);
+}
+
+void VnDecoder::handleCmdDrawIndexedIndirect(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint64_t bufId = r.readU64();
+    uint64_t offset = r.readU64();
+    uint32_t drawCount = r.readU32();
+    uint32_t stride = r.readU32();
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    VkBuffer buf = lookup(buffers_, bufId);
+    if (!cb || !buf || !activeRendering_) return;
+    vkCmdDrawIndexedIndirect(cb, buf, offset, drawCount, stride);
+}
+
+void VnDecoder::handleCmdSetRasterizerDiscardEnable(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint32_t enable = r.readU32();
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    if (cb) vkCmdSetRasterizerDiscardEnable(cb, enable);
+}
+
+void VnDecoder::handleCmdSetPrimitiveRestartEnable(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint32_t enable = r.readU32();
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    if (cb) vkCmdSetPrimitiveRestartEnable(cb, enable);
+}
+
+void VnDecoder::handleCmdSetBlendConstants(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    float bc[4];
+    bc[0] = r.readF32(); bc[1] = r.readF32();
+    bc[2] = r.readF32(); bc[3] = r.readF32();
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    if (cb) vkCmdSetBlendConstants(cb, bc);
+}
+
+void VnDecoder::handleCmdSetDepthBias(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    float constantFactor = r.readF32();
+    float clamp = r.readF32();
+    float slopeFactor = r.readF32();
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    if (cb) vkCmdSetDepthBias(cb, constantFactor, clamp, slopeFactor);
 }
 
 void VnDecoder::handleCmdCopyBuffer(VnStreamReader& r) {
@@ -2106,9 +2385,6 @@ void VnDecoder::handleCmdCopyBuffer(VnStreamReader& r) {
         return;
     }
 
-    // Staging snapshot: same as CopyBufferToImage — protect source data from
-    // later WriteMemory overwriting it before GPU executes the copy.
-    // Staging snapshot disabled for debugging — use original buffer
     vkCmdCopyBuffer(cb, src, dst, regionCount, regions.data());
 }
 
@@ -2315,52 +2591,7 @@ void VnDecoder::handleCmdCopyBufferToImage(VnStreamReader& r) {
         return;
     }
 
-    // TODO: staging snapshot for copy-source protection (currently causes black screen,
-    // needs investigation — see dirty_tracking_race_analysis.md "方向 C")
-#if 0  // DISABLED — causes all-black frames, root cause TBD
-    auto bit_disabled = bufferBindings_.find(srcBufId);
-    VkDeviceMemory srcMem = (bit != bufferBindings_.end())
-        ? lookup(deviceMemories_, bit->second.memoryId) : VK_NULL_HANDLE;
-    VkDeviceSize srcMemOffset = (bit != bufferBindings_.end()) ? bit->second.memoryOffset : 0;
-
-    if (srcMem) {
-        // Calculate total byte range needed (min offset → max end)
-        VkDeviceSize minOff = UINT64_MAX, maxEnd = 0;
-        for (uint32_t i = 0; i < regionCount; i++) {
-            VkDeviceSize regSize = (VkDeviceSize)regions[i].imageExtent.width *
-                                   regions[i].imageExtent.height *
-                                   regions[i].imageExtent.depth * 4; // assume 4 bpp
-            VkDeviceSize off = regions[i].bufferOffset;
-            if (off < minOff) minOff = off;
-            if (off + regSize > maxEnd) maxEnd = off + regSize;
-        }
-        VkDeviceSize spanSize = maxEnd - minOff;
-
-        if (spanSize > 0 && ensureCopyStagingBuf(spanSize)) {
-            VkDeviceSize arenaOff = copyStagingUsed_;
-            // Map source memory, snapshot the region into arena
-            void* srcMapped = nullptr;
-            if (vkMapMemory(device_, srcMem, srcMemOffset + minOff, spanSize, 0, &srcMapped) == VK_SUCCESS) {
-                memcpy((uint8_t*)copyStagingBuf_.mapped + arenaOff, srcMapped, (size_t)spanSize);
-                vkUnmapMemory(device_, srcMem);
-                // Advance arena (align to 256 for buffer offset alignment)
-                copyStagingUsed_ = (arenaOff + spanSize + 255) & ~(VkDeviceSize)255;
-
-                // Adjust region offsets: base at arenaOff in staging buffer
-                std::vector<VkBufferImageCopy> adjRegions = regions;
-                for (uint32_t i = 0; i < regionCount; i++)
-                    adjRegions[i].bufferOffset = (VkDeviceSize)(adjRegions[i].bufferOffset - minOff + arenaOff);
-
-                vkCmdCopyBufferToImage(cb, copyStagingBuf_.buffer, dstImg,
-                                       static_cast<VkImageLayout>(dstLayout),
-                                       regionCount, adjRegions.data());
-                return;
-            }
-        }
-    }
-
-#endif
-    // Fallback: no binding info or staging alloc failed — use original buffer
+    // Use original buffer directly (non-inline CBI is rare; inline path handles most textures)
     vkCmdCopyBufferToImage(cb, srcBuf, dstImg, static_cast<VkImageLayout>(dstLayout),
                            regionCount, regions.data());
 }
@@ -2368,6 +2599,10 @@ void VnDecoder::handleCmdCopyBufferToImage(VnStreamReader& r) {
 void VnDecoder::handleCopyBufToImgInline(VnStreamReader& r) {
     uint64_t cbId = r.readU64();
     uint64_t dstImgId = r.readU64();
+    // DIAG: log all inline CBI destinations to find if img=135 is ever targeted
+    if (dstImgId == 135 || dstImgId == 342) {
+        fprintf(stderr, "[INLINE-CBI] dstImg=%llu\n", (unsigned long long)dstImgId);
+    }
     uint32_t dstLayout = r.readU32();
     uint32_t regionCount = r.readU32();
     std::vector<VkBufferImageCopy> regions(regionCount);
@@ -2435,6 +2670,11 @@ void VnDecoder::handleCmdDraw(VnStreamReader& r) {
     uint32_t firstInstance = r.readU32();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     if (!cb || !activeRendering_) return;
+    if (dbgIs1080p_) {
+        static int d1080 = 0;
+        if (d1080++ < 10)
+            fprintf(stderr, "[1080p DRAW] verts=%u inst=%u\n", vertexCount, instanceCount);
+    }
     vkCmdDraw(cb, vertexCount, instanceCount, firstVertex, firstInstance);
 }
 
@@ -2450,6 +2690,15 @@ void VnDecoder::handleCmdPushConstants(VnStreamReader& r) {
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     VkPipelineLayout layout = lookup(pipelineLayouts_, layoutId);
     if (!cb || !layout) return;
+    if (dbgIs1080p_) {
+        static int pc1080 = 0;
+        if (pc1080++ < 5) {
+            fprintf(stderr, "[1080p PUSH] off=%u sz=%u stage=0x%x data:", offset, size, stageFlags);
+            for (uint32_t i = 0; i < std::min(size, 32u); i++)
+                fprintf(stderr, " %02x", data[i]);
+            fprintf(stderr, "\n");
+        }
+    }
     vkCmdPushConstants(cb, layout, stageFlags, offset, size, data.data());
 }
 

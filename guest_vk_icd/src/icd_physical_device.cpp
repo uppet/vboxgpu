@@ -10,9 +10,11 @@ void IcdState::initDefaults() {
     // --- Physical device properties ---
     memset(&physDeviceProps, 0, sizeof(physDeviceProps));
     physDeviceProps.apiVersion = VK_API_VERSION_1_3;
-    physDeviceProps.driverVersion = 1;
+    // NVIDIA driver version encoding: (major << 22) | (minor << 14)
+    // Match host GPU: NVIDIA 581.15 (RTX 3060)
+    physDeviceProps.driverVersion = (581u << 22) | (15u << 14);
     physDeviceProps.vendorID = 0x10DE; // NVIDIA
-    physDeviceProps.deviceID = 0x2191; // GTX 1660 Ti
+    physDeviceProps.deviceID = 0x2504; // RTX 3060 (match actual host GPU)
     physDeviceProps.deviceType = VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
     strncpy(physDeviceProps.deviceName, "VBox GPU Bridge (Remote)", VK_MAX_PHYSICAL_DEVICE_NAME_SIZE);
 

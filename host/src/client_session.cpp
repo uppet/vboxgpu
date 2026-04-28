@@ -39,7 +39,9 @@ void ClientSession::createSessionWindow() {
 
     RECT rect = { 0, 0, 800, 600 };
     AdjustWindowRect(&rect, WS_OVERLAPPEDWINDOW, FALSE);
-    hwnd_ = CreateWindowExA(WS_EX_TOOLWINDOW, className, title,
+    // Use normal window style for replay (WGC can't capture WS_EX_TOOLWINDOW)
+    DWORD exStyle = replay_ ? 0 : WS_EX_TOOLWINDOW;
+    hwnd_ = CreateWindowExA(exStyle, className, title,
                             WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                             rect.right - rect.left, rect.bottom - rect.top,
                             nullptr, nullptr, hInstance_, nullptr);
@@ -308,15 +310,19 @@ void ClientSession::workerLoop() {
 }
 
 void ClientSession::replayLoop() {
-    // Create window + Vulkan (same as live)
+    fprintf(stderr, "[Replay] replayLoop: createSessionWindow...\n"); fflush(stderr);
     createSessionWindow();
+    fprintf(stderr, "[Replay] replayLoop: createSurface...\n"); fflush(stderr);
     vk_.instance = instance_;
     vk_.physicalDevice = physDevice_;
     createSurface(vk_, hwnd_, hInstance_);
+    fprintf(stderr, "[Replay] replayLoop: createLogicalDevice...\n"); fflush(stderr);
     createLogicalDevice(vk_);
+    fprintf(stderr, "[Replay] replayLoop: decoder init...\n"); fflush(stderr);
     decoder_.init(vk_.physicalDevice, vk_.device, vk_.graphicsQueue,
                   vk_.graphicsFamily, vk_.surface);
     decoder_.setHwnd(hwnd_);
+    fprintf(stderr, "[Replay] replayLoop: init done\n"); fflush(stderr);
 
     fprintf(stderr, "[Session %d] Replaying %zu batches...\n", id_, replayBatches_.size());
 
@@ -346,11 +352,13 @@ void ClientSession::replayLoop() {
             break;
         }
 
-        // Save screenshot if requested
+        // Save screenshot if requested — only via readback (safe), skip direct swapchain copy
         if (saveFramesDir_ && i >= setupEnd) {
             char path[512];
             snprintf(path, sizeof(path), "%s\\replay_%d_batch%zu.bmp", saveFramesDir_, id_, i);
-            decoder_.captureScreenshot(path);
+            // captureScreenshot prefers readback; skip if not available to avoid DEVICE_LOST
+            if (decoder_.hasReadback())
+                decoder_.captureScreenshot(path);
         }
     }
 
