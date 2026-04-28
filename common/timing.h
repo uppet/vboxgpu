@@ -34,7 +34,13 @@ inline double rtNowMs() {
 
 // Win32 file-based timing log for Guest ICD (static CRT can't use fprintf/stderr)
 #include <windows.h>
+inline bool rtLogEnabled() {
+    static int enabled = -1;
+    if (enabled < 0) enabled = (GetEnvironmentVariableA("VBOXGPU_TIMING_LOG", NULL, 0) > 0) ? 1 : 0;
+    return enabled != 0;
+}
 inline void rtLogWrite(const char* msg) {
+    if (!rtLogEnabled()) return;
     HANDLE h = CreateFileA("S:\\bld\\vboxgpu\\icd_timing.log",
         FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
         OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);

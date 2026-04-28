@@ -1451,6 +1451,19 @@ static VkResult VKAPI_CALL icd_vkCreateSwapchainKHR(
     g_icd.swapchainExtent = pInfo->imageExtent;
     g_icd.swapchainFormat = pInfo->imageFormat;
 
+    // Reset async protocol state — client may recreate swapchain at any time,
+    // stale pendingResponseQueue entries from previous swapchain would block.
+    {
+        std::lock_guard<std::mutex> ql(g_icd.pendingQueueMutex_);
+        while (!g_icd.pendingResponseQueue_.empty())
+            g_icd.pendingResponseQueue_.pop();
+    }
+    {
+        std::lock_guard<std::mutex> al(g_icd.acquireMutex_);
+        g_icd.imageIndexReady_ = false;
+    }
+    g_icd.firstPresented_ = false;
+
     // Tell host to create swapchain
     g_icd.encoder.cmdBridgeCreateSwapchain(1, id,
         pInfo->imageExtent.width, pInfo->imageExtent.height,
@@ -1476,20 +1489,24 @@ static VkResult VKAPI_CALL icd_vkGetSwapchainImagesKHR(
 static VkResult VKAPI_CALL icd_vkAcquireNextImageKHR(
     VkDevice, VkSwapchainKHR, uint64_t timeout, VkSemaphore, VkFence, uint32_t* pIndex)
 {
-    // First acquire (before any present): return image 0 immediately — no response yet.
-    if (!g_icd.firstPresented_) {
-        *pIndex = 0;
-        return VK_SUCCESS;
+    // Async protocol with bounded in-flight: allow up to 2 present batches in the
+    // pipeline before blocking. This overlaps guest encoding with host GPU execution
+    // while keeping display latency bounded (~2 frames).
+    constexpr size_t MAX_IN_FLIGHT = 2;
+    if (g_icd.firstPresented_) {
+        std::unique_lock<std::mutex> lock(g_icd.acquireMutex_);
+        // Wait with timeout — if recv thread exits (disconnect), we must not block forever
+        g_icd.acquireCV_.wait_for(lock, std::chrono::milliseconds(100), [=] {
+            if (!g_icd.recvRunning_) return true; // recv thread exited → don't block
+            std::lock_guard<std::mutex> ql(g_icd.pendingQueueMutex_);
+            return g_icd.pendingResponseQueue_.size() < MAX_IN_FLIGHT;
+        });
     }
-    // Wait for recv thread to deliver imageIndex from the last QueuePresent response.
-    std::unique_lock<std::mutex> lock(g_icd.acquireMutex_);
-    auto waitMs = (timeout == UINT64_MAX)
-        ? std::chrono::milliseconds(5000)
-        : std::chrono::milliseconds(timeout / 1000000 + 1);
-    g_icd.acquireCV_.wait_for(lock, waitMs, []{ return g_icd.imageIndexReady_; });
-    *pIndex = g_icd.currentImageIndex;
-    g_icd.imageIndexReady_ = false;
-    // Clear per-frame buffer flush dedup set: new frame starts, buffers may be updated.
+    // Return rotating index — host uses its own currentImageIndex for rendering
+    static uint32_t nextIdx = 0;
+    *pIndex = nextIdx;
+    nextIdx = (nextIdx + 1) % g_icd.swapchainImageCount;
+    // Clear per-frame buffer flush dedup set
     {
         std::lock_guard<std::mutex> lk(g_icd.flushedBuffersMutex_);
         g_icd.flushedBuffersThisFrame_.clear();
