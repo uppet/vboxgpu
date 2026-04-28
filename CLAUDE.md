@@ -54,9 +54,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - WriteMemory UAF 修复（readBytes 同步拷贝，不存储 batch buffer 指针）
 - 6 项资源泄漏修复（memoryShadows/fencePool/bdaRecorded 等）
 
-当前状态（M1.6 完成）：
+当前状态（M1.6+ 花屏修复完成）：
 - **SortTheCourt（Unity 5.3, 32-bit）Host 窗口 + Guest 回传 60 FPS 可玩** ✓
-- **UltraKill（Unity, 64-bit）Loading screen ~60 FPS，实际游玩 ~20 FPS，有零星渲染错误** ⚠️
+- **UltraKill（Unity, 64-bit）菜单画面干净，Logo video 正常，实际游玩 ~20 FPS** ✓
+- 花屏根因已修复：GetImageMemoryRequirements 从固定 4MB 改为按实际尺寸计算
 - 既有测试用例全部通过（dx11_triangle, dx11_depth_test, dx11_multi_blend）
 
 ## 性能状态（重要）
@@ -83,10 +84,11 @@ M1.7 / 后续目标：
 - Mapped memory 增量传输（dirty tracking，当前全量 flush 可以满足正确性）
 
 功能完善：
-- Stencil test 支持
+- ~~Stencil test 支持~~ ✓（已实现全链路）
+- ~~多 Render Target (MRT)~~ ✓（安全命令已实现，需 3D 场景验证）
 - Mipmap 支持
-- 多 Render Target (MRT)
-- 更多游戏兼容性测试
+- Compute shader (vkCmdDispatch) 转发
+- 更多游戏兼容性测试（3D 场景验证）
 
 ## 架构要点
 

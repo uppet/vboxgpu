@@ -170,8 +170,6 @@ void IcdState::flushBufferRange(uint64_t bufferId, VkDeviceSize offset, VkDevice
 #endif
             encoder.cmdWriteMemory(memId, dataStart, sz,
                                    (const uint8_t*)m.ptr + localOff);
-            // Record this range to prevent flushMappedMemory from overwriting
-            flushedRangesThisBatch_.push_back({memId, dataStart, sz});
             return;
         }
     }
@@ -235,16 +233,8 @@ void IcdState::flushMappedMemory() {
                 VkDeviceSize pageStart = (VkDeviceSize)off;
                 VkDeviceSize pageEnd = pageStart + 4096;
                 if (pageEnd <= regStart || pageStart >= regEnd) continue;
-                // Skip pages that overlap with flushBufferRange regions
-                // to prevent temporal aliasing (overwriting staging data)
-                bool skipPage = false;
-                for (auto& fr : flushedRangesThisBatch_) {
-                    if (fr.memId == m.memoryId &&
-                        pageStart < fr.offset + fr.size && pageEnd > fr.offset) {
-                        skipPage = true; break;
-                    }
-                }
-                if (skipPage) continue;
+                // Note: previously skipped pages overlapping flushBufferRange, but that
+                // caused other data on the same page (BDA, uniforms) to be lost → flickering.
                 VkDeviceSize clipStart = pageStart < regStart ? regStart : pageStart;
                 VkDeviceSize clipEnd = pageEnd > regEnd ? regEnd : pageEnd;
 
@@ -286,7 +276,6 @@ bool IcdState::sendBatchLocked(bool isPresent) {
     size_t sendSize = encoder.size();
     bool ok = transport.send(encoder.data(), sendSize);
     encoder.w_ = VnStreamWriter();
-    flushedRangesThisBatch_.clear(); // reset per-batch staging protection
     if (!ok) return false;
     // Record response type — atomic with TCP send under encoder.mutex_
     {
@@ -834,13 +823,8 @@ static VkResult VKAPI_CALL icd_vkEnumerateInstanceExtensionProperties(
 static void VKAPI_CALL icd_vkGetPhysicalDeviceFormatProperties(
     VkPhysicalDevice, VkFormat format, VkFormatProperties* p)
 {
-    // Extension formats from VK_KHR_maintenance5: A1B5G5R5 has only 1-bit alpha.
-    // Block A1B5G5R5: 1-bit alpha causes YCbCr quality issues. Logo video black is a
-    // separate issue (YCbCr pipeline fundamentally not rendering, regardless of format).
-    if ((uint32_t)format == 1000470001) {
-        memset(p, 0, sizeof(*p));
-        return;
-    }
+    // A1B5G5R5: NOT blocked. Blocking forces DXVK to R8_UNORM fallback which
+    // breaks the video CBI path (inline CBI with wrong bpp → black video).
     // Report broad format support — depth/stencil formats get appropriate bits
     bool isDS = (format >= VK_FORMAT_D16_UNORM && format <= VK_FORMAT_D32_SFLOAT_S8_UINT);
     VkFormatFeatureFlags optBits =
@@ -2255,9 +2239,7 @@ static uint32_t formatBpp(VkFormat fmt);
 static uint32_t formatBlockSize(VkFormat fmt);
 
 static VkResult VKAPI_CALL icd_vkCreateImage(VkDevice, const VkImageCreateInfo* pInfo, const VkAllocationCallbacks*, VkImage* p) {
-    // Block A1B5G5R5 at CreateImage as safety net (FormatProperties also blocks it).
-    if ((uint32_t)pInfo->format == 1000470001)
-        return VK_ERROR_FORMAT_NOT_SUPPORTED;
+    // A1B5G5R5 allowed — blocking broke logo video CBI path.
     uint64_t id = g_icd.handles.alloc();
     *p = (VkImage)id;
     g_icd.imageFormats[id] = pInfo->format;
@@ -2492,15 +2474,10 @@ static uint32_t formatBpp(VkFormat fmt) {
     case VK_FORMAT_R32G32B32A32_SFLOAT: case VK_FORMAT_R32G32B32A32_UINT:
         return 16;
     default:
-        // Catch extension formats by size: 16-bit packed = 2 bpp, 32-bit packed = 4 bpp
-        if (fmt >= 1000000000) {
-            // VK_FORMAT_A1B5G5R5_UNORM_PACK16_KHR (1000470001) and similar 16-bit packed
-            // VK_FORMAT_A4R4G4B4_UNORM_PACK16 (1000340000), VK_FORMAT_A4B4G4R4 (1000340001)
-            // VK_FORMAT_A8_UNORM_KHR (1000470000) = 1 bpp
-            // Conservative: assume 4 bpp for unknown extension formats (safe over-estimate)
-            return 4;
-        }
-        return 0; // unknown core format — caller falls back
+        // Extension/unknown formats: return 0 so CBI falls back to non-inline path.
+        // Inline path needs exact BPP; wrong BPP (e.g. 4 for 2-bpp A1B5G5R5) corrupts
+        // texture data and causes video textures to render black.
+        return 0;
     }
 }
 
