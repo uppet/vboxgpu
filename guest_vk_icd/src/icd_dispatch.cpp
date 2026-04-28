@@ -520,6 +520,7 @@ static VkResult VKAPI_CALL icd_vkCreateInstance(
 }
 
 static void VKAPI_CALL icd_vkDestroyInstance(VkInstance instance, const VkAllocationCallbacks*) {
+    icdDbg("[ICD] DestroyInstance");
     if (instance) delete reinterpret_cast<DispatchableHandle*>(instance);
 }
 
@@ -948,15 +949,14 @@ static VkResult VKAPI_CALL icd_vkCreateDevice(
 
     uint64_t id = g_icd.handles.alloc();
     *pDevice = reinterpret_cast<VkDevice>(makeDispatchable(id));
-    fprintf(stderr, "[ICD] vkCreateDevice: id=%llu handle=%p extensions=%u\n",
-            (unsigned long long)id, (void*)*pDevice, pInfo ? pInfo->enabledExtensionCount : 0);
-    fflush(stderr);
+    icdDbg(("[ICD] vkCreateDevice: id=" + std::to_string(id) + " connected=" + std::to_string((int)g_icd.connected) + " ext=" + std::to_string(pInfo ? pInfo->enabledExtensionCount : 0)).c_str());
     return VK_SUCCESS;
 }
 
 static void VKAPI_CALL icd_vkDestroyDevice(VkDevice device, const VkAllocationCallbacks*) {
     // Don't stop recv thread or disconnect — DXUT may destroy and recreate devices.
     // The TCP connection is per-ICD-lifetime, not per-device.
+    icdDbg("[ICD] DestroyDevice");
     if (device) delete reinterpret_cast<DispatchableHandle*>(device);
 }
 
