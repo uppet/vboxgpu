@@ -2916,7 +2916,43 @@ static void VKAPI_CALL icd_vkCmdFillBuffer(VkCommandBuffer, VkBuffer buf, VkDevi
 static void VKAPI_CALL icd_vkCmdUpdateBuffer(VkCommandBuffer cb, VkBuffer buf, VkDeviceSize offset, VkDeviceSize dataSize, const void* pData) {
     g_icd.encoder.cmdUpdateBuffer(toId(cb), (uint64_t)buf, offset, dataSize, pData);
 }
-static void VKAPI_CALL icd_vkCmdResolveImage(VkCommandBuffer, VkImage, VkImageLayout, VkImage, VkImageLayout, uint32_t, const VkImageResolve*) {}
+static void VKAPI_CALL icd_vkCmdResolveImage(VkCommandBuffer cb, VkImage srcImg, VkImageLayout srcLayout,
+    VkImage dstImg, VkImageLayout dstLayout, uint32_t regionCount, const VkImageResolve* pRegions)
+{
+    static int riLog = 0;
+    if (riLog++ < 20)
+        icdDbg(("[ICD] ResolveImage: src=" + std::to_string((uint64_t)srcImg)
+                + " dst=" + std::to_string((uint64_t)dstImg)
+                + " regions=" + std::to_string(regionCount)).c_str());
+    ENC_LOCK;
+    auto off = g_icd.encoder.w_.beginCommand(VN_CMD_vkCmdResolveImage);
+    g_icd.encoder.w_.writeU64(toId(cb));
+    g_icd.encoder.w_.writeU64((uint64_t)srcImg);
+    g_icd.encoder.w_.writeU32((uint32_t)srcLayout);
+    g_icd.encoder.w_.writeU64((uint64_t)dstImg);
+    g_icd.encoder.w_.writeU32((uint32_t)dstLayout);
+    g_icd.encoder.w_.writeU32(regionCount);
+    for (uint32_t i = 0; i < regionCount; i++) {
+        g_icd.encoder.w_.writeU32(pRegions[i].srcSubresource.aspectMask);
+        g_icd.encoder.w_.writeU32(pRegions[i].srcSubresource.mipLevel);
+        g_icd.encoder.w_.writeU32(pRegions[i].srcSubresource.baseArrayLayer);
+        g_icd.encoder.w_.writeU32(pRegions[i].srcSubresource.layerCount);
+        g_icd.encoder.w_.writeI32(pRegions[i].srcOffset.x);
+        g_icd.encoder.w_.writeI32(pRegions[i].srcOffset.y);
+        g_icd.encoder.w_.writeI32(pRegions[i].srcOffset.z);
+        g_icd.encoder.w_.writeU32(pRegions[i].dstSubresource.aspectMask);
+        g_icd.encoder.w_.writeU32(pRegions[i].dstSubresource.mipLevel);
+        g_icd.encoder.w_.writeU32(pRegions[i].dstSubresource.baseArrayLayer);
+        g_icd.encoder.w_.writeU32(pRegions[i].dstSubresource.layerCount);
+        g_icd.encoder.w_.writeI32(pRegions[i].dstOffset.x);
+        g_icd.encoder.w_.writeI32(pRegions[i].dstOffset.y);
+        g_icd.encoder.w_.writeI32(pRegions[i].dstOffset.z);
+        g_icd.encoder.w_.writeU32(pRegions[i].extent.width);
+        g_icd.encoder.w_.writeU32(pRegions[i].extent.height);
+        g_icd.encoder.w_.writeU32(pRegions[i].extent.depth);
+    }
+    g_icd.encoder.w_.endCommand(off);
+}
 static void VKAPI_CALL icd_vkCmdSetEvent(VkCommandBuffer, VkEvent, VkPipelineStageFlags) {}
 static void VKAPI_CALL icd_vkCmdResetEvent(VkCommandBuffer, VkEvent, VkPipelineStageFlags) {}
 static void VKAPI_CALL icd_vkCmdSetEvent2(VkCommandBuffer, VkEvent, const VkDependencyInfo*) {}

@@ -247,6 +247,7 @@ void VnDecoder::dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdS
     case VN_CMD_vkCmdCopyBuffer:          handleCmdCopyBuffer(reader); break;
     case VN_CMD_vkCmdCopyImage:           handleCmdCopyImage(reader); break;
     case VN_CMD_vkCmdBlitImage:           handleCmdBlitImage(reader); break;
+    case VN_CMD_vkCmdResolveImage:        handleCmdResolveImage(reader); break;
     case VN_CMD_vkCmdCopyBufferToImage:   handleCmdCopyBufferToImage(reader); break;
     case VN_CMD_BRIDGE_CopyBufToImgInline: handleCopyBufToImgInline(reader); break;
     case VN_CMD_vkCmdUpdateBuffer:        handleCmdUpdateBuffer(reader); break;
@@ -2476,6 +2477,53 @@ void VnDecoder::handleCmdBlitImage(VnStreamReader& r) {
     vkCmdBlitImage(cb, src, static_cast<VkImageLayout>(srcLayout),
                    dst, static_cast<VkImageLayout>(dstLayout),
                    regionCount, regions.data(), static_cast<VkFilter>(filter));
+}
+
+void VnDecoder::handleCmdResolveImage(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint64_t srcImgId = r.readU64();
+    uint32_t srcLayout = r.readU32();
+    uint64_t dstImgId = r.readU64();
+    uint32_t dstLayout = r.readU32();
+    uint32_t regionCount = r.readU32();
+    std::vector<VkImageResolve> regions(regionCount);
+    for (uint32_t i = 0; i < regionCount; i++) {
+        regions[i].srcSubresource.aspectMask = r.readU32();
+        regions[i].srcSubresource.mipLevel = r.readU32();
+        regions[i].srcSubresource.baseArrayLayer = r.readU32();
+        regions[i].srcSubresource.layerCount = r.readU32();
+        regions[i].srcOffset.x = r.readI32();
+        regions[i].srcOffset.y = r.readI32();
+        regions[i].srcOffset.z = r.readI32();
+        regions[i].dstSubresource.aspectMask = r.readU32();
+        regions[i].dstSubresource.mipLevel = r.readU32();
+        regions[i].dstSubresource.baseArrayLayer = r.readU32();
+        regions[i].dstSubresource.layerCount = r.readU32();
+        regions[i].dstOffset.x = r.readI32();
+        regions[i].dstOffset.y = r.readI32();
+        regions[i].dstOffset.z = r.readI32();
+        regions[i].extent.width = r.readU32();
+        regions[i].extent.height = r.readU32();
+        regions[i].extent.depth = r.readU32();
+    }
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    VkImage src = lookup(images_, srcImgId);
+    VkImage dst = lookup(images_, dstImgId);
+    static int riLog = 0;
+    if (riLog++ < 10)
+        fprintf(stderr, "[Decoder] ResolveImage: src=%llu(%p) dst=%llu(%p) regions=%u %ux%u\n",
+                (unsigned long long)srcImgId, (void*)src,
+                (unsigned long long)dstImgId, (void*)dst, regionCount,
+                regionCount>0 ? regions[0].extent.width : 0,
+                regionCount>0 ? regions[0].extent.height : 0);
+    if (!cb || !src || !dst) {
+        if (riLog <= 10)
+            fprintf(stderr, "[Decoder] ResolveImage SKIP: cb=%p src=%p dst=%p\n", (void*)cb, (void*)src, (void*)dst);
+        return;
+    }
+    vkCmdResolveImage(cb, src, static_cast<VkImageLayout>(srcLayout),
+                      dst, static_cast<VkImageLayout>(dstLayout),
+                      regionCount, regions.data());
 }
 
 bool VnDecoder::ensureCopyStagingBuf(VkDeviceSize needed) {

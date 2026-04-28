@@ -150,6 +150,7 @@ private:
     void handleCmdCopyBuffer(VnStreamReader& r);
     void handleCmdCopyImage(VnStreamReader& r);
     void handleCmdBlitImage(VnStreamReader& r);
+    void handleCmdResolveImage(VnStreamReader& r);
     void handleCmdCopyBufferToImage(VnStreamReader& r);
     void handleCopyBufToImgInline(VnStreamReader& r);
     void handleCmdUpdateBuffer(VnStreamReader& r);

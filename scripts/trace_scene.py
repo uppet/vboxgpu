@@ -15,7 +15,7 @@ CMD = {18:'QueueSubmit',50:'CreateBuffer',51:'DestroyBuffer',54:'CreateImage',55
        224:'SetDepthBoundsTestEnable',228:'SetDepthBiasEnable',
        0x1000:'BeginRendering',0x1004:'AllocDescSets',0x1005:'UpdateDescSets',
        0x1007:'PushDescSet',0x1008:'Barrier2',0x100D:'BindVertexBuffers',
-       0x1010:'CopyBuffer',0x1011:'CopyBufToImg',0x1013:'CopyImage',0x1014:'BlitImage',
+       0x1010:'CopyBuffer',0x1011:'CopyBufToImg',0x1013:'CopyImage',0x1014:'BlitImage',0x1016:'ResolveImage',
        0x10000:'CreateSwapchain',0x10002:'QueuePresent',0x10003:'WriteMemory',0x1FFFF:'EndOfStream'}
 
 with open(dump_path,'rb') as f: data=f.read()

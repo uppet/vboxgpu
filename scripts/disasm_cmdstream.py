@@ -53,6 +53,8 @@ CMD_NAMES = {
     0x100A: "CmdClearColorImage", 0x100D: "CmdBindVertexBuffers",
     0x1010: "CmdCopyBuffer", 0x1011: "CmdCopyBufferToImage",
     0x1013: "CmdCopyImage",
+    0x1014: "CmdBlitImage", 0x1015: "CmdSetPrimitiveTopology",
+    0x1016: "CmdResolveImage",
     0x10000: "BRIDGE_CreateSwapchain", 0x10001: "BRIDGE_AcquireNextImage",
     0x10002: "BRIDGE_QueuePresent", 0x10003: "BRIDGE_WriteMemory",
     0x1FFFF: "EndOfStream",
