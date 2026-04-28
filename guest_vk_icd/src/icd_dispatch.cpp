@@ -2191,23 +2191,34 @@ static void VKAPI_CALL icd_vkGetDeviceBufferMemoryRequirements(VkDevice, const V
     p->memoryRequirements.alignment = 256;
     p->memoryRequirements.memoryTypeBits = 0x3;
 }
+// Forward declarations for formatBpp/formatBlockSize (defined in CBI section below)
+static uint32_t formatBpp(VkFormat fmt);
+static uint32_t formatBlockSize(VkFormat fmt);
+
 static void VKAPI_CALL icd_vkGetDeviceImageMemoryRequirements(VkDevice, const VkDeviceImageMemoryRequirements* pInfo, VkMemoryRequirements2* p) {
-    // Pre-creation query (Vulkan 1.3): estimate from the image create info
+    // Pre-creation query (Vulkan 1.3): must match icd_vkCreateImage logic.
     VkDeviceSize sz = 32 * 1024 * 1024; // default
     if (pInfo && pInfo->pCreateInfo) {
         auto* ci = pInfo->pCreateInfo;
-        uint32_t bpp = 4; // default RGBA8
-        VkFormat fmt = ci->format;
-        if (fmt == VK_FORMAT_R8_UNORM || fmt == VK_FORMAT_R8_SRGB) bpp = 1;
-        else if (fmt == VK_FORMAT_R16_SFLOAT || fmt == VK_FORMAT_R8G8_UNORM) bpp = 2;
-        else if (fmt == VK_FORMAT_R16G16B16A16_SFLOAT || fmt == VK_FORMAT_R16G16B16A16_UNORM) bpp = 8;
-        else if (fmt == VK_FORMAT_R32G32B32A32_SFLOAT) bpp = 16;
-        sz = (VkDeviceSize)ci->extent.width * ci->extent.height * ci->extent.depth * bpp * ci->arrayLayers;
-        // Account for mipmaps (~33% extra)
+        uint32_t bpp = formatBpp(ci->format);
+        uint32_t bs = formatBlockSize(ci->format);
+        if (bs > 0) {
+            uint32_t bw = (ci->extent.width + 3) / 4;
+            uint32_t bh = (ci->extent.height + 3) / 4;
+            VkDeviceSize rowBytes = (VkDeviceSize)bw * bs;
+            rowBytes = (rowBytes + 255) & ~(VkDeviceSize)255;
+            sz = rowBytes * bh * ci->extent.depth * ci->arrayLayers;
+        } else {
+            if (bpp == 0) bpp = 4;
+            VkDeviceSize rowBytes = (VkDeviceSize)ci->extent.width * bpp;
+            rowBytes = (rowBytes + 255) & ~(VkDeviceSize)255;
+            sz = rowBytes * ci->extent.height * ci->extent.depth * ci->arrayLayers;
+        }
         if (ci->mipLevels > 1) sz = sz * 4 / 3;
-        // Align up to 4KB page
+        if (ci->samples > VK_SAMPLE_COUNT_1_BIT) sz *= (uint32_t)ci->samples;
+        sz = sz * 2;
         sz = (sz + 4095) & ~(VkDeviceSize)4095;
-        if (sz < 4096) sz = 4096;
+        if (sz < 32768) sz = 32768;
     }
     p->sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2;
     p->memoryRequirements.size = sz;
@@ -2234,37 +2245,44 @@ static void VKAPI_CALL icd_vkDestroyBuffer(VkDevice, VkBuffer v, const VkAllocat
     { std::lock_guard<std::mutex> lk(g_icd.bdaMutex_); g_icd.bdaRecorded_.erase(id); }
     g_icd.encoder.cmdDestroyBuffer(1, id);
 }
-// Forward declarations for formatBpp/formatBlockSize (defined in CBI section below)
-static uint32_t formatBpp(VkFormat fmt);
-static uint32_t formatBlockSize(VkFormat fmt);
 
 static VkResult VKAPI_CALL icd_vkCreateImage(VkDevice, const VkImageCreateInfo* pInfo, const VkAllocationCallbacks*, VkImage* p) {
     // A1B5G5R5 allowed — blocking broke logo video CBI path.
     uint64_t id = g_icd.handles.alloc();
     *p = (VkImage)id;
     g_icd.imageFormats[id] = pInfo->format;
-    // Compute estimated memory size for GetImageMemoryRequirements
+    // Compute estimated memory size for GetImageMemoryRequirements.
+    // Must be >= host GPU's vkGetImageMemoryRequirements result, otherwise DXVK's
+    // sub-allocator packs images too tightly and host-side BindImageMemory overlaps.
+    // Key insight: GPU drivers pad each row to an alignment boundary (typically 256 bytes)
+    // and add metadata, so pure pixel-count estimates are insufficient for narrow/small images.
     {
         uint32_t bpp = formatBpp(pInfo->format);
         uint32_t bs = formatBlockSize(pInfo->format);
         VkDeviceSize sz;
         if (bs > 0) {
-            // Block-compressed: 4x4 blocks
+            // Block-compressed: 4x4 blocks, with row pitch aligned to 256 bytes
             uint32_t bw = (pInfo->extent.width + 3) / 4;
             uint32_t bh = (pInfo->extent.height + 3) / 4;
-            sz = (VkDeviceSize)bw * bh * pInfo->extent.depth * bs * pInfo->arrayLayers;
+            VkDeviceSize rowBytes = (VkDeviceSize)bw * bs;
+            rowBytes = (rowBytes + 255) & ~(VkDeviceSize)255; // GPU row pitch alignment
+            sz = rowBytes * bh * pInfo->extent.depth * pInfo->arrayLayers;
         } else {
             if (bpp == 0) bpp = 4; // unknown format → assume 4 bpp
-            sz = (VkDeviceSize)pInfo->extent.width * pInfo->extent.height * pInfo->extent.depth * bpp * pInfo->arrayLayers;
+            VkDeviceSize rowBytes = (VkDeviceSize)pInfo->extent.width * bpp;
+            rowBytes = (rowBytes + 255) & ~(VkDeviceSize)255; // GPU row pitch alignment
+            sz = rowBytes * pInfo->extent.height * pInfo->extent.depth * pInfo->arrayLayers;
         }
         // Mipmaps add ~33%
         if (pInfo->mipLevels > 1) sz = sz * 4 / 3;
         // MSAA multiplier
         if (pInfo->samples > VK_SAMPLE_COUNT_1_BIT) sz *= (uint32_t)pInfo->samples;
-        // Align to 4KB page + 50% headroom for GPU alignment/padding
-        sz = sz * 3 / 2;
+        // 2x headroom for GPU metadata/alignment padding
+        sz = sz * 2;
         sz = (sz + 4095) & ~(VkDeviceSize)4095;
-        if (sz < 4096) sz = 4096;
+        // 32KB minimum: GPU drivers require significant space for optimally-tiled images
+        // (observed: host reqSize=16384 for tiny textures, 32KB gives safety margin)
+        if (sz < 32768) sz = 32768;
         g_icd.imageMemSizes[id] = sz;
     }
     g_icd.encoder.cmdCreateImage(1, id,

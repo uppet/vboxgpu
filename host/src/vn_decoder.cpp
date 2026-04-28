@@ -2647,10 +2647,6 @@ void VnDecoder::handleCmdCopyBufferToImage(VnStreamReader& r) {
 void VnDecoder::handleCopyBufToImgInline(VnStreamReader& r) {
     uint64_t cbId = r.readU64();
     uint64_t dstImgId = r.readU64();
-    // DIAG: log all inline CBI destinations to find if img=135 is ever targeted
-    if (dstImgId == 135 || dstImgId == 342) {
-        fprintf(stderr, "[INLINE-CBI] dstImg=%llu\n", (unsigned long long)dstImgId);
-    }
     uint32_t dstLayout = r.readU32();
     uint32_t regionCount = r.readU32();
     std::vector<VkBufferImageCopy> regions(regionCount);
