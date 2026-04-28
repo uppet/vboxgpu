@@ -179,32 +179,13 @@ void ClientSession::workerLoop() {
         RT_LOG(0, "T2", "recv %zu bytes", bytesRead);
 #endif
 
-        // Execute
+        // Execute — Method-A pipeline: readback wait + acquire deferred to after send
         if (!decoder_.execute(recvBuf.data(), bytesRead)) {
             fprintf(stderr, "[Session %d] Command stream execution failed.\n", id_);
             break;
         }
 
-        // Post readback to compress thread
-        if (!disableReadback && decoder_.hasReadback()) {
-            auto* rawPtr = static_cast<const uint8_t*>(decoder_.getReadbackData());
-            uint32_t rawSize = decoder_.getReadbackSize();
-            {
-                std::lock_guard<std::mutex> lock(cjMutex_);
-                compJob_.rawData.assign(rawPtr, rawPtr + rawSize);
-                compJob_.w = decoder_.getReadbackWidth();
-                compJob_.h = decoder_.getReadbackHeight();
-                compJob_.valid = true;
-#if VBOXGPU_TIMING
-                compJob_.frameId   = decoder_.readyFrameTiming_.frameId;
-                compJob_.presentUs = decoder_.readyFrameTiming_.presentUs;
-                compJob_.readbackUs = decoder_.readyFrameTiming_.readbackUs;
-#endif
-            }
-            cjCV_.notify_one();
-        }
-
-        // Get compressed result (1-frame lag)
+        // Get compressed result (from previous iteration's compress job)
         CompressResult result;
         if (!disableReadback) {
             std::lock_guard<std::mutex> lock(crMutex_);
@@ -282,11 +263,41 @@ void ClientSession::workerLoop() {
                payloadSize, (hostSendUs - decoder_.batchRecvUs_) / 1000.0, ftFrameId);
 #endif
 
-        // Send framed response
+        // Send framed response — do this BEFORE readback wait (Method-A pipeline)
         if (!tcp_send_framed(clientSock_, sendBuf.data(), payloadSize)) {
             fprintf(stderr, "[Session %d] Send failed.\n", id_);
             break;
         }
+
+        // --- Method-A: deferred work after response sent ---
+        // While guest processes the response and encodes the next batch,
+        // we complete the readback (fence wait), post compress job, and acquire.
+        // This overlaps GPU readback completion with guest-side encoding.
+
+        // 1. Wait for deferred readback fence (should be done — GPU had time during decode)
+        decoder_.completeReadback();
+
+        // 2. Post readback data to compress thread
+        if (!disableReadback && decoder_.hasReadback()) {
+            auto* rawPtr = static_cast<const uint8_t*>(decoder_.getReadbackData());
+            uint32_t rawSize = decoder_.getReadbackSize();
+            {
+                std::lock_guard<std::mutex> lock(cjMutex_);
+                compJob_.rawData.assign(rawPtr, rawPtr + rawSize);
+                compJob_.w = decoder_.getReadbackWidth();
+                compJob_.h = decoder_.getReadbackHeight();
+                compJob_.valid = true;
+#if VBOXGPU_TIMING
+                compJob_.frameId   = decoder_.readyFrameTiming_.frameId;
+                compJob_.presentUs = decoder_.readyFrameTiming_.presentUs;
+                compJob_.readbackUs = decoder_.readyFrameTiming_.readbackUs;
+#endif
+            }
+            cjCV_.notify_one();
+        }
+
+        // 3. Acquire next swapchain image for the upcoming batch
+        decoder_.performDeferredAcquire();
     }
 
     // Cleanup

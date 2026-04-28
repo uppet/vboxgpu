@@ -86,6 +86,11 @@ public:
     uint32_t getReadbackHeight() const { return rbReady_ >= 0 ? readback_[rbReady_].height : 0; }
     uint32_t getReadbackSize() const { return rbReady_ >= 0 ? static_cast<uint32_t>(readback_[rbReady_].bufferSize) : 0; }
 
+    // Method-A pipeline: deferred readback wait + acquire
+    // Call after sending response to overlap with guest encoding.
+    void completeReadback();       // wait deferred readback fence, set rbReady_
+    void performDeferredAcquire(); // acquire next swapchain image if deferred
+
 private:
     void dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdSize);
 
@@ -286,6 +291,8 @@ private:
     bool readbackSubmitted_[2] = {false, false}; // GPU copy submitted, fence not yet waited
     int rbCur_ = 0;    // write slot for the current frame
     int rbReady_ = -1; // slot with CPU-readable data (-1 = none yet)
+    int deferredReadbackSlot_ = -1; // slot awaiting readback fence (-1 = none)
+    uint64_t deferredAcquireScId_ = 0; // swapchain needing deferred acquire (0 = none)
 
     void ensureReadbackResources(int slot, uint32_t w, uint32_t h);
     bool readbackFrameAsync(uint32_t imageIndex, HostSwapchain& sc, int slot);

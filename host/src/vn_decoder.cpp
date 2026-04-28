@@ -3214,38 +3214,52 @@ void VnDecoder::flushPendingPresents() {
 #endif
 
         lastPresentedImageIndex_ = presentIdx;
-        // Auto-acquire next image for the next frame
-        uint32_t oldIdx = it->second.currentImageIndex;
-        vkAcquireNextImageKHR(device_, it->second.swapchain, UINT64_MAX,
-                              VK_NULL_HANDLE, acquireFence_, &it->second.currentImageIndex);
-        vkWaitForFences(device_, 1, &acquireFence_, VK_TRUE, UINT64_MAX);
-        vkResetFences(device_, 1, &acquireFence_);
-#ifdef VBOXGPU_VERBOSE
-        fprintf(stderr, "[Decoder] AutoAcquire: %u -> %u\n",
-                oldIdx, it->second.currentImageIndex);
-#endif
 
-        // Wait for the PREVIOUS slot's readback fence.
-        // By now present + acquire have completed, giving the GPU extra time to
-        // finish the copy from the frame before last — minimising stall.
+        // Method-A pipeline: defer acquire + readback wait to after response send.
+        // This lets the host send the response sooner, overlapping GPU work with
+        // guest encoding of the next batch.
+        deferredAcquireScId_ = pp.scId;
+
+        // Defer readback fence wait — will be completed by completeReadback()
         rbReady_ = -1;
-        if (!noReadback_ && readbackSubmitted_[prevSlot]) {
-            vkWaitForFences(device_, 1, &readbackFences_[prevSlot], VK_TRUE, UINT64_MAX);
-            readbackSubmitted_[prevSlot] = false;
-            rbReady_ = prevSlot;
-#if VBOXGPU_TIMING
-            slotTiming_[prevSlot].readbackUs = rtNowUs();
-            readyFrameTiming_ = slotTiming_[prevSlot];
-            RT_LOG(currentSeqId_, "R", "frame=%u readback ready, age=%.2fms",
-                   readyFrameTiming_.frameId,
-                   (readyFrameTiming_.readbackUs - readyFrameTiming_.presentUs) / 1000.0);
-#endif
-        }
+        deferredReadbackSlot_ = (readbackSubmitted_[prevSlot] && !noReadback_) ? prevSlot : -1;
 
         // Flip write slot for next frame
         rbCur_ = 1 - rbCur_;
     }
     pendingPresents_.clear();
+}
+
+void VnDecoder::completeReadback() {
+    if (deferredReadbackSlot_ < 0) return;
+    int slot = deferredReadbackSlot_;
+    deferredReadbackSlot_ = -1;
+
+    vkWaitForFences(device_, 1, &readbackFences_[slot], VK_TRUE, UINT64_MAX);
+    readbackSubmitted_[slot] = false;
+    rbReady_ = slot;
+#if VBOXGPU_TIMING
+    slotTiming_[slot].readbackUs = rtNowUs();
+    readyFrameTiming_ = slotTiming_[slot];
+    RT_LOG(currentSeqId_, "R", "frame=%u readback ready (deferred), age=%.2fms",
+           readyFrameTiming_.frameId,
+           (readyFrameTiming_.readbackUs - readyFrameTiming_.presentUs) / 1000.0);
+#endif
+}
+
+void VnDecoder::performDeferredAcquire() {
+    if (!deferredAcquireScId_) return;
+    auto it = swapchains_.find(deferredAcquireScId_);
+    deferredAcquireScId_ = 0;
+    if (it == swapchains_.end()) return;
+
+    vkAcquireNextImageKHR(device_, it->second.swapchain, UINT64_MAX,
+                          VK_NULL_HANDLE, acquireFence_, &it->second.currentImageIndex);
+    vkWaitForFences(device_, 1, &acquireFence_, VK_TRUE, UINT64_MAX);
+    vkResetFences(device_, 1, &acquireFence_);
+#ifdef VBOXGPU_VERBOSE
+    fprintf(stderr, "[Decoder] DeferredAcquire: -> %u\n", it->second.currentImageIndex);
+#endif
 }
 
 void VnDecoder::flushPendingDestroys() {
