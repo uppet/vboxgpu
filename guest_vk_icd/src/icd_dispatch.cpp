@@ -2072,12 +2072,24 @@ static VkResult VKAPI_CALL icd_vkQueueWaitIdle(VkQueue) { return VK_SUCCESS; }
 static VkResult VKAPI_CALL icd_vkAllocateMemory(VkDevice, const VkMemoryAllocateInfo* pInfo, const VkAllocationCallbacks*, VkDeviceMemory* p) {
     uint64_t id = g_icd.handles.alloc();
     *p = (VkDeviceMemory)id;
-    // Allocate shadow with VirtualAlloc for page-level protection support
+    // Only allocate shadow buffer for HOST_VISIBLE memory (type index 1).
+    // DEVICE_LOCAL (type 0) is GPU-only and never mapped — shadow would waste
+    // precious address space, especially fatal for 32-bit processes (~2GB limit).
     VkDeviceSize allocSize = pInfo->allocationSize;
-    void* shadow = VirtualAlloc(nullptr, (SIZE_T)allocSize,
-        MEM_COMMIT | MEM_RESERVE | MEM_WRITE_WATCH, PAGE_READWRITE);
-    if (!shadow) shadow = VirtualAlloc(nullptr, (SIZE_T)allocSize,
-        MEM_COMMIT | MEM_RESERVE | MEM_WRITE_WATCH, PAGE_READWRITE); // retry
+    void* shadow = nullptr;
+    bool needsShadow = (pInfo->memoryTypeIndex != 0); // type 0 = DEVICE_LOCAL
+    if (needsShadow) {
+        shadow = VirtualAlloc(nullptr, (SIZE_T)allocSize,
+            MEM_COMMIT | MEM_RESERVE | MEM_WRITE_WATCH, PAGE_READWRITE);
+        if (!shadow) {
+            shadow = VirtualAlloc(nullptr, (SIZE_T)allocSize,
+                MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        }
+        if (!shadow) {
+            icdDbg(("[ICD] AllocateMemory FAILED: VirtualAlloc " + std::to_string(allocSize) + " bytes, mem=" + std::to_string(id)).c_str());
+            return VK_ERROR_OUT_OF_HOST_MEMORY;
+        }
+    }
     g_icd.memoryShadows[id] = {shadow, allocSize};
     g_icd.encoder.cmdAllocateMemory(1, id, pInfo->allocationSize, pInfo->memoryTypeIndex);
     return VK_SUCCESS;
@@ -2104,9 +2116,22 @@ static VkResult VKAPI_CALL icd_vkMapMemory(VkDevice, VkDeviceMemory memory, VkDe
     uint64_t memId = (uint64_t)memory;
     // Return a pointer into the per-memory shadow buffer (persistent mapping safe)
     auto it = g_icd.memoryShadows.find(memId);
-    if (it == g_icd.memoryShadows.end()) {
-        fprintf(stderr, "[ICD] MapMemory: no shadow for memory %llu!\n", memId);
-        return VK_ERROR_MEMORY_MAP_FAILED;
+    if (it == g_icd.memoryShadows.end() || !it->second.ptr) {
+        // Lazy shadow allocation: DEVICE_LOCAL memory may be mapped by DXVK
+        // (e.g., for readback or staging). Allocate shadow on first map.
+        if (it != g_icd.memoryShadows.end() && !it->second.ptr) {
+            VkDeviceSize sz = it->second.size;
+            void* shadow = VirtualAlloc(nullptr, (SIZE_T)sz,
+                MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            if (shadow) {
+                it->second.ptr = shadow;
+            } else {
+                icdDbg(("[ICD] MapMemory: lazy VirtualAlloc FAILED " + std::to_string(sz) + " bytes, mem=" + std::to_string(memId)).c_str());
+                return VK_ERROR_MEMORY_MAP_FAILED;
+            }
+        } else {
+            return VK_ERROR_MEMORY_MAP_FAILED;
+        }
     }
     VkDeviceSize actualSize = (size == VK_WHOLE_SIZE) ? (it->second.size - offset) : size;
     *ppData = (uint8_t*)it->second.ptr + offset;

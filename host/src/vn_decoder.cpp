@@ -1689,6 +1689,11 @@ void VnDecoder::handleBeginCommandBuffer(VnStreamReader& r) {
             }
         }
     }
+    // Clear per-CB rendering state — CB reset invalidates any active render pass.
+    // Without this, a stale cbIsSwapchain_ entry lets EndRendering call
+    // vkCmdEndRendering on a reset CB, crashing NVIDIA drivers.
+    cbIsSwapchain_.erase(cbId);
+
     vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo info{};
     info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -1939,7 +1944,15 @@ void VnDecoder::handleCmdEndRendering(VnStreamReader& r) {
     if (!activeRendering_) return;
     activeRendering_ = false;
 
-    vkCmdEndRendering(cb);
+    // SEH guard: NVIDIA driver crashes with NULL deref inside vkCmdEndRendering
+    // when command buffer state is inconsistent (e.g., BeginRendering params were
+    // silently rejected). Catch the crash to keep the host alive.
+    __try {
+        vkCmdEndRendering(cb);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        fprintf(stderr, "[Decoder] EndRendering: NVIDIA driver exception caught (cb=%p cbId=0x%llx), skipping\n",
+                (void*)cb, (unsigned long long)cbId);
+    }
     // DXVK sends its own vkCmdPipelineBarrier2 in the command stream to transition
     // the swapchain image COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR before QueuePresent.
     // Do NOT insert an extra barrier here — it causes double-transition → device lost.
