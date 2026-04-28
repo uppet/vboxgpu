@@ -296,8 +296,8 @@ void ClientSession::workerLoop() {
             cjCV_.notify_one();
         }
 
-        // 3. Acquire next swapchain image for the upcoming batch
-        decoder_.performDeferredAcquire();
+        // Acquire stays synchronous (guest needs imageIndex in response).
+        // Only readback wait is deferred — that's the Method-A win.
     }
 
     // Cleanup

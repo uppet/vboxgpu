@@ -3215,12 +3215,14 @@ void VnDecoder::flushPendingPresents() {
 
         lastPresentedImageIndex_ = presentIdx;
 
-        // Method-A pipeline: defer acquire + readback wait to after response send.
-        // This lets the host send the response sooner, overlapping GPU work with
-        // guest encoding of the next batch.
-        deferredAcquireScId_ = pp.scId;
+        // Acquire must stay synchronous: guest ICD uses imageIndex from the response
+        // for AcquireNextImageKHR, so currentImageIndex must be updated before send.
+        vkAcquireNextImageKHR(device_, it->second.swapchain, UINT64_MAX,
+                              VK_NULL_HANDLE, acquireFence_, &it->second.currentImageIndex);
+        vkWaitForFences(device_, 1, &acquireFence_, VK_TRUE, UINT64_MAX);
+        vkResetFences(device_, 1, &acquireFence_);
 
-        // Defer readback fence wait — will be completed by completeReadback()
+        // Method-A: defer only readback fence wait to after response send.
         rbReady_ = -1;
         deferredReadbackSlot_ = (readbackSubmitted_[prevSlot] && !noReadback_) ? prevSlot : -1;
 
@@ -3244,21 +3246,6 @@ void VnDecoder::completeReadback() {
     RT_LOG(currentSeqId_, "R", "frame=%u readback ready (deferred), age=%.2fms",
            readyFrameTiming_.frameId,
            (readyFrameTiming_.readbackUs - readyFrameTiming_.presentUs) / 1000.0);
-#endif
-}
-
-void VnDecoder::performDeferredAcquire() {
-    if (!deferredAcquireScId_) return;
-    auto it = swapchains_.find(deferredAcquireScId_);
-    deferredAcquireScId_ = 0;
-    if (it == swapchains_.end()) return;
-
-    vkAcquireNextImageKHR(device_, it->second.swapchain, UINT64_MAX,
-                          VK_NULL_HANDLE, acquireFence_, &it->second.currentImageIndex);
-    vkWaitForFences(device_, 1, &acquireFence_, VK_TRUE, UINT64_MAX);
-    vkResetFences(device_, 1, &acquireFence_);
-#ifdef VBOXGPU_VERBOSE
-    fprintf(stderr, "[Decoder] DeferredAcquire: -> %u\n", it->second.currentImageIndex);
 #endif
 }
 
