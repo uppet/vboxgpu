@@ -16,3 +16,11 @@ dumps/
 *.bmp
 nul
 __pycache__/
+tests/dx11_depth_test/test_env/
+tests/dx11_multi_blend/test_env/
+tests/dx11_rtt/test_env/
+tests/dx11_stencil_test/test_env/
+tests/UltraKill/
+automation_out/
+ROO_CODE_CONFIG.md
+*.txt.bak
