@@ -1275,20 +1275,6 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
         return;
     }
 
-    // Shader stages
-    uint32_t stageCount = fragMod ? 2 : 1;
-    VkPipelineShaderStageCreateInfo stages[2]{};
-    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-    stages[0].module = vertMod;
-    stages[0].pName = "main";
-    if (fragMod) {
-        stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-        stages[1].module = fragMod;
-        stages[1].pName = "main";
-    }
-
     // Use swapchain extent for viewport/scissor instead of DXVK's garbage values.
     // DXVK uses dynamic viewport state; the values in pipeline create info are uninitialized.
     uint32_t realW = vpWidth, realH = vpHeight;
@@ -1399,6 +1385,22 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
             }
         }
     }
+    // Read extra shader stages: TCS/TES/GS (appended — backward compat)
+    uint64_t tcsModuleId = 0, tesModuleId = 0, gsModuleId = 0;
+    uint32_t patchControlPoints = 0;
+    if (r.remaining() >= 4) {
+        uint32_t hasExtra = r.readU32();
+        if (hasExtra && r.remaining() >= 28) { // 3*8 + 1*4 = 28 bytes
+            tcsModuleId = r.readU64();
+            tesModuleId = r.readU64();
+            gsModuleId = r.readU64();
+            patchControlPoints = r.readU32();
+            fprintf(stderr, "[Decoder] CreatePipeline extra stages: tcs=%u tes=%u gs=%u patchCP=%u\n",
+                    (unsigned)tcsModuleId, (unsigned)tesModuleId,
+                    (unsigned)gsModuleId, patchControlPoints);
+        }
+    }
+
     dynStates.erase(std::remove_if(dynStates.begin(), dynStates.end(),
         [](VkDynamicState state) {
             return state == VK_DYNAMIC_STATE_DEPTH_BOUNDS;
@@ -1415,6 +1417,52 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
             dynStates.push_back(VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE);
         if (!hasState(VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE))
             dynStates.push_back(VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE);
+    }
+
+    // Build shader stages — up to 5: VS + TCS + TES + GS + FS
+    // (Must be after extra stage IDs are read from stream above)
+    VkPipelineShaderStageCreateInfo stages[5]{};
+    uint32_t stageCount = 0;
+    // Vertex shader (always present)
+    stages[stageCount].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[stageCount].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[stageCount].module = vertMod;
+    stages[stageCount].pName = "main";
+    stageCount++;
+    // Tessellation Control Shader (optional)
+    VkShaderModule tcsMod = tcsModuleId ? lookup(shaderModules_, tcsModuleId) : VK_NULL_HANDLE;
+    if (tcsMod) {
+        stages[stageCount].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[stageCount].stage = VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+        stages[stageCount].module = tcsMod;
+        stages[stageCount].pName = "main";
+        stageCount++;
+    }
+    // Tessellation Evaluation Shader (optional)
+    VkShaderModule tesMod = tesModuleId ? lookup(shaderModules_, tesModuleId) : VK_NULL_HANDLE;
+    if (tesMod) {
+        stages[stageCount].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[stageCount].stage = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+        stages[stageCount].module = tesMod;
+        stages[stageCount].pName = "main";
+        stageCount++;
+    }
+    // Geometry Shader (optional)
+    VkShaderModule gsMod = gsModuleId ? lookup(shaderModules_, gsModuleId) : VK_NULL_HANDLE;
+    if (gsMod) {
+        stages[stageCount].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[stageCount].stage = VK_SHADER_STAGE_GEOMETRY_BIT;
+        stages[stageCount].module = gsMod;
+        stages[stageCount].pName = "main";
+        stageCount++;
+    }
+    // Fragment shader (optional)
+    if (fragMod) {
+        stages[stageCount].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[stageCount].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[stageCount].module = fragMod;
+        stages[stageCount].pName = "main";
+        stageCount++;
     }
 
     fprintf(stderr, "[Decoder] CreatePipeline vtxInput: %zu bindings, %zu attrs depthFmt=%u blend=%d (en=%u src=%u dst=%u op=%u mask=0x%x) topo=%u cull=%u front=%u dt=%u dw=%u ste=%u rastDiscard=%u dyn=%zu dynVals=[",
@@ -1443,6 +1491,12 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
     inputAsm.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
     inputAsm.topology = static_cast<VkPrimitiveTopology>(topology);
     inputAsm.primitiveRestartEnable = primitiveRestartEnable;
+
+    // Tessellation state (only when TCS+TES are present)
+    bool hasTessellation = (tcsMod && tesMod);
+    VkPipelineTessellationStateCreateInfo tessState{};
+    tessState.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+    tessState.patchControlPoints = patchControlPoints ? patchControlPoints : 3; // default 3 (triangles)
 
     // Use dynamic viewport/scissor — DXVK sends garbage viewport values
     // because it uses VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT.
@@ -1521,6 +1575,7 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
     pInfo.pStages = stages;
     pInfo.pVertexInputState = &vertexInput;
     pInfo.pInputAssemblyState = &inputAsm;
+    pInfo.pTessellationState = hasTessellation ? &tessState : nullptr;
     pInfo.pViewportState = &vpState;
     pInfo.pRasterizationState = &raster;
     pInfo.pMultisampleState = &ms;
@@ -1548,8 +1603,8 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
         pInfo.subpass = 0;
     }
 
-    fprintf(stderr, "[Decoder] CreatePipeline PRE: layout=%p vertMod=%p fragMod=%p dynState=%p raster=%p\n",
-            (void*)pInfo.layout, (void*)(stages[0].module), (void*)(stageCount>1?stages[1].module:VK_NULL_HANDLE),
+    fprintf(stderr, "[Decoder] CreatePipeline PRE: layout=%p stages=%u tess=%d gs=%d dynState=%p raster=%p\n",
+            (void*)pInfo.layout, stageCount, (int)hasTessellation, (gsMod!=VK_NULL_HANDLE),
             (void*)pInfo.pDynamicState, (void*)pInfo.pRasterizationState);
     VkPipeline pipeline;
     auto _pipeT0 = rtNowUs();

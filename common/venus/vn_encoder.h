@@ -135,6 +135,14 @@ public:
         StencilOpState stencilBack;
     };
 
+    // Extra shader stages for tessellation / geometry pipelines
+    struct ExtraStages {
+        uint64_t tcsModuleId;      // Tessellation Control Shader (0 = none)
+        uint64_t tesModuleId;      // Tessellation Evaluation Shader (0 = none)
+        uint64_t gsModuleId;       // Geometry Shader (0 = none)
+        uint32_t patchControlPoints; // Only used when TCS+TES present (typically 3 or 4)
+    };
+
     // Legacy overload (no vertex input) for guest_sim / host_cmd compatibility
     void cmdCreateGraphicsPipeline(uint64_t deviceId, uint64_t pipelineId,
                                    uint64_t renderPassId, uint64_t layoutId,
@@ -155,7 +163,8 @@ public:
                                    uint32_t attributeCount, const VertexAttribute* attributes,
                                    uint32_t depthAttachmentFormat = 0,
                                    const BlendAttachment* blendAtt = nullptr,
-                                   const PipelineState* pipelineState = nullptr) {
+                                   const PipelineState* pipelineState = nullptr,
+                                   const ExtraStages* extraStages = nullptr) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCreateGraphicsPipelines);
         w_.writeU64(deviceId);
@@ -229,6 +238,16 @@ public:
             w_.writeU32(pipelineState->stencilBack.compareMask);
             w_.writeU32(pipelineState->stencilBack.writeMask);
             w_.writeU32(pipelineState->stencilBack.reference);
+        }
+        // Extra shader stages: TCS/TES/GS (appended for backward compat — decoder checks remaining)
+        uint32_t hasExtra = (extraStages &&
+            (extraStages->tcsModuleId || extraStages->tesModuleId || extraStages->gsModuleId)) ? 1 : 0;
+        w_.writeU32(hasExtra);
+        if (hasExtra) {
+            w_.writeU64(extraStages->tcsModuleId);
+            w_.writeU64(extraStages->tesModuleId);
+            w_.writeU64(extraStages->gsModuleId);
+            w_.writeU32(extraStages->patchControlPoints);
         }
         w_.endCommand(off);
     }

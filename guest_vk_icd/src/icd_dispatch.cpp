@@ -1713,6 +1713,7 @@ static VkResult VKAPI_CALL icd_vkCreateGraphicsPipelines(
                 (void*)pInfos[i].pColorBlendState);
 
         uint64_t vertMod = 0, fragMod = 0;
+        uint64_t tcsMod = 0, tesMod = 0, gsMod = 0;
         if (pInfos[i].pStages) {
             for (uint32_t s = 0; s < pInfos[i].stageCount; s++) {
                 uint64_t mod = (uint64_t)pInfos[i].pStages[s].module;
@@ -1721,8 +1722,9 @@ static VkResult VKAPI_CALL icd_vkCreateGraphicsPipelines(
                 // even when module is non-null (the module may be an empty placeholder).
                 // Always check pNext for real SPIR-V code.
                 auto* smci = findShaderModuleCreateInfo(pInfos[i].pStages[s].pNext);
-                fprintf(stderr, "[ICD] Pipeline stage %u: mod=%llu pNext=%p smci=%p codeSize=%zu\n",
-                        s, (unsigned long long)mod, pInfos[i].pStages[s].pNext,
+                fprintf(stderr, "[ICD] Pipeline stage %u: mod=%llu stage=0x%x pNext=%p smci=%p codeSize=%zu\n",
+                        s, (unsigned long long)mod, pInfos[i].pStages[s].stage,
+                        pInfos[i].pStages[s].pNext,
                         (void*)smci, smci ? smci->codeSize : 0);
                 if (smci && smci->codeSize > 4) {
                     // pNext has real SPIR-V — create a proper shader module
@@ -1736,6 +1738,12 @@ static VkResult VKAPI_CALL icd_vkCreateGraphicsPipelines(
                     vertMod = mod;
                 if (pInfos[i].pStages[s].stage == VK_SHADER_STAGE_FRAGMENT_BIT)
                     fragMod = mod;
+                if (pInfos[i].pStages[s].stage == VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT)
+                    tcsMod = mod;
+                if (pInfos[i].pStages[s].stage == VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT)
+                    tesMod = mod;
+                if (pInfos[i].pStages[s].stage == VK_SHADER_STAGE_GEOMETRY_BIT)
+                    gsMod = mod;
             }
         }
 
@@ -1843,12 +1851,28 @@ static VkResult VKAPI_CALL icd_vkCreateGraphicsPipelines(
         pipelineState.dynamicStateCount = (uint32_t)dynamicStates.size();
         pipelineState.dynamicStates = dynamicStates.data();
 
+        // Extract tessellation / geometry extra stages
+        VnEncoder::ExtraStages extraStages{};
+        extraStages.tcsModuleId = tcsMod;
+        extraStages.tesModuleId = tesMod;
+        extraStages.gsModuleId = gsMod;
+        if (pInfos[i].pTessellationState && tcsMod && tesMod) {
+            extraStages.patchControlPoints = pInfos[i].pTessellationState->patchControlPoints;
+        }
+        const VnEncoder::ExtraStages* pExtra = (tcsMod || tesMod || gsMod) ? &extraStages : nullptr;
+
+        if (tcsMod || tesMod || gsMod) {
+            fprintf(stderr, "[ICD] Pipeline extra stages: tcs=%llu tes=%llu gs=%llu patchCP=%u\n",
+                    (unsigned long long)tcsMod, (unsigned long long)tesMod,
+                    (unsigned long long)gsMod, extraStages.patchControlPoints);
+        }
+
         g_icd.encoder.cmdCreateGraphicsPipeline(1, id,
             (uint64_t)pInfos[i].renderPass, (uint64_t)pInfos[i].layout,
             vertMod, fragMod, w, h, colorFmt,
             (uint32_t)vtxBindings.size(), vtxBindings.data(),
             (uint32_t)vtxAttrs.size(), vtxAttrs.data(), depthFmt, pBlend,
-            &pipelineState);
+            &pipelineState, pExtra);
     }
     return VK_SUCCESS;
 }
