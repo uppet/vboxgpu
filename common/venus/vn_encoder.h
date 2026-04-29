@@ -258,7 +258,7 @@ public:
                         uint32_t imageType, uint32_t format,
                         uint32_t width, uint32_t height, uint32_t depth,
                         uint32_t mipLevels, uint32_t arrayLayers, uint32_t samples,
-                        uint32_t tiling, uint32_t usage) {
+                        uint32_t tiling, uint32_t usage, uint32_t flags = 0) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_vkCreateImage);
         w_.writeU64(deviceId); w_.writeU64(imageId);
@@ -266,6 +266,7 @@ public:
         w_.writeU32(width); w_.writeU32(height); w_.writeU32(depth);
         w_.writeU32(mipLevels); w_.writeU32(arrayLayers); w_.writeU32(samples);
         w_.writeU32(tiling); w_.writeU32(usage);
+        w_.writeU32(flags); // appended: VkImageCreateFlags (CUBE_COMPATIBLE etc.)
         w_.endCommand(off);
     }
 
@@ -812,6 +813,49 @@ public:
         w_.writeU64(offset);
         w_.writeU32(drawCount);
         w_.writeU32(stride);
+        w_.endCommand(off);
+    }
+
+    void cmdDispatch(uint64_t cmdBufferId, uint32_t groupCountX,
+                     uint32_t groupCountY, uint32_t groupCountZ) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdDispatch);
+        w_.writeU64(cmdBufferId);
+        w_.writeU32(groupCountX);
+        w_.writeU32(groupCountY);
+        w_.writeU32(groupCountZ);
+        w_.endCommand(off);
+    }
+
+    void cmdDispatchIndirect(uint64_t cmdBufferId, uint64_t bufferId, uint64_t offset) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdDispatchIndirect);
+        w_.writeU64(cmdBufferId);
+        w_.writeU64(bufferId);
+        w_.writeU64(offset);
+        w_.endCommand(off);
+    }
+
+    void cmdCreateComputePipeline(uint64_t deviceId, uint64_t pipelineId,
+                                  uint64_t layoutId, uint64_t shaderModuleId) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCreateComputePipelines);
+        w_.writeU64(deviceId);
+        w_.writeU64(pipelineId);
+        w_.writeU64(layoutId);
+        w_.writeU64(shaderModuleId);
+        w_.endCommand(off);
+    }
+
+    void cmdFillBuffer(uint64_t cmdBufferId, uint64_t bufferId,
+                       uint64_t offset, uint64_t size, uint32_t data) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_vkCmdFillBuffer);
+        w_.writeU64(cmdBufferId);
+        w_.writeU64(bufferId);
+        w_.writeU64(offset);
+        w_.writeU64(size);
+        w_.writeU32(data);
         w_.endCommand(off);
     }
 

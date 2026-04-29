@@ -209,6 +209,7 @@ void VnDecoder::dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdS
     case VN_CMD_vkCreateDescriptorSetLayout: handleCreateDescriptorSetLayout(reader, cmdSize); break;
     case VN_CMD_vkCreatePipelineLayout:   handleCreatePipelineLayout(reader); break;
     case VN_CMD_vkCreateGraphicsPipelines:handleCreateGraphicsPipeline(reader); break;
+    case VN_CMD_vkCreateComputePipelines:handleCreateComputePipeline(reader); break;
     case VN_CMD_vkCreateFramebuffer:      handleCreateFramebuffer(reader); break;
     case VN_CMD_vkCreateCommandPool:      handleCreateCommandPool(reader); break;
     case VN_CMD_vkAllocateCommandBuffers: handleAllocateCommandBuffers(reader); break;
@@ -252,8 +253,11 @@ void VnDecoder::dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdS
     case VN_CMD_BRIDGE_CopyBufToImgInline: handleCopyBufToImgInline(reader); break;
     case VN_CMD_vkCmdUpdateBuffer:        handleCmdUpdateBuffer(reader); break;
     case VN_CMD_vkCmdDraw:                handleCmdDraw(reader); break;
+    case VN_CMD_vkCmdDispatch:           handleCmdDispatch(reader); break;
+    case VN_CMD_vkCmdDispatchIndirect:   handleCmdDispatchIndirect(reader); break;
+    case VN_CMD_vkCmdFillBuffer:         handleCmdFillBuffer(reader); break;
     case VN_CMD_vkCmdPushConstants:      handleCmdPushConstants(reader); break;
-    case VN_CMD_vkCreateImage:           handleCreateImage(reader); break;
+    case VN_CMD_vkCreateImage:           handleCreateImage(reader, cmdSize); break;
     case VN_CMD_vkAllocateMemory:        handleAllocateMemory(reader); break;
     case VN_CMD_vkBindImageMemory:       handleBindImageMemory(reader); break;
     case VN_CMD_vkCreateImageView:       handleCreateImageView(reader); break;
@@ -497,13 +501,18 @@ void VnDecoder::handleCreatePipelineLayout(VnStreamReader& r) {
 
 // --- GPU Resource handlers ---
 
-void VnDecoder::handleCreateImage(VnStreamReader& r) {
+void VnDecoder::handleCreateImage(VnStreamReader& r, uint32_t cmdSize) {
     uint64_t deviceId = r.readU64();
     uint64_t imageId = r.readU64();
     uint32_t imageType = r.readU32(), format = r.readU32();
     uint32_t w = r.readU32(), h = r.readU32(), d = r.readU32();
     uint32_t mipLevels = r.readU32(), arrayLayers = r.readU32(), samples = r.readU32();
     uint32_t tiling = r.readU32(), usage = r.readU32();
+    // flags field appended for cubemap support — backward compat: old streams may lack it
+    // Old cmdSize: 8 (header) + 16 (two u64) + 48 (twelve u32) = 72
+    // New cmdSize: 72 + 4 (flags) = 76
+    uint32_t guestFlags = 0;
+    if (cmdSize >= 76) guestFlags = r.readU32();
 
     VkImageCreateInfo ci{};
     ci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -514,13 +523,13 @@ void VnDecoder::handleCreateImage(VnStreamReader& r) {
     ci.samples = static_cast<VkSampleCountFlagBits>(samples);
     ci.tiling = static_cast<VkImageTiling>(tiling);
     ci.usage = usage;
-    ci.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT; // allow views with compatible formats
+    ci.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | guestFlags; // merge guest flags (CUBE_COMPATIBLE etc.)
     ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
     VkImage image;
     VkResult vr = vkCreateImage(device_, &ci, nullptr, &image);
-    fprintf(stderr, "[Decoder] CreateImage: id=%llu %ux%u fmt=%u usage=0x%x mip=%u result=%d\n",
-            (unsigned long long)imageId, w, h, format, usage, mipLevels, (int)vr);
+    fprintf(stderr, "[Decoder] CreateImage: id=%llu %ux%u fmt=%u usage=0x%x mip=%u flags=0x%x result=%d\n",
+            (unsigned long long)imageId, w, h, format, usage, mipLevels, ci.flags, (int)vr);
     if (vr != VK_SUCCESS) return;
     store(images_, imageId, image);
     imageFormats_[imageId] = static_cast<VkFormat>(format);
@@ -1610,6 +1619,46 @@ void VnDecoder::handleCreateGraphicsPipeline(VnStreamReader& r) {
     auto _pipeT0 = rtNowUs();
     VkResult vr = vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pInfo, nullptr, &pipeline);
     fprintf(stderr, "[Decoder] CreatePipeline result=%d time=%.2fms\n", (int)vr, (rtNowUs()-_pipeT0)/1000.0);
+    if (vr != VK_SUCCESS) {
+        store(pipelines_, pipelineId, (VkPipeline)VK_NULL_HANDLE);
+        return;
+    }
+    store(pipelines_, pipelineId, pipeline);
+}
+
+void VnDecoder::handleCreateComputePipeline(VnStreamReader& r) {
+    uint64_t deviceId = r.readU64();
+    uint64_t pipelineId = r.readU64();
+    uint64_t layoutId = r.readU64();
+    uint64_t shaderModuleId = r.readU64();
+
+    VkShaderModule shaderMod = lookup(shaderModules_, shaderModuleId);
+    VkPipelineLayout layout = lookup(pipelineLayouts_, layoutId);
+
+    fprintf(stderr, "[Decoder] CreateComputePipeline: id=%llu layout=%llu shader=%llu -> mod=%p layout=%p\n",
+            (unsigned long long)pipelineId, (unsigned long long)layoutId,
+            (unsigned long long)shaderModuleId, (void*)shaderMod, (void*)layout);
+
+    if (!shaderMod || !layout) {
+        fprintf(stderr, "[Decoder] CreateComputePipeline: missing shader or layout, skipping\n");
+        store(pipelines_, pipelineId, (VkPipeline)VK_NULL_HANDLE);
+        return;
+    }
+
+    VkPipelineShaderStageCreateInfo stageInfo{};
+    stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    stageInfo.module = shaderMod;
+    stageInfo.pName = "main";
+
+    VkComputePipelineCreateInfo pInfo{};
+    pInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pInfo.stage = stageInfo;
+    pInfo.layout = layout;
+
+    VkPipeline pipeline;
+    VkResult vr = vkCreateComputePipelines(device_, VK_NULL_HANDLE, 1, &pInfo, nullptr, &pipeline);
+    fprintf(stderr, "[Decoder] CreateComputePipeline result=%d\n", (int)vr);
     if (vr != VK_SUCCESS) {
         store(pipelines_, pipelineId, (VkPipeline)VK_NULL_HANDLE);
         return;
@@ -2724,6 +2773,38 @@ void VnDecoder::handleCmdDraw(VnStreamReader& r) {
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     if (!cb || !activeRendering_) return;
     vkCmdDraw(cb, vertexCount, instanceCount, firstVertex, firstInstance);
+}
+
+void VnDecoder::handleCmdDispatch(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint32_t groupCountX = r.readU32();
+    uint32_t groupCountY = r.readU32();
+    uint32_t groupCountZ = r.readU32();
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    if (!cb) return;
+    vkCmdDispatch(cb, groupCountX, groupCountY, groupCountZ);
+}
+
+void VnDecoder::handleCmdDispatchIndirect(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint64_t bufId = r.readU64();
+    uint64_t offset = r.readU64();
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    VkBuffer buf = lookup(buffers_, bufId);
+    if (!cb || !buf) return;
+    vkCmdDispatchIndirect(cb, buf, offset);
+}
+
+void VnDecoder::handleCmdFillBuffer(VnStreamReader& r) {
+    uint64_t cbId = r.readU64();
+    uint64_t bufId = r.readU64();
+    uint64_t offset = r.readU64();
+    uint64_t size = r.readU64();
+    uint32_t data = r.readU32();
+    VkCommandBuffer cb = lookup(commandBuffers_, cbId);
+    VkBuffer buf = lookup(buffers_, bufId);
+    if (!cb || !buf) return;
+    vkCmdFillBuffer(cb, buf, offset, size, data);
 }
 
 void VnDecoder::handleCmdPushConstants(VnStreamReader& r) {

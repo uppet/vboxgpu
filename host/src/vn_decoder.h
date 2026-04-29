@@ -99,6 +99,7 @@ private:
     void handleCreateDescriptorSetLayout(VnStreamReader& r, uint32_t cmdSize);
     void handleCreatePipelineLayout(VnStreamReader& r);
     void handleCreateGraphicsPipeline(VnStreamReader& r);
+    void handleCreateComputePipeline(VnStreamReader& r);
     void handleCreateFramebuffer(VnStreamReader& r);
     void handleCreateCommandPool(VnStreamReader& r);
     void handleAllocateCommandBuffers(VnStreamReader& r);
@@ -113,13 +114,16 @@ private:
     void handleCmdSetViewport(VnStreamReader& r);
     void handleCmdSetScissor(VnStreamReader& r);
     void handleCmdDraw(VnStreamReader& r);
+    void handleCmdDispatch(VnStreamReader& r);
+    void handleCmdDispatchIndirect(VnStreamReader& r);
+    void handleCmdFillBuffer(VnStreamReader& r);
     void handleCmdPushConstants(VnStreamReader& r);
     void handleCreateSemaphore(VnStreamReader& r);
     void handleCreateFence(VnStreamReader& r);
     void handleQueueSubmit(VnStreamReader& r);
     void handleWaitForFences(VnStreamReader& r);
     void handleResetFences(VnStreamReader& r);
-    void handleCreateImage(VnStreamReader& r);
+    void handleCreateImage(VnStreamReader& r, uint32_t cmdSize = 0);
     void handleAllocateMemory(VnStreamReader& r);
     void handleBindImageMemory(VnStreamReader& r);
     void handleCreateImageView(VnStreamReader& r);

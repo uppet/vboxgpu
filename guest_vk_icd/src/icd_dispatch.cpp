@@ -2363,7 +2363,7 @@ static VkResult VKAPI_CALL icd_vkCreateImage(VkDevice, const VkImageCreateInfo* 
         pInfo->imageType, pInfo->format,
         pInfo->extent.width, pInfo->extent.height, pInfo->extent.depth,
         pInfo->mipLevels, pInfo->arrayLayers, pInfo->samples,
-        pInfo->tiling, pInfo->usage);
+        pInfo->tiling, pInfo->usage, pInfo->flags);
     return VK_SUCCESS;
 }
 static void VKAPI_CALL icd_vkDestroyImage(VkDevice, VkImage v, const VkAllocationCallbacks*) {
@@ -3002,13 +3002,14 @@ static void VKAPI_CALL icd_vkCmdPushConstants(VkCommandBuffer cb, VkPipelineLayo
     VkShaderStageFlags stageFlags, uint32_t offset, uint32_t size, const void* pValues) {
     g_icd.encoder.cmdPushConstants(toId(cb), (uint64_t)layout, stageFlags, offset, size, pValues);
 }
-static void VKAPI_CALL icd_vkCmdDispatch(VkCommandBuffer, uint32_t gx, uint32_t gy, uint32_t gz) {
-    static int dCnt = 0;
-    if (dCnt++ < 5) { char b[96]; snprintf(b, sizeof(b), "[ICD] NOOP Dispatch %ux%ux%u (total=%d)", gx, gy, gz, dCnt); icdDbg(b); }
+static void VKAPI_CALL icd_vkCmdDispatch(VkCommandBuffer cb, uint32_t gx, uint32_t gy, uint32_t gz) {
+    g_icd.encoder.cmdDispatch(toId(cb), gx, gy, gz);
 }
-static void VKAPI_CALL icd_vkCmdFillBuffer(VkCommandBuffer, VkBuffer buf, VkDeviceSize off, VkDeviceSize sz, uint32_t data) {
-    static int fCnt = 0;
-    if (fCnt++ < 5) { char b[128]; snprintf(b, sizeof(b), "[ICD] NOOP FillBuffer buf=%llu off=%llu sz=%llu data=0x%x (total=%d)", (unsigned long long)(uint64_t)buf, (unsigned long long)off, (unsigned long long)sz, data, fCnt); icdDbg(b); }
+static void VKAPI_CALL icd_vkCmdDispatchIndirect(VkCommandBuffer cb, VkBuffer buffer, VkDeviceSize offset) {
+    g_icd.encoder.cmdDispatchIndirect(toId(cb), (uint64_t)buffer, offset);
+}
+static void VKAPI_CALL icd_vkCmdFillBuffer(VkCommandBuffer cb, VkBuffer buf, VkDeviceSize off, VkDeviceSize sz, uint32_t data) {
+    g_icd.encoder.cmdFillBuffer(toId(cb), (uint64_t)buf, off, sz, data);
 }
 static void VKAPI_CALL icd_vkCmdUpdateBuffer(VkCommandBuffer cb, VkBuffer buf, VkDeviceSize offset, VkDeviceSize dataSize, const void* pData) {
     g_icd.encoder.cmdUpdateBuffer(toId(cb), (uint64_t)buf, offset, dataSize, pData);
@@ -3076,9 +3077,14 @@ static VkResult VKAPI_CALL icd_vkGetQueryPoolResults(VkDevice, VkQueryPool, uint
 }
 static void VKAPI_CALL icd_vkResetQueryPool(VkDevice, VkQueryPool, uint32_t, uint32_t) {}
 
-static VkResult VKAPI_CALL icd_vkCreateComputePipelines(VkDevice, VkPipelineCache, uint32_t count, const VkComputePipelineCreateInfo*,
+static VkResult VKAPI_CALL icd_vkCreateComputePipelines(VkDevice, VkPipelineCache, uint32_t count, const VkComputePipelineCreateInfo* pInfos,
     const VkAllocationCallbacks*, VkPipeline* p) {
-    for (uint32_t i = 0; i < count; i++) p[i] = (VkPipeline)g_icd.handles.alloc();
+    for (uint32_t i = 0; i < count; i++) {
+        uint64_t id = g_icd.handles.alloc();
+        p[i] = (VkPipeline)id;
+        g_icd.encoder.cmdCreateComputePipeline(1, id,
+            (uint64_t)pInfos[i].layout, (uint64_t)pInfos[i].stage.module);
+    }
     return VK_SUCCESS;
 }
 
@@ -3398,6 +3404,7 @@ static const FuncEntry g_funcTable[] = {
     ENTRY(vkCmdSetBlendConstants),
     ENTRY(vkCmdPushConstants),
     ENTRY(vkCmdDispatch),
+    ENTRY(vkCmdDispatchIndirect),
     ENTRY(vkCmdFillBuffer),
     ENTRY(vkCmdUpdateBuffer),
     ENTRY(vkCmdResolveImage),

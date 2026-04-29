@@ -55,6 +55,8 @@ CMD_NAMES = {
     0x1013: "CmdCopyImage",
     0x1014: "CmdBlitImage", 0x1015: "CmdSetPrimitiveTopology",
     0x1016: "CmdResolveImage",
+    0x1017: "CmdDispatch", 0x1018: "CmdDispatchIndirect",
+    66: "CreateComputePipelines", 0x1019: "CmdFillBuffer",
     0x10000: "BRIDGE_CreateSwapchain", 0x10001: "BRIDGE_AcquireNextImage",
     0x10002: "BRIDGE_QueuePresent", 0x10003: "BRIDGE_WriteMemory",
     0x1FFFF: "EndOfStream",
@@ -203,6 +205,18 @@ def disasm_payload(cmd, data, off, size, spirv_dis=False, spirv_dir=None):
             return f"cb=0x{cb:x} rp={rp} fb={fb} {w}x{h} clear=({cr:.1f},{cg:.1f},{cb_:.1f},{ca:.1f})"
         elif cmd == 96:  # CmdEndRenderPass
             return f"cb=0x{rd64():x}"
+        elif cmd == 0x1017:  # CmdDispatch
+            cb = rd64(); gx = rd32(); gy = rd32(); gz = rd32()
+            return f"cb=0x{cb:x} groups=({gx},{gy},{gz})"
+        elif cmd == 0x1018:  # CmdDispatchIndirect
+            cb = rd64(); buf = rd64(); off = rd64()
+            return f"cb=0x{cb:x} buffer={buf} offset={off}"
+        elif cmd == 66:  # CreateComputePipelines
+            dev = rd64(); pid = rd64(); lay = rd64(); sm = rd64()
+            return f"dev={dev} id={pid} layout={lay} shader={sm}"
+        elif cmd == 0x1019:  # CmdFillBuffer
+            cb = rd64(); buf = rd64(); off = rd64(); sz = rd64(); data = rd32()
+            return f"cb=0x{cb:x} buffer={buf} offset={off} size={sz} data=0x{data:08x}"
     except:
         pass
     return f"(payload {size-8} bytes)"

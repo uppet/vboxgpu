@@ -105,6 +105,10 @@ enum VnCommandType : uint32_t {
     VN_CMD_vkCmdBlitImage                 = 0x1014,
     VN_CMD_vkCmdSetPrimitiveTopology      = 0x1015,
     VN_CMD_vkCmdResolveImage              = 0x1016,
+    VN_CMD_vkCmdDispatch                  = 0x1017,
+    VN_CMD_vkCmdDispatchIndirect          = 0x1018,
+    VN_CMD_vkCreateComputePipelines       = 66,    // Venus standard
+    VN_CMD_vkCmdFillBuffer                = 0x1019,
 
     // Extension: swapchain (handled specially by host)
     VN_CMD_BRIDGE_CreateSwapchain          = 0x10000,
