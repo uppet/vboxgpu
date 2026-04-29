@@ -1909,6 +1909,16 @@ void VnDecoder::handleCmdBeginRendering(VnStreamReader& r) {
     // Removed — DXVK sets viewport/scissor via dynamic state commands
 }
 
+// Separate function for SEH: MSVC forbids __try in functions with C++ object unwinding.
+static void safeEndRendering(VkCommandBuffer cb, uint64_t cbId) {
+    __try {
+        vkCmdEndRendering(cb);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        fprintf(stderr, "[Decoder] EndRendering: NVIDIA driver exception caught (cb=%p cbId=0x%llx), skipping\n",
+                (void*)cb, (unsigned long long)cbId);
+    }
+}
+
 void VnDecoder::handleCmdEndRendering(VnStreamReader& r) {
     uint64_t cbId = r.readU64();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
@@ -1934,15 +1944,7 @@ void VnDecoder::handleCmdEndRendering(VnStreamReader& r) {
     if (!activeRendering_) return;
     activeRendering_ = false;
 
-    // SEH guard: NVIDIA driver crashes with NULL deref inside vkCmdEndRendering
-    // when command buffer state is inconsistent (e.g., BeginRendering params were
-    // silently rejected). Catch the crash to keep the host alive.
-    __try {
-        vkCmdEndRendering(cb);
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        fprintf(stderr, "[Decoder] EndRendering: NVIDIA driver exception caught (cb=%p cbId=0x%llx), skipping\n",
-                (void*)cb, (unsigned long long)cbId);
-    }
+    safeEndRendering(cb, cbId);
     // DXVK sends its own vkCmdPipelineBarrier2 in the command stream to transition
     // the swapchain image COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR before QueuePresent.
     // Do NOT insert an extra barrier here — it causes double-transition → device lost.
