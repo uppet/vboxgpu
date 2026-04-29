@@ -1492,20 +1492,35 @@ static VkResult VKAPI_CALL icd_vkAcquireNextImageKHR(
     // Async protocol with bounded in-flight: allow up to 2 present batches in the
     // pipeline before blocking. This overlaps guest encoding with host GPU execution
     // while keeping display latency bounded (~2 frames).
+    // NOTE: Disabled in Release due to stability issues (C++ exception in DXVK).
+    // TODO: investigate Release-specific race condition in async protocol.
+#ifdef _DEBUG
     constexpr size_t MAX_IN_FLIGHT = 2;
     if (g_icd.firstPresented_) {
         std::unique_lock<std::mutex> lock(g_icd.acquireMutex_);
-        // Wait with timeout — if recv thread exits (disconnect), we must not block forever
         g_icd.acquireCV_.wait_for(lock, std::chrono::milliseconds(100), [=] {
-            if (!g_icd.recvRunning_) return true; // recv thread exited → don't block
+            if (!g_icd.recvRunning_) return true;
             std::lock_guard<std::mutex> ql(g_icd.pendingQueueMutex_);
             return g_icd.pendingResponseQueue_.size() < MAX_IN_FLIGHT;
         });
     }
-    // Return rotating index — host uses its own currentImageIndex for rendering
     static uint32_t nextIdx = 0;
     *pIndex = nextIdx;
     nextIdx = (nextIdx + 1) % g_icd.swapchainImageCount;
+#else
+    // Release: use blocking protocol (stable)
+    if (!g_icd.firstPresented_) {
+        *pIndex = 0;
+        return VK_SUCCESS;
+    }
+    {
+        std::unique_lock<std::mutex> lock(g_icd.acquireMutex_);
+        g_icd.acquireCV_.wait_for(lock, std::chrono::milliseconds(5000),
+            []{ return g_icd.imageIndexReady_; });
+        *pIndex = g_icd.currentImageIndex;
+        g_icd.imageIndexReady_ = false;
+    }
+#endif
     // Clear per-frame buffer flush dedup set
     {
         std::lock_guard<std::mutex> lk(g_icd.flushedBuffersMutex_);
