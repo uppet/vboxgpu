@@ -54,10 +54,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - WriteMemory UAF 修复（readBytes 同步拷贝，不存储 batch buffer 指针）
 - 6 项资源泄漏修复（memoryShadows/fencePool/bdaRecorded 等）
 
-当前状态（M1.6+ 花屏修复完成）：
+当前状态（M1.6+ Heaven 初步对接完成）：
 - **SortTheCourt（Unity 5.3, 32-bit）Host 窗口 + Guest 回传 60 FPS 可玩** ✓
 - **UltraKill（Unity, 64-bit）菜单画面干净，Logo video 正常，实际游玩 ~20 FPS** ✓
-- 花屏根因已修复：GetImageMemoryRequirements 从固定 4MB 改为按实际尺寸计算
+- **Heaven Benchmark 4.0（Unigine, 32-bit DX11）3D 场景可渲染，有瑕疵** ✓
+- 花屏根因已修复：GetImageMemoryRequirements 行对齐 + 2x headroom + 32KB minimum
+- vkCmdResolveImage 全链路实现（MSAA resolve）
+- Method-A 流水线化：readback wait 延迟到 response send 之后
+- 异步协议：AcquireNextImage 非阻塞（MAX_IN_FLIGHT=2），消除协议层 FIFO
+- DEVICE_LOCAL 内存延迟 shadow 分配（32-bit 进程地址空间保护）
+- EndRendering SEH 保护（NVIDIA driver null deref 防御）
 - 既有测试用例全部通过（dx11_triangle, dx11_depth_test, dx11_multi_blend）
 
 ## 性能状态（重要）
@@ -78,17 +84,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 M1.7 / 后续目标：
 
-性能优化：
-- **decode/GPU 流水线化（Method-A）**：当前 host 串行处理 batch（recv→decode→GPU→readback→send），GPU 和 CPU 互相等待。双缓冲流水线：decode batch N+1 同时 GPU 执行 batch N，预期提升 30-50% FPS
-- **BDA patching 按需 skip**：本机运行时 liveBdaToReplayBda_ 中 live==replay，所有 BDA scan 写入值等于原值。检测此条件后整个 BDA scan 可跳过
-- Mapped memory 增量传输（dirty tracking，当前全量 flush 可以满足正确性）
-
-功能完善：
+渲染特性补全（Heaven 兼容性）：
+- **Tessellation shader 支持**（最高优先级）：pipeline 创建传递 TCS/TES 阶段 + VkPipelineTessellationStateCreateInfo。Heaven 地面 displacement mapping 依赖此功能
+- **Geometry shader pipeline 阶段**：pipeline 创建传递 GS 阶段。Cubemap 分层渲染等场景需要
+- **Cubemap image view 验证**：确认 VK_IMAGE_VIEW_TYPE_CUBE 正确创建和采样。金属材质环境反射依赖
+- **Compute shader (vkCmdDispatch) 转发**：后处理效果、粒子系统等需要
+- ~~Mipmap 支持~~ ✓（全链路已完整）
+- ~~vkCmdResolveImage (MSAA)~~ ✓（已实现）
 - ~~Stencil test 支持~~ ✓（已实现全链路）
-- ~~多 Render Target (MRT)~~ ✓（安全命令已实现，需 3D 场景验证）
-- Mipmap 支持
-- Compute shader (vkCmdDispatch) 转发
-- 更多游戏兼容性测试（3D 场景验证）
+- ~~多 Render Target (MRT)~~ ✓（已实现）
+
+性能优化：
+- ~~**decode/GPU 流水线化（Method-A）**~~ ✓：readback wait 延迟到 send 后
+- ~~**异步协议**~~ ✓：AcquireNextImage 非阻塞（MAX_IN_FLIGHT=2）
+- **Mapped memory 增量传输**（dirty tracking）：shadow buffer memcmp 只发变化页，减少 TCP 流量。当前全量 flush ~400KB/帧
+- **BDA patching 按需 skip**：本机运行时 live==replay，检测后整个 BDA scan 可跳过
+
+Heaven 已知渲染瑕疵：
+- 金属材质亮绿色（环境反射 cubemap 问题 / image memory overlap 残留）
+- 鹅卵石地面消失（缺少 tessellation shader 支持）
+- 部分物体三角形丢失（vertex buffer 数据未初始化 0xFF）
+- RGB 彩色碎片散布（image memory overlap — formatBpp 缺失格式已补，待验证）
+- video_restart 后第二次 D3D11CreateDevice 失败（device 重建支持不完整）
 
 ## 架构要点
 
