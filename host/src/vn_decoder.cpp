@@ -836,16 +836,6 @@ void VnDecoder::handleCmdBindDescriptorSets(VnStreamReader& r) {
                 (unsigned long long)cbId, bindPoint, firstSet, setCount);
         dsLog++;
     }
-    if (dbgIs1080p_) {
-        static int ds1080 = 0;
-        if (ds1080++ < 10) {
-            fprintf(stderr, "[1080p BINDDS] first=%u count=%u ids=", firstSet, setCount);
-            for (uint32_t i = 0; i < setCount; i++)
-                fprintf(stderr, "%s%llu", i?",":"", (unsigned long long)setIds[i]);
-            fprintf(stderr, "\n");
-        }
-    }
-
     vkCmdBindDescriptorSets(cb, static_cast<VkPipelineBindPoint>(bindPoint), layout,
         firstSet, setCount, sets.data(), dynOffCount, dynOffs.data());
 }
@@ -2091,11 +2081,6 @@ void VnDecoder::handleCmdBindPipeline(VnStreamReader& r) {
                 (void*)cb, (void*)pip, (unsigned long long)cbId, (unsigned long long)pipId);
         return;
     }
-    if (dbgIs1080p_) {
-        static int bp1080 = 0;
-        if (bp1080++ < 10)
-            fprintf(stderr, "[1080p BINDPIP] pipId=%llu\n", (unsigned long long)pipId);
-    }
     vkCmdBindPipeline(cb, static_cast<VkPipelineBindPoint>(bindPoint), pip);
     // Dynamic state (viewport, scissor, cull mode, etc.) persists across pipeline
     // binds in Vulkan — do NOT override here; DXVK manages these via Set* commands.
@@ -2107,11 +2092,6 @@ void VnDecoder::handleCmdSetViewport(VnStreamReader& r) {
     vp.x = r.readF32(); vp.y = r.readF32();
     vp.width = r.readF32(); vp.height = r.readF32();
     vp.minDepth = r.readF32(); vp.maxDepth = r.readF32();
-    if (dbgIs1080p_) {
-        static int vp1080 = 0;
-        if (vp1080++ < 10)
-            fprintf(stderr, "[1080p VP] x=%.0f y=%.0f w=%.0f h=%.0f\n", vp.x, vp.y, vp.width, vp.height);
-    }
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     if (!cb) return;
     // Use WithCount — pipeline declares VIEWPORT_WITH_COUNT for dynamic rendering
@@ -2251,17 +2231,6 @@ void VnDecoder::handleCmdBindVertexBuffers(VnStreamReader& r) {
     }
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     if (!cb) return;
-    if (dbgIs1080p_) {
-        static int vb1080 = 0;
-        if (vb1080++ < 5) {
-            for (uint32_t i = 0; i < bindingCount; i++)
-                fprintf(stderr, "[1080p VB] bind=%u buf=%p off=%llu sz=%llu stride=%llu\n",
-                        firstBinding+i, (void*)buffers[i],
-                        (unsigned long long)offsets[i],
-                        (unsigned long long)sizes[i],
-                        (unsigned long long)strides[i]);
-        }
-    }
     if (hasStrides) {
         vkCmdBindVertexBuffers2(cb, firstBinding, bindingCount,
             buffers.data(), offsets.data(), sizes.data(), strides.data());
@@ -2289,36 +2258,6 @@ void VnDecoder::handleCmdDrawIndexed(VnStreamReader& r) {
     uint32_t firstInstance = r.readU32();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     if (!cb || !activeRendering_) return;
-    if (dbgIs1080p_) {
-        static int di1080 = 0;
-        if (di1080++ < 2) {
-            fprintf(stderr, "[1080p DRAWIDX] idx=%u inst=%u\n", indexCount, instanceCount);
-            // Dump VB data at the bound offset to check vertex positions
-            // VB was bound from global buffer at offset ~63MB, stride=20
-            // Find the persistent map for the buffer's memory and read vertex data
-            for (auto& [memId, ptr] : persistentMaps_) {
-                // The global buffer is mem=13 (64MB HOST_VISIBLE)
-                // VB offset was ~63111168. Check if this memory contains it.
-                auto* base = static_cast<const uint8_t*>(ptr);
-                // Try reading 120 bytes (6 verts × 20 bytes) at approximate offset
-                // We logged VB off=63111168 earlier
-                uint64_t vbOff = 63111168; // from the VB bind log
-                fprintf(stderr, "[1080p VB DATA] memId=%llu reading %llu bytes at off=%llu: ",
-                        (unsigned long long)memId, 120ULL, (unsigned long long)vbOff);
-                for (int b = 0; b < 120 && b < 60; b++) // first 60 bytes (3 verts)
-                    fprintf(stderr, "%02x ", base[vbOff + b]);
-                fprintf(stderr, "...\n");
-                // Interpret as vec3 pos + rgba8 color (stride=20: 12 bytes pos + 4 bytes color + 4 pad?)
-                for (int v = 0; v < 3; v++) {
-                    const float* pos = (const float*)(base + vbOff + v * 20);
-                    const uint8_t* col = base + vbOff + v * 20 + 12;
-                    fprintf(stderr, "[1080p VERT %d] pos=(%.3f, %.3f, %.3f) col=(%u,%u,%u,%u)\n",
-                            v, pos[0], pos[1], pos[2], col[0], col[1], col[2], col[3]);
-                }
-                break; // only first memory
-            }
-        }
-    }
     vkCmdDrawIndexed(cb, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 }
 
@@ -2727,11 +2666,6 @@ void VnDecoder::handleCmdDraw(VnStreamReader& r) {
     uint32_t firstInstance = r.readU32();
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     if (!cb || !activeRendering_) return;
-    if (dbgIs1080p_) {
-        static int d1080 = 0;
-        if (d1080++ < 10)
-            fprintf(stderr, "[1080p DRAW] verts=%u inst=%u\n", vertexCount, instanceCount);
-    }
     vkCmdDraw(cb, vertexCount, instanceCount, firstVertex, firstInstance);
 }
 
@@ -2747,15 +2681,6 @@ void VnDecoder::handleCmdPushConstants(VnStreamReader& r) {
     VkCommandBuffer cb = lookup(commandBuffers_, cbId);
     VkPipelineLayout layout = lookup(pipelineLayouts_, layoutId);
     if (!cb || !layout) return;
-    if (dbgIs1080p_) {
-        static int pc1080 = 0;
-        if (pc1080++ < 5) {
-            fprintf(stderr, "[1080p PUSH] off=%u sz=%u stage=0x%x data:", offset, size, stageFlags);
-            for (uint32_t i = 0; i < std::min(size, 32u); i++)
-                fprintf(stderr, " %02x", data[i]);
-            fprintf(stderr, "\n");
-        }
-    }
     vkCmdPushConstants(cb, layout, stageFlags, offset, size, data.data());
 }
 
