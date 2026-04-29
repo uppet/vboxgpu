@@ -941,10 +941,10 @@ static VkResult VKAPI_CALL icd_vkCreateDevice(
         uint16_t port = portStr ? (uint16_t)atoi(portStr) : DEFAULT_PORT;
 
         if (!g_icd.connectToHost(hostAddr, port)) {
-            fprintf(stderr, "[ICD] Failed to connect to Host at %s:%u\n", hostAddr, port);
+            icdDbg("[ICD] Failed to connect to Host");
             return VK_ERROR_INITIALIZATION_FAILED;
         }
-        fprintf(stderr, "[ICD] Connected to Host at %s:%u\n", hostAddr, port);
+        icdDbg("[ICD] Connected to Host");
     }
 
     uint64_t id = g_icd.handles.alloc();
@@ -1489,26 +1489,8 @@ static VkResult VKAPI_CALL icd_vkGetSwapchainImagesKHR(
 static VkResult VKAPI_CALL icd_vkAcquireNextImageKHR(
     VkDevice, VkSwapchainKHR, uint64_t timeout, VkSemaphore, VkFence, uint32_t* pIndex)
 {
-    // Async protocol with bounded in-flight: allow up to 2 present batches in the
-    // pipeline before blocking. This overlaps guest encoding with host GPU execution
-    // while keeping display latency bounded (~2 frames).
-    // NOTE: Disabled in Release due to stability issues (C++ exception in DXVK).
-    // TODO: investigate Release-specific race condition in async protocol.
-#ifdef _DEBUG
-    constexpr size_t MAX_IN_FLIGHT = 2;
-    if (g_icd.firstPresented_) {
-        std::unique_lock<std::mutex> lock(g_icd.acquireMutex_);
-        g_icd.acquireCV_.wait_for(lock, std::chrono::milliseconds(100), [=] {
-            if (!g_icd.recvRunning_) return true;
-            std::lock_guard<std::mutex> ql(g_icd.pendingQueueMutex_);
-            return g_icd.pendingResponseQueue_.size() < MAX_IN_FLIGHT;
-        });
-    }
-    static uint32_t nextIdx = 0;
-    *pIndex = nextIdx;
-    nextIdx = (nextIdx + 1) % g_icd.swapchainImageCount;
-#else
-    // Release: use blocking protocol (stable)
+    // Blocking protocol: wait for host response before continuing.
+    // The recv thread sets imageIndexReady_ when a present response arrives.
     if (!g_icd.firstPresented_) {
         *pIndex = 0;
         return VK_SUCCESS;
@@ -1516,11 +1498,10 @@ static VkResult VKAPI_CALL icd_vkAcquireNextImageKHR(
     {
         std::unique_lock<std::mutex> lock(g_icd.acquireMutex_);
         g_icd.acquireCV_.wait_for(lock, std::chrono::milliseconds(5000),
-            []{ return g_icd.imageIndexReady_; });
+            []{ return g_icd.imageIndexReady_ || !g_icd.recvRunning_; });
         *pIndex = g_icd.currentImageIndex;
         g_icd.imageIndexReady_ = false;
     }
-#endif
     // Clear per-frame buffer flush dedup set
     {
         std::lock_guard<std::mutex> lk(g_icd.flushedBuffersMutex_);
