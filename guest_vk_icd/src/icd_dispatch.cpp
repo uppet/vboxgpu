@@ -2221,6 +2221,9 @@ static void VKAPI_CALL icd_vkGetImageMemoryRequirements2(VkDevice, const VkImage
     p->memoryRequirements.size = (it != g_icd.imageMemSizes.end()) ? it->second : 32 * 1024 * 1024;
     p->memoryRequirements.alignment = 1024;
     p->memoryRequirements.memoryTypeBits = 0x3;
+    static int gimr2Log = 0;
+    if (gimr2Log++ < 20)
+        icdDbg(("[ICD] GetImageMemReqs2: img=" + std::to_string(id) + " size=" + std::to_string(p->memoryRequirements.size)).c_str());
 }
 // Vulkan 1.3 / VK_KHR_maintenance4: query memory requirements without creating objects.
 // DXVK calls this at init to probe which memory types support each buffer usage flag.
@@ -2266,6 +2269,11 @@ static void VKAPI_CALL icd_vkGetDeviceImageMemoryRequirements(VkDevice, const Vk
     p->memoryRequirements.size = sz;
     p->memoryRequirements.alignment = 1024;
     p->memoryRequirements.memoryTypeBits = 0x3;
+    static int gdimrLog = 0;
+    if (gdimrLog++ < 20 && pInfo && pInfo->pCreateInfo) {
+        auto* ci = pInfo->pCreateInfo;
+        icdDbg(("[ICD] GetDeviceImageMemReqs: " + std::to_string(ci->extent.width) + "x" + std::to_string(ci->extent.height) + " fmt=" + std::to_string((int)ci->format) + " size=" + std::to_string(sz)).c_str());
+    }
 }
 
 // --- Buffer / Image creation ---
@@ -2521,7 +2529,12 @@ static uint32_t formatBpp(VkFormat fmt) {
     case VK_FORMAT_R32_SFLOAT: case VK_FORMAT_R32_UINT: case VK_FORMAT_R32_SINT:
     case VK_FORMAT_D32_SFLOAT: case VK_FORMAT_D24_UNORM_S8_UINT:
     case VK_FORMAT_X8_D24_UNORM_PACK32:
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32: case VK_FORMAT_A2R10G10B10_UNORM_PACK32:
+    case VK_FORMAT_B10G11R11_UFLOAT_PACK32: case VK_FORMAT_E5B9G9R9_UFLOAT_PACK32:
         return 4;
+    // 5 bpp (stored as 8 by most GPUs — report 8 for safety)
+    case VK_FORMAT_D32_SFLOAT_S8_UINT:
+        return 8;
     // 8 bpp
     case VK_FORMAT_R16G16B16A16_UNORM: case VK_FORMAT_R16G16B16A16_SFLOAT:
     case VK_FORMAT_R16G16B16A16_UINT:  case VK_FORMAT_R16G16B16A16_SINT:
