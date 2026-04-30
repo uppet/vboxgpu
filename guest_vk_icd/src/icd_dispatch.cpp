@@ -21,6 +21,19 @@
 
 IcdState g_icd;
 
+// Crash diagnosis: ring buffer of last N ICD calls
+static constexpr int TRACE_SIZE = 32;
+struct TraceEntry { const char* name; uint32_t arg1; DWORD tid; };
+static TraceEntry g_traceRing[TRACE_SIZE] = {};
+static volatile long g_traceIdx = 0;
+static void icdTrace(const char* name, uint32_t arg1 = 0) {
+    long idx = InterlockedIncrement(&g_traceIdx) - 1;
+    auto& e = g_traceRing[idx & (TRACE_SIZE - 1)];
+    e.name = name; e.arg1 = arg1; e.tid = GetCurrentThreadId();
+}
+#define ICD_TRACE(name) icdTrace(name)
+#define ICD_TRACE1(name, a) icdTrace(name, (uint32_t)(a))
+
 // Quick debug log to file via Win32 API (static CRT fopen unreliable)
 static void icdDbg(const char* msg) {
     HANDLE h = CreateFileA("S:\\bld\\vboxgpu\\icd_debug.log",
@@ -45,23 +58,52 @@ static void icdDbg(const char* msg) {
 #pragma comment(lib, "dbghelp.lib")
 
 static LONG WINAPI crashDumpHandler(EXCEPTION_POINTERS* ep) {
-    // Write to icd_crash.dmp (distinct from host dump)
-    HANDLE hFile = CreateFileA("S:\\bld\\vboxgpu\\dumps\\icd_crash.dmp",
+    CreateDirectoryA("S:\\bld\\vboxgpu\\dumps", NULL);
+    // Write to icd_crash.dmp with timestamp
+    char dmpPath[256];
+    SYSTEMTIME st; GetLocalTime(&st);
+    wsprintfA(dmpPath, "S:\\bld\\vboxgpu\\dumps\\icd_crash_%02d%02d_%02d%02d%02d.dmp",
+        st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    HANDLE hFile = CreateFileA(dmpPath,
         GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile != INVALID_HANDLE_VALUE) {
         MINIDUMP_EXCEPTION_INFORMATION mei;
         mei.ThreadId = GetCurrentThreadId();
         mei.ExceptionPointers = ep;
         mei.ClientPointers = FALSE;
-        MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), hFile,
-            (MINIDUMP_TYPE)(MiniDumpNormal | MiniDumpWithDataSegs),
+        BOOL ok = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), hFile,
+            (MINIDUMP_TYPE)(MiniDumpNormal | MiniDumpWithDataSegs | MiniDumpWithThreadInfo),
             &mei, NULL, NULL);
         CloseHandle(hFile);
+        if (!ok) {
+            char err[256];
+            wsprintfA(err, "[ICD] MiniDumpWriteDump FAILED: GetLastError=%u path=%s", GetLastError(), dmpPath);
+            icdDbg(err);
+        } else {
+            icdDbg(dmpPath);
+        }
+    } else {
+        char err[256];
+        wsprintfA(err, "[ICD] CreateFile FAILED for dump: GetLastError=%u", GetLastError());
+        icdDbg(err);
     }
-    // Also log exception code to debug log
-    char buf[256];
-    wsprintfA(buf, "[ICD] CRASH: ExceptionCode=0x%08X", ep ? ep->ExceptionRecord->ExceptionCode : 0);
+    // Dump trace ring buffer for diagnosis
+    char buf[512];
+    wsprintfA(buf, "[ICD] CRASH: code=0x%08X addr=0x%p tid=%u totalCalls=%ld",
+        ep ? ep->ExceptionRecord->ExceptionCode : 0,
+        ep ? ep->ExceptionRecord->ExceptionAddress : 0,
+        GetCurrentThreadId(), g_traceIdx);
     icdDbg(buf);
+    // Dump last TRACE_SIZE calls in order
+    long cur = g_traceIdx;
+    long start = (cur > TRACE_SIZE) ? (cur - TRACE_SIZE) : 0;
+    for (long i = start; i < cur; i++) {
+        auto& e = g_traceRing[i & (TRACE_SIZE - 1)];
+        if (e.name) {
+            wsprintfA(buf, "  [%ld] tid=%u %s arg=%u", i, e.tid, e.name, e.arg1);
+            icdDbg(buf);
+        }
+    }
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -138,6 +180,10 @@ static VkResult VKAPI_CALL icd_vkGetImageViewAddressNVX(VkDevice, VkImageView, v
 bool IcdState::connectToHost(const char* host, uint16_t port) {
     if (!transport.connect(host, port)) return false;
     memoryShadows.reserve(256);
+    // Pre-reserve encoder buffer to avoid OOM from vector reallocation
+    // during DXVK init (hundreds of CreateImage/CreateShader accumulate
+    // before first QueueSubmit). Must reserve early while VA space is clean.
+    encoder.w_.buffer().reserve(16 * 1024 * 1024);  // 16MB
     connected = true;
     startRecvThread();
     return true;
@@ -255,6 +301,7 @@ void IcdState::flushMappedMemory() {
     };
 
     collectAndSendDirty();
+    collectAndSendDirty();  // Pass 2: catch pages dirtied during pass 1
 #else
     // Full flush: send ALL mapped regions regardless of size.
     // Slow for complex games (144MB+ batch for UltraKill) but guaranteed correct.
@@ -265,6 +312,7 @@ void IcdState::flushMappedMemory() {
 }
 
 bool IcdState::sendBatchLocked(bool isPresent) {
+    ICD_TRACE1("sendBatch", isPresent ? 1 : 0);
     // Caller MUST hold encoder.mutex_
     uint32_t seqId = nextSeqId_++;
 #if VBOXGPU_TIMING
@@ -276,7 +324,10 @@ bool IcdState::sendBatchLocked(bool isPresent) {
     size_t sendSize = encoder.size();
     bool ok = transport.send(encoder.data(), sendSize);
     encoder.w_ = VnStreamWriter();
-    if (!ok) return false;
+    if (!ok) {
+        icdDbg(("[ICD] sendBatch FAILED: size=" + std::to_string(sendSize) + " present=" + std::to_string((int)isPresent)).c_str());
+        return false;
+    }
     // Record response type — atomic with TCP send under encoder.mutex_
     {
         std::lock_guard<std::mutex> lock(pendingQueueMutex_);
@@ -307,7 +358,10 @@ void IcdState::recvLoop() {
 
     while (recvRunning_) {
         size_t n = transport.recv(recvBuf.data(), RECV_BUF_SIZE);
-        if (n == 0) break; // disconnected
+        if (n == 0) {
+            icdDbg("[ICD] recvLoop: recv returned 0, disconnected");
+            break;
+        }
 
         // Determine response type from the ordered queue
         bool isPresent = true;
@@ -933,6 +987,7 @@ static VkResult VKAPI_CALL icd_vkGetPhysicalDeviceSurfacePresentModesKHR(
 static VkResult VKAPI_CALL icd_vkCreateDevice(
     VkPhysicalDevice, const VkDeviceCreateInfo* pInfo, const VkAllocationCallbacks*, VkDevice* pDevice)
 {
+    ICD_TRACE("CreateDev");
     // Connect to host now (deferred from vkCreateInstance)
     if (!g_icd.connected) {
         const char* hostAddr = getenv("VBOX_GPU_HOST");
@@ -954,6 +1009,7 @@ static VkResult VKAPI_CALL icd_vkCreateDevice(
 }
 
 static void VKAPI_CALL icd_vkDestroyDevice(VkDevice device, const VkAllocationCallbacks*) {
+    ICD_TRACE("DestroyDev");
     // Don't stop recv thread or disconnect — DXUT may destroy and recreate devices.
     // The TCP connection is per-ICD-lifetime, not per-device.
     icdDbg("[ICD] DestroyDevice");
@@ -977,6 +1033,7 @@ static void VKAPI_CALL icd_vkGetDeviceQueue2(VkDevice, const VkDeviceQueueInfo2*
 
 // Vulkan 1.2+ device functions DXVK needs
 static VkResult VKAPI_CALL icd_vkBindBufferMemory2(VkDevice, uint32_t bindInfoCount, const VkBindBufferMemoryInfo* pBindInfos) {
+    ICD_TRACE("BindBufMem2");
     if (!pBindInfos) return VK_SUCCESS;
     for (uint32_t i = 0; i < bindInfoCount; i++) {
         g_icd.bufferBindings[(uint64_t)pBindInfos[i].buffer] = {
@@ -989,6 +1046,7 @@ static VkResult VKAPI_CALL icd_vkBindBufferMemory2(VkDevice, uint32_t bindInfoCo
     return VK_SUCCESS;
 }
 static VkResult VKAPI_CALL icd_vkBindImageMemory2(VkDevice, uint32_t bindInfoCount, const VkBindImageMemoryInfo* pBindInfos) {
+    ICD_TRACE("BindImgMem2");
     if (!pBindInfos) return VK_SUCCESS;
     for (uint32_t i = 0; i < bindInfoCount; i++) {
         g_icd.encoder.cmdBindImageMemory(1, (uint64_t)pBindInfos[i].image,
@@ -997,6 +1055,7 @@ static VkResult VKAPI_CALL icd_vkBindImageMemory2(VkDevice, uint32_t bindInfoCou
     return VK_SUCCESS;
 }
 static VkDeviceAddress VKAPI_CALL icd_vkGetBufferDeviceAddress(VkDevice, const VkBufferDeviceAddressInfo* pInfo) {
+    ICD_TRACE("GetBufDevAddr");
     if (!pInfo || !pInfo->buffer) return 0;
     uint64_t bufferId = (uint64_t)pInfo->buffer;
     VkDeviceAddress addr = g_icd.syncGetBufferDeviceAddress(bufferId);
@@ -1010,8 +1069,10 @@ static VkDeviceAddress VKAPI_CALL icd_vkGetBufferDeviceAddress(VkDevice, const V
                 shouldEmit = true;
             }
         }
-        if (shouldEmit)
+        if (shouldEmit) {
+            ENC_LOCK;
             g_icd.encoder.cmdBridgeRecordBDA(bufferId, (uint64_t)addr);
+        }
     }
     return addr;
 }
@@ -1031,6 +1092,8 @@ static uint64_t resolveViewId(uint64_t viewId) {
 
 // Vulkan 1.3 dynamic rendering
 static void VKAPI_CALL icd_vkCmdBeginRendering(VkCommandBuffer cb, const VkRenderingInfo* pInfo) {
+    ICD_TRACE("BeginRender");
+    ENC_LOCK;
     if (!pInfo) return;
 
     // Diagnostic: log colorAttachmentCount for MRT detection
@@ -1046,7 +1109,6 @@ static void VKAPI_CALL icd_vkCmdBeginRendering(VkCommandBuffer cb, const VkRende
 
     // MRT path: use separate command to avoid changing existing wire format
     if (pInfo->colorAttachmentCount > 1) {
-        ENC_LOCK;
         auto off = g_icd.encoder.w_.beginCommand(VN_CMD_BRIDGE_BeginRenderingMRT);
         g_icd.encoder.w_.writeU64(toId(cb));
         g_icd.encoder.w_.writeU32(pInfo->renderArea.offset.x);
@@ -1140,12 +1202,14 @@ static void VKAPI_CALL icd_vkCmdSetViewportWithCount(VkCommandBuffer cb, uint32_
         static int vpWarn = 0;
         if (vpWarn < 5) { vpWarn++; fprintf(stderr, "[ICD] WARNING: SetViewportWithCount count=%u (only first used)\n", count); }
     }
-    if (count > 0 && vps)
+    if (count > 0 && vps) {
         g_icd.encoder.cmdSetViewport(toId(cb), vps[0].x, vps[0].y, vps[0].width, vps[0].height, vps[0].minDepth, vps[0].maxDepth);
+    }
 }
 static void VKAPI_CALL icd_vkCmdSetScissorWithCount(VkCommandBuffer cb, uint32_t count, const VkRect2D* rects) {
-    if (count > 0 && rects)
+    if (count > 0 && rects) {
         g_icd.encoder.cmdSetScissor(toId(cb), rects[0].offset.x, rects[0].offset.y, rects[0].extent.width, rects[0].extent.height);
+    }
 }
 static void VKAPI_CALL icd_vkCmdSetDepthTestEnable(VkCommandBuffer cb, VkBool32 enable) {
     g_icd.encoder.cmdSetDepthTestEnable(toId(cb), enable);
@@ -1209,6 +1273,7 @@ static void VKAPI_CALL icd_vkCmdDrawIndexedIndirect(VkCommandBuffer cb, VkBuffer
 static VkResult VKAPI_CALL icd_vkCreateDescriptorUpdateTemplate(VkDevice,
     const VkDescriptorUpdateTemplateCreateInfo* pInfo, const VkAllocationCallbacks*, VkDescriptorUpdateTemplate* p)
 {
+    ENC_LOCK;
     uint64_t id = g_icd.handles.alloc();
     *p = (VkDescriptorUpdateTemplate)id;
     // Save template entries so UpdateDescriptorSetWithTemplate can interpret pData
@@ -1221,6 +1286,7 @@ static VkResult VKAPI_CALL icd_vkCreateDescriptorUpdateTemplate(VkDevice,
     return VK_SUCCESS;
 }
 static void VKAPI_CALL icd_vkDestroyDescriptorUpdateTemplate(VkDevice, VkDescriptorUpdateTemplate t, const VkAllocationCallbacks*) {
+    ENC_LOCK;
     g_icd.descriptorTemplates.erase((uint64_t)t);
 }
 static void VKAPI_CALL icd_vkUpdateDescriptorSetWithTemplate(VkDevice,
@@ -1445,6 +1511,7 @@ static VkResult VKAPI_CALL icd_vkDeviceWaitIdle(VkDevice) {
 static VkResult VKAPI_CALL icd_vkCreateSwapchainKHR(
     VkDevice, const VkSwapchainCreateInfoKHR* pInfo, const VkAllocationCallbacks*, VkSwapchainKHR* p)
 {
+    ICD_TRACE("CreateSwap");
     uint64_t id = g_icd.handles.alloc();
     *p = (VkSwapchainKHR)id;
 
@@ -1489,6 +1556,7 @@ static VkResult VKAPI_CALL icd_vkGetSwapchainImagesKHR(
 static VkResult VKAPI_CALL icd_vkAcquireNextImageKHR(
     VkDevice, VkSwapchainKHR, uint64_t timeout, VkSemaphore, VkFence, uint32_t* pIndex)
 {
+    ICD_TRACE("AcqNextImg");
     // Blocking protocol: wait for host response before continuing.
     // The recv thread sets imageIndexReady_ when a present response arrives.
     if (!g_icd.firstPresented_) {
@@ -1512,6 +1580,7 @@ static VkResult VKAPI_CALL icd_vkAcquireNextImageKHR(
 
 static VkResult VKAPI_CALL icd_vkQueuePresentKHR(VkQueue q, const VkPresentInfoKHR* pInfo)
 {
+    ICD_TRACE("Present");
     g_icd.encoder.cmdBridgeQueuePresent(2, // H_QUEUE
         ndToId((uint64_t)pInfo->pSwapchains[0]),
         pInfo->waitSemaphoreCount > 0 ? ndToId((uint64_t)pInfo->pWaitSemaphores[0]) : 0);
@@ -1537,7 +1606,9 @@ static VkResult VKAPI_CALL icd_vkQueuePresentKHR(VkQueue q, const VkPresentInfoK
 
     // Fire-and-forget: send batch to host. Recv thread will receive the response,
     // update currentImageIndex, blit the frame, and signal acquireCV_.
-    g_icd.sendBatch(true); // true = present batch
+    if (!g_icd.sendBatch(true)) {
+        icdDbg("[ICD] QueuePresent: sendBatch FAILED — host disconnected?");
+    }
     g_icd.firstPresented_ = true;
 
 #ifdef VBOXGPU_DEBUG_SCREENSHOTS
@@ -1591,6 +1662,8 @@ static PFN_vkVoidFunction VKAPI_CALL icd_vkGetDeviceProcAddr(VkDevice device, co
 static VkResult VKAPI_CALL icd_vkCreateImageView(
     VkDevice, const VkImageViewCreateInfo* pInfo, const VkAllocationCallbacks*, VkImageView* p)
 {
+    ICD_TRACE("CreateImgView");
+    ENC_LOCK;
     uint64_t id = g_icd.handles.alloc();
     *p = (VkImageView)id;
     g_icd.imageViewToImage[id] = (uint64_t)pInfo->image;
@@ -1603,7 +1676,11 @@ static VkResult VKAPI_CALL icd_vkCreateImageView(
     return VK_SUCCESS;
 }
 
-static void VKAPI_CALL icd_vkDestroyImageView(VkDevice, VkImageView v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyImageView(1, (uint64_t)v); }
+static void VKAPI_CALL icd_vkDestroyImageView(VkDevice, VkImageView v, const VkAllocationCallbacks*) {
+    ENC_LOCK;
+    g_icd.imageViewToImage.erase((uint64_t)v);
+    g_icd.encoder.cmdDestroyImageView(1, (uint64_t)v);
+}
 
 static VkResult VKAPI_CALL icd_vkCreateRenderPass(
     VkDevice, const VkRenderPassCreateInfo* pInfo, const VkAllocationCallbacks*, VkRenderPass* p)
@@ -1644,19 +1721,25 @@ static VkResult VKAPI_CALL icd_vkCreateRenderPass2(VkDevice d, const VkRenderPas
     return VK_SUCCESS;
 }
 
-static void VKAPI_CALL icd_vkDestroyRenderPass(VkDevice, VkRenderPass v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyRenderPass(1, (uint64_t)v); }
+static void VKAPI_CALL icd_vkDestroyRenderPass(VkDevice, VkRenderPass v, const VkAllocationCallbacks*) {
+    g_icd.encoder.cmdDestroyRenderPass(1, (uint64_t)v);
+}
 
 static VkResult VKAPI_CALL icd_vkCreateShaderModule(
     VkDevice, const VkShaderModuleCreateInfo* pInfo, const VkAllocationCallbacks*, VkShaderModule* p)
 {
+    ICD_TRACE("CreateShader");
     uint64_t id = g_icd.handles.alloc();
     *p = (VkShaderModule)id;
     g_icd.encoder.cmdCreateShaderModule(1, id,
         pInfo->pCode, pInfo->codeSize);
+
     return VK_SUCCESS;
 }
 
-static void VKAPI_CALL icd_vkDestroyShaderModule(VkDevice, VkShaderModule v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyShaderModule(1, (uint64_t)v); }
+static void VKAPI_CALL icd_vkDestroyShaderModule(VkDevice, VkShaderModule v, const VkAllocationCallbacks*) {
+    g_icd.encoder.cmdDestroyShaderModule(1, (uint64_t)v);
+}
 
 static VkResult VKAPI_CALL icd_vkCreatePipelineLayout(
     VkDevice, const VkPipelineLayoutCreateInfo* pInfo, const VkAllocationCallbacks*, VkPipelineLayout* p)
@@ -1681,7 +1764,9 @@ static VkResult VKAPI_CALL icd_vkCreatePipelineLayout(
     return VK_SUCCESS;
 }
 
-static void VKAPI_CALL icd_vkDestroyPipelineLayout(VkDevice, VkPipelineLayout v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyPipelineLayout(1, (uint64_t)v); }
+static void VKAPI_CALL icd_vkDestroyPipelineLayout(VkDevice, VkPipelineLayout v, const VkAllocationCallbacks*) {
+    g_icd.encoder.cmdDestroyPipelineLayout(1, (uint64_t)v);
+}
 
 // Helper: find VkShaderModuleCreateInfo in pNext chain (used when shader_module_identifier is active)
 static const VkShaderModuleCreateInfo* findShaderModuleCreateInfo(const void* pNext) {
@@ -1698,6 +1783,7 @@ static VkResult VKAPI_CALL icd_vkCreateGraphicsPipelines(
     VkDevice, VkPipelineCache, uint32_t count, const VkGraphicsPipelineCreateInfo* pInfos,
     const VkAllocationCallbacks*, VkPipeline* pPipelines)
 {
+    ICD_TRACE("CreateGfxPipe");
     for (uint32_t i = 0; i < count; i++) {
         uint64_t id = g_icd.handles.alloc();
         pPipelines[i] = (VkPipeline)id;
@@ -1869,11 +1955,14 @@ static VkResult VKAPI_CALL icd_vkCreateGraphicsPipelines(
             (uint32_t)vtxBindings.size(), vtxBindings.data(),
             (uint32_t)vtxAttrs.size(), vtxAttrs.data(), depthFmt, pBlend,
             &pipelineState, pExtra);
+
     }
     return VK_SUCCESS;
 }
 
-static void VKAPI_CALL icd_vkDestroyPipeline(VkDevice, VkPipeline v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyPipeline(1, (uint64_t)v); }
+static void VKAPI_CALL icd_vkDestroyPipeline(VkDevice, VkPipeline v, const VkAllocationCallbacks*) {
+    g_icd.encoder.cmdDestroyPipeline(1, (uint64_t)v);
+}
 
 static VkResult VKAPI_CALL icd_vkCreateFramebuffer(
     VkDevice, const VkFramebufferCreateInfo* pInfo, const VkAllocationCallbacks*, VkFramebuffer* p)
@@ -1886,7 +1975,9 @@ static VkResult VKAPI_CALL icd_vkCreateFramebuffer(
     return VK_SUCCESS;
 }
 
-static void VKAPI_CALL icd_vkDestroyFramebuffer(VkDevice, VkFramebuffer v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyFramebuffer(1, (uint64_t)v); }
+static void VKAPI_CALL icd_vkDestroyFramebuffer(VkDevice, VkFramebuffer v, const VkAllocationCallbacks*) {
+    g_icd.encoder.cmdDestroyFramebuffer(1, (uint64_t)v);
+}
 
 static VkResult VKAPI_CALL icd_vkCreateCommandPool(
     VkDevice, const VkCommandPoolCreateInfo* pInfo, const VkAllocationCallbacks*, VkCommandPool* p)
@@ -1897,7 +1988,9 @@ static VkResult VKAPI_CALL icd_vkCreateCommandPool(
     return VK_SUCCESS;
 }
 
-static void VKAPI_CALL icd_vkDestroyCommandPool(VkDevice, VkCommandPool v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyCommandPool(1, (uint64_t)v); }
+static void VKAPI_CALL icd_vkDestroyCommandPool(VkDevice, VkCommandPool v, const VkAllocationCallbacks*) {
+    g_icd.encoder.cmdDestroyCommandPool(1, (uint64_t)v);
+}
 static VkResult VKAPI_CALL icd_vkResetCommandPool(VkDevice, VkCommandPool, VkCommandPoolResetFlags) { return VK_SUCCESS; }
 
 static VkResult VKAPI_CALL icd_vkAllocateCommandBuffers(
@@ -1969,18 +2062,21 @@ static void VKAPI_CALL icd_vkCmdBindPipeline(VkCommandBuffer cb, VkPipelineBindP
 }
 
 static void VKAPI_CALL icd_vkCmdSetViewport(VkCommandBuffer cb, uint32_t, uint32_t count, const VkViewport* vps) {
-    if (count > 0)
+    if (count > 0) {
         g_icd.encoder.cmdSetViewport(toId(cb), vps[0].x, vps[0].y, vps[0].width, vps[0].height, vps[0].minDepth, vps[0].maxDepth);
+    }
 }
 
 static void VKAPI_CALL icd_vkCmdSetScissor(VkCommandBuffer cb, uint32_t, uint32_t count, const VkRect2D* rects) {
-    if (count > 0)
+    if (count > 0) {
         g_icd.encoder.cmdSetScissor(toId(cb), rects[0].offset.x, rects[0].offset.y, rects[0].extent.width, rects[0].extent.height);
+    }
 }
 
 static void VKAPI_CALL icd_vkCmdDraw(VkCommandBuffer cb, uint32_t vertexCount, uint32_t instanceCount,
     uint32_t firstVertex, uint32_t firstInstance)
 {
+    ICD_TRACE("Draw");
     g_icd.encoder.cmdDraw(toId(cb), vertexCount, instanceCount, firstVertex, firstInstance);
 }
 
@@ -1993,7 +2089,9 @@ static VkResult VKAPI_CALL icd_vkCreateSemaphore(VkDevice, const VkSemaphoreCrea
     return VK_SUCCESS;
 }
 
-static void VKAPI_CALL icd_vkDestroySemaphore(VkDevice, VkSemaphore v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroySemaphore(1, (uint64_t)v); }
+static void VKAPI_CALL icd_vkDestroySemaphore(VkDevice, VkSemaphore v, const VkAllocationCallbacks*) {
+    g_icd.encoder.cmdDestroySemaphore(1, (uint64_t)v);
+}
 
 static VkResult VKAPI_CALL icd_vkCreateFence(VkDevice, const VkFenceCreateInfo* pInfo, const VkAllocationCallbacks*, VkFence* p) {
     uint64_t id = g_icd.handles.alloc();
@@ -2002,14 +2100,17 @@ static VkResult VKAPI_CALL icd_vkCreateFence(VkDevice, const VkFenceCreateInfo* 
     return VK_SUCCESS;
 }
 
-static void VKAPI_CALL icd_vkDestroyFence(VkDevice, VkFence v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyFence(1, (uint64_t)v); }
+static void VKAPI_CALL icd_vkDestroyFence(VkDevice, VkFence v, const VkAllocationCallbacks*) {
+    g_icd.encoder.cmdDestroyFence(1, (uint64_t)v);
+}
 static VkResult VKAPI_CALL icd_vkWaitForFences(VkDevice, uint32_t count, const VkFence* p, VkBool32 waitAll, uint64_t timeout) {
     // Encode WaitForFences to be included in the next QueuePresent batch.
     // Host handles actual GPU fence synchronization; guest fences are virtual.
     // Returning VK_SUCCESS immediately is safe: guest resources (encoder buffers)
     // are already in the TCP batch and the host processes them in order.
-    if (count > 0 && p)
+    if (count > 0 && p) {
         g_icd.encoder.cmdWaitForFences(1, count, reinterpret_cast<const uint64_t*>(p), waitAll, timeout);
+    }
     return VK_SUCCESS;
 }
 static VkResult VKAPI_CALL icd_vkResetFences(VkDevice, uint32_t count, const VkFence* p) {
@@ -2023,6 +2124,7 @@ static VkResult VKAPI_CALL icd_vkGetFenceStatus(VkDevice, VkFence) { return VK_S
 // --- Queue submit ---
 
 static VkResult VKAPI_CALL icd_vkQueueSubmit(VkQueue q, uint32_t count, const VkSubmitInfo* pSubmits, VkFence fence) {
+    ICD_TRACE("QueueSubmit");
     // Hold encoder lock for the entire flush+submit sequence so all WriteMemory
     // commands appear before QueueSubmit in the stream, with no interleaving
     // from other DXVK threads.
@@ -2090,6 +2192,8 @@ static VkResult VKAPI_CALL icd_vkQueueWaitIdle(VkQueue) { return VK_SUCCESS; }
 // --- Memory ---
 
 static VkResult VKAPI_CALL icd_vkAllocateMemory(VkDevice, const VkMemoryAllocateInfo* pInfo, const VkAllocationCallbacks*, VkDeviceMemory* p) {
+    ICD_TRACE1("AllocMem", pInfo->memoryTypeIndex);
+    ENC_LOCK;
     uint64_t id = g_icd.handles.alloc();
     *p = (VkDeviceMemory)id;
     // Only allocate shadow buffer for HOST_VISIBLE memory (type index 1).
@@ -2112,9 +2216,12 @@ static VkResult VKAPI_CALL icd_vkAllocateMemory(VkDevice, const VkMemoryAllocate
     }
     g_icd.memoryShadows[id] = {shadow, allocSize};
     g_icd.encoder.cmdAllocateMemory(1, id, pInfo->allocationSize, pInfo->memoryTypeIndex);
+
     return VK_SUCCESS;
 }
 static void VKAPI_CALL icd_vkFreeMemory(VkDevice, VkDeviceMemory mem, const VkAllocationCallbacks*) {
+    ICD_TRACE1("FreeMem", (uint32_t)(uint64_t)mem);
+    ENC_LOCK;
     uint64_t id = (uint64_t)mem;
     // Free shadow buffer + remove mapped regions under lock
     {
@@ -2133,6 +2240,7 @@ static void VKAPI_CALL icd_vkFreeMemory(VkDevice, VkDeviceMemory mem, const VkAl
     g_icd.encoder.cmdFreeMemory(1, (uint64_t)mem);
 }
 static VkResult VKAPI_CALL icd_vkMapMemory(VkDevice, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size, VkMemoryMapFlags, void** ppData) {
+    ICD_TRACE1("MapMem", (uint32_t)(uint64_t)memory);
     uint64_t memId = (uint64_t)memory;
     // Return a pointer into the per-memory shadow buffer (persistent mapping safe)
     auto it = g_icd.memoryShadows.find(memId);
@@ -2157,9 +2265,17 @@ static VkResult VKAPI_CALL icd_vkMapMemory(VkDevice, VkDeviceMemory memory, VkDe
     *ppData = (uint8_t*)it->second.ptr + offset;
     std::lock_guard<std::mutex> lock(g_icd.mappedMutex);
     g_icd.mappedRegions.push_back({memId, offset, actualSize, *ppData, false});
-    static int mapLog = 0;
-    if (mapLog++ < 5)
-        icdDbg(("[ICD] MapMemory: mem=" + std::to_string(memId) + " off=" + std::to_string(offset) + " sz=" + std::to_string(actualSize) + " total_mapped=" + std::to_string(g_icd.mappedRegions.size())).c_str());
+    // Always log MapMemory to track address space usage
+    {
+        static uint64_t totalShadowBytes = 0;
+        // Count total on first few calls
+        if (g_icd.mappedRegions.size() <= 3) {
+            totalShadowBytes = 0;
+            for (auto& [id, s] : g_icd.memoryShadows)
+                if (s.ptr) totalShadowBytes += s.size;
+        }
+        icdDbg(("[ICD] MapMemory: mem=" + std::to_string(memId) + " off=" + std::to_string(offset) + " sz=" + std::to_string(actualSize) + " ptr=" + std::to_string((uintptr_t)*ppData) + " mapped=" + std::to_string(g_icd.mappedRegions.size()) + " totalShadow=" + std::to_string(totalShadowBytes/1024/1024) + "MB").c_str());
+    }
     return VK_SUCCESS;
 }
 // vkMapMemory2 / vkMapMemory2KHR (Vulkan 1.4 / VK_KHR_map_memory2)
@@ -2222,6 +2338,7 @@ static void VKAPI_CALL icd_vkGetBufferMemoryRequirements(VkDevice, VkBuffer buf,
     p->size = sz; p->alignment = 256; p->memoryTypeBits = 0x3;
 }
 static void VKAPI_CALL icd_vkGetImageMemoryRequirements(VkDevice, VkImage img, VkMemoryRequirements* p) {
+    ENC_LOCK;
     uint64_t id = (uint64_t)img;
     auto it = g_icd.imageMemSizes.find(id);
     p->size = (it != g_icd.imageMemSizes.end()) ? it->second : 32 * 1024 * 1024;
@@ -2236,6 +2353,7 @@ static void VKAPI_CALL icd_vkGetBufferMemoryRequirements2(VkDevice, const VkBuff
     p->memoryRequirements.size = sz; p->memoryRequirements.alignment = 256; p->memoryRequirements.memoryTypeBits = 0x3;
 }
 static void VKAPI_CALL icd_vkGetImageMemoryRequirements2(VkDevice, const VkImageMemoryRequirementsInfo2* pInfo, VkMemoryRequirements2* p) {
+    ENC_LOCK;
     uint64_t id = pInfo ? (uint64_t)pInfo->image : 0;
     auto it = g_icd.imageMemSizes.find(id);
     p->memoryRequirements.size = (it != g_icd.imageMemSizes.end()) ? it->second : 32 * 1024 * 1024;
@@ -2261,6 +2379,7 @@ static uint32_t formatBpp(VkFormat fmt);
 static uint32_t formatBlockSize(VkFormat fmt);
 
 static void VKAPI_CALL icd_vkGetDeviceImageMemoryRequirements(VkDevice, const VkDeviceImageMemoryRequirements* pInfo, VkMemoryRequirements2* p) {
+    ENC_LOCK;
     // Pre-creation query (Vulkan 1.3): must match icd_vkCreateImage logic.
     VkDeviceSize sz = 32 * 1024 * 1024; // default
     if (pInfo && pInfo->pCreateInfo) {
@@ -2299,6 +2418,8 @@ static void VKAPI_CALL icd_vkGetDeviceImageMemoryRequirements(VkDevice, const Vk
 // --- Buffer / Image creation ---
 
 static VkResult VKAPI_CALL icd_vkCreateBuffer(VkDevice, const VkBufferCreateInfo* pInfo, const VkAllocationCallbacks*, VkBuffer* p) {
+    ICD_TRACE("CreateBuf");
+    ENC_LOCK;
     uint64_t id = g_icd.handles.alloc();
     *p = (VkBuffer)id;
     g_icd.bufferSizes[id] = pInfo->size;
@@ -2309,14 +2430,19 @@ static VkResult VKAPI_CALL icd_vkCreateBuffer(VkDevice, const VkBufferCreateInfo
     return VK_SUCCESS;
 }
 static void VKAPI_CALL icd_vkDestroyBuffer(VkDevice, VkBuffer v, const VkAllocationCallbacks*) {
+    ENC_LOCK;
     uint64_t id = (uint64_t)v;
     g_icd.bdaCache.erase(id);
     g_icd.bdaNeedBuffers_.erase(id);
+    g_icd.bufferBindings.erase(id);
+    g_icd.bufferSizes.erase(id);
     { std::lock_guard<std::mutex> lk(g_icd.bdaMutex_); g_icd.bdaRecorded_.erase(id); }
     g_icd.encoder.cmdDestroyBuffer(1, id);
 }
 
 static VkResult VKAPI_CALL icd_vkCreateImage(VkDevice, const VkImageCreateInfo* pInfo, const VkAllocationCallbacks*, VkImage* p) {
+    ICD_TRACE("CreateImg");
+    ENC_LOCK;
     // A1B5G5R5 allowed — blocking broke logo video CBI path.
     uint64_t id = g_icd.handles.alloc();
     *p = (VkImage)id;
@@ -2360,9 +2486,11 @@ static VkResult VKAPI_CALL icd_vkCreateImage(VkDevice, const VkImageCreateInfo* 
         pInfo->extent.width, pInfo->extent.height, pInfo->extent.depth,
         pInfo->mipLevels, pInfo->arrayLayers, pInfo->samples,
         pInfo->tiling, pInfo->usage, pInfo->flags);
+
     return VK_SUCCESS;
 }
 static void VKAPI_CALL icd_vkDestroyImage(VkDevice, VkImage v, const VkAllocationCallbacks*) {
+    ENC_LOCK;
     g_icd.imageFormats.erase((uint64_t)v);
     g_icd.imageMemSizes.erase((uint64_t)v);
     g_icd.encoder.cmdDestroyImage(1, (uint64_t)v);
@@ -2376,7 +2504,9 @@ static VkResult VKAPI_CALL icd_vkCreateSampler(VkDevice, const VkSamplerCreateIn
     g_icd.encoder.cmdCreateSampler(1, id, pInfo);
     return VK_SUCCESS;
 }
-static void VKAPI_CALL icd_vkDestroySampler(VkDevice, VkSampler v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroySampler(1, (uint64_t)v); }
+static void VKAPI_CALL icd_vkDestroySampler(VkDevice, VkSampler v, const VkAllocationCallbacks*) {
+    g_icd.encoder.cmdDestroySampler(1, (uint64_t)v);
+}
 
 static VkResult VKAPI_CALL icd_vkCreateDescriptorSetLayout(
     VkDevice, const VkDescriptorSetLayoutCreateInfo* pInfo,
@@ -2388,7 +2518,9 @@ static VkResult VKAPI_CALL icd_vkCreateDescriptorSetLayout(
         pInfo->bindingCount, pInfo->pBindings);
     return VK_SUCCESS;
 }
-static void VKAPI_CALL icd_vkDestroyDescriptorSetLayout(VkDevice, VkDescriptorSetLayout v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyDescriptorSetLayout(1, (uint64_t)v); }
+static void VKAPI_CALL icd_vkDestroyDescriptorSetLayout(VkDevice, VkDescriptorSetLayout v, const VkAllocationCallbacks*) {
+    g_icd.encoder.cmdDestroyDescriptorSetLayout(1, (uint64_t)v);
+}
 
 static VkResult VKAPI_CALL icd_vkCreateDescriptorPool(VkDevice, const VkDescriptorPoolCreateInfo* pInfo, const VkAllocationCallbacks*, VkDescriptorPool* p) {
     uint64_t id = g_icd.handles.alloc();
@@ -2397,7 +2529,9 @@ static VkResult VKAPI_CALL icd_vkCreateDescriptorPool(VkDevice, const VkDescript
         pInfo->poolSizeCount, pInfo->pPoolSizes);
     return VK_SUCCESS;
 }
-static void VKAPI_CALL icd_vkDestroyDescriptorPool(VkDevice, VkDescriptorPool v, const VkAllocationCallbacks*) { g_icd.encoder.cmdDestroyDescriptorPool(1, (uint64_t)v); }
+static void VKAPI_CALL icd_vkDestroyDescriptorPool(VkDevice, VkDescriptorPool v, const VkAllocationCallbacks*) {
+    g_icd.encoder.cmdDestroyDescriptorPool(1, (uint64_t)v);
+}
 static VkResult VKAPI_CALL icd_vkResetDescriptorPool(VkDevice, VkDescriptorPool, VkDescriptorPoolResetFlags) { return VK_SUCCESS; }
 
 static VkResult VKAPI_CALL icd_vkAllocateDescriptorSets(VkDevice, const VkDescriptorSetAllocateInfo* pInfo, VkDescriptorSet* p) {
@@ -2412,6 +2546,7 @@ static VkResult VKAPI_CALL icd_vkAllocateDescriptorSets(VkDevice, const VkDescri
             (unsigned long long)(uint64_t)pInfo->descriptorPool, pInfo->descriptorSetCount);
     g_icd.encoder.cmdAllocateDescriptorSets(1, (uint64_t)pInfo->descriptorPool,
         pInfo->descriptorSetCount, layoutIds.data(), setIds.data());
+
     return VK_SUCCESS;
 }
 static VkResult VKAPI_CALL icd_vkFreeDescriptorSets(VkDevice, VkDescriptorPool, uint32_t, const VkDescriptorSet*) { return VK_SUCCESS; }
@@ -2484,6 +2619,7 @@ static void VKAPI_CALL icd_vkCmdBindIndexBuffer2(VkCommandBuffer cb, VkBuffer bu
 }
 static void VKAPI_CALL icd_vkCmdDrawIndexed(VkCommandBuffer cb, uint32_t indexCount, uint32_t instanceCount,
     uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) {
+    ICD_TRACE("DrawIdx");
     g_icd.encoder.cmdDrawIndexed(toId(cb), indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 }
 static void VKAPI_CALL icd_vkCmdCopyBuffer(VkCommandBuffer cb, VkBuffer src, VkBuffer dst, uint32_t regionCount, const VkBufferCopy* pRegions) {
@@ -2602,6 +2738,7 @@ static uint32_t formatBlockSize(VkFormat fmt) {
 static std::vector<uint8_t> gatherCopySourceData(uint64_t bufId, uint32_t regionCount,
     uint32_t* bufOffsets, const uint32_t* extW, const uint32_t* extH, const uint32_t* extD,
     const uint32_t* bRL, const uint32_t* bIH, uint32_t bpp, uint32_t blockSize) {
+    ENC_LOCK;
     if (bpp == 0 && blockSize == 0) {
         static int miss1 = 0; if (miss1++ < 5) icdDbg("[ICD] gatherCopy FAIL: unknown format");
         return {};
@@ -2939,6 +3076,7 @@ static void VKAPI_CALL icd_vkCmdPipelineBarrier(VkCommandBuffer cb, VkPipelineSt
     VkDependencyFlags, uint32_t, const VkMemoryBarrier*, uint32_t, const VkBufferMemoryBarrier*,
     uint32_t imageBarrierCount, const VkImageMemoryBarrier* pImageBarriers) {
     if (imageBarrierCount == 0) return;
+    ENC_LOCK;
     std::vector<uint64_t> images(imageBarrierCount);
     std::vector<uint32_t> oldLayouts(imageBarrierCount), newLayouts(imageBarrierCount);
     std::vector<uint32_t> srcAccess(imageBarrierCount), dstAccess(imageBarrierCount);
