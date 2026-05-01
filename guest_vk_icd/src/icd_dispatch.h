@@ -27,6 +27,7 @@
 
 #include "../../common/venus/vn_encoder.h"
 #include "../../common/transport/tcp_transport.h"
+#include "shadow_pool.h"
 #define VBOXGPU_TIMING_WIN32_LOG
 #include "../../common/timing.h"
 
@@ -96,6 +97,10 @@ struct IcdState {
         VkDeviceSize size;
     };
     std::unordered_map<uint64_t, MemoryShadow> memoryShadows;
+
+    // Pooled shadow memory: single large VirtualAlloc for all HOST_VISIBLE shadows.
+    // Reduces VA fragmentation and enables single-call GetWriteWatch per flush.
+    ShadowPool shadowPool;
 
     // ImageView → Image mapping (to detect swapchain targets in BeginRendering)
     std::unordered_map<uint64_t, uint64_t> imageViewToImage;

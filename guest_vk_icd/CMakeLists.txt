@@ -1,6 +1,7 @@
 set(ICD_SOURCES
     src/icd_dispatch.cpp
     src/icd_physical_device.cpp
+    src/shadow_pool.cpp
 )
 
 add_library(vbox_vk_icd SHARED ${ICD_SOURCES})

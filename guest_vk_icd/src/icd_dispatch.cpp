@@ -180,6 +180,12 @@ static VkResult VKAPI_CALL icd_vkGetImageViewAddressNVX(VkDevice, VkImageView, v
 bool IcdState::connectToHost(const char* host, uint16_t port) {
     if (!transport.connect(host, port)) return false;
     memoryShadows.reserve(256);
+    // Initialize shadow pool: reserves 256MB VA for all HOST_VISIBLE shadows.
+    // Reduces VA fragmentation (single VirtualAlloc instead of hundreds) and
+    // enables single-call GetWriteWatch per flush.
+    if (!shadowPool.init()) {
+        icdDbg("[ICD] ShadowPool init FAILED — falling back to per-allocation VirtualAlloc");
+    }
     // Pre-reserve encoder buffer to avoid OOM from vector reallocation
     // during DXVK init (hundreds of CreateImage/CreateShader accumulate
     // before first QueueSubmit). Must reserve early while VA space is clean.
@@ -238,16 +244,50 @@ void IcdState::flushMappedMemory() {
     // Fixes gun model mask offset caused by stale MVP matrix (CS thread writes
     // constant buffer page AFTER pass 1 reset → page missed in single-pass).
 
-    auto collectAndSendDirty = [&]() {
+    auto collectAndSendDirty = [&]() -> size_t {
+        size_t totalPages = 0;
         struct ShadowDirty { std::vector<uintptr_t> offsets; };
         std::unordered_map<uint64_t, ShadowDirty> dirtyMap;
 
+        // --- Phase 1a: Pool dirty pages (single GetWriteWatch) ---
+        std::vector<uint64_t> poolPageOffsets;
+        poolPageOffsets.reserve((size_t)(shadowPool.committed() / 4096 + 1));
+        shadowPool.getDirtyPages(poolPageOffsets);
+
+        if (!poolPageOffsets.empty()) {
+            void* poolBase = shadowPool.base();
+            for (auto& [memId, shadow] : memoryShadows) {
+                if (!shadow.ptr) continue;
+                if (!shadowPool.contains(shadow.ptr)) continue;
+                if (shadow.size > VBOXGPU_DIRTY_TRACK_SIZE_LIMIT) {
+                    ResetWriteWatch(shadow.ptr, (SIZE_T)shadow.size);
+                    continue;
+                }
+
+                uint64_t shadowStart = (uint64_t)((uint8_t*)shadow.ptr - (uint8_t*)poolBase);
+                uint64_t shadowEnd = shadowStart + shadow.size;
+
+                // Binary search poolPageOffsets for entries in [shadowStart, shadowEnd)
+                auto it = std::lower_bound(poolPageOffsets.begin(),
+                    poolPageOffsets.end(), shadowStart);
+                auto& info = dirtyMap[memId];
+                while (it != poolPageOffsets.end() && *it < shadowEnd) {
+                    info.offsets.push_back((uintptr_t)(*it - shadowStart));
+                    ++totalPages;
+                    ++it;
+                }
+            }
+        }
+
+        // --- Phase 1b: Fallback shadows (per-shadow GetWriteWatch) ---
         for (auto& [memId, shadow] : memoryShadows) {
             if (!shadow.ptr) continue;
             if (shadow.size > VBOXGPU_DIRTY_TRACK_SIZE_LIMIT) {
                 ResetWriteWatch(shadow.ptr, (SIZE_T)shadow.size);
                 continue;
             }
+            if (shadowPool.contains(shadow.ptr)) continue; // handled by pool path
+
             ULONG_PTR maxPages = (ULONG_PTR)((shadow.size + 4095) / 4096);
             std::vector<void*> pages(maxPages);
             ULONG_PTR count = maxPages;
@@ -259,10 +299,13 @@ void IcdState::flushMappedMemory() {
             auto& info = dirtyMap[memId];
             info.offsets.reserve(count);
             uintptr_t base = (uintptr_t)shadow.ptr;
-            for (ULONG_PTR i = 0; i < count; i++)
+            for (ULONG_PTR i = 0; i < count; i++) {
                 info.offsets.push_back((uintptr_t)pages[i] - base);
+                ++totalPages;
+            }
         }
 
+        // --- Phase 2: Emit WriteMemory for dirty pages overlapping mapped regions ---
         for (auto& m : mappedRegions) {
             if (m.size > VBOXGPU_DIRTY_TRACK_SIZE_LIMIT) continue;
             auto dit = dirtyMap.find(m.memoryId);
@@ -279,8 +322,6 @@ void IcdState::flushMappedMemory() {
                 VkDeviceSize pageStart = (VkDeviceSize)off;
                 VkDeviceSize pageEnd = pageStart + 4096;
                 if (pageEnd <= regStart || pageStart >= regEnd) continue;
-                // Note: previously skipped pages overlapping flushBufferRange, but that
-                // caused other data on the same page (BDA, uniforms) to be lost → flickering.
                 VkDeviceSize clipStart = pageStart < regStart ? regStart : pageStart;
                 VkDeviceSize clipEnd = pageEnd > regEnd ? regEnd : pageEnd;
 
@@ -298,10 +339,21 @@ void IcdState::flushMappedMemory() {
                 encoder.cmdWriteMemory(m.memoryId, runStart, (uint32_t)(runEnd - runStart),
                                        (const uint8_t*)shadow.ptr + runStart);
         }
+        return totalPages;
     };
 
+    size_t pass2Pages = 0, pass3Pages = 0;  // diagnostic: track multi-pass effectiveness
     collectAndSendDirty();
-    collectAndSendDirty();  // Pass 2: catch pages dirtied during pass 1
+    pass2Pages = collectAndSendDirty();  // Pass 2: catch pages dirtied during pass 1
+    pass3Pages = collectAndSendDirty();  // Pass 3: catch pages dirtied during pass 2
+    static uint32_t pass3HitCount = 0;
+    if (pass3Pages > 0 && pass3HitCount < 20) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "[ICD] PASS3-HIT: %zu pages in pass 3 (pass2=%zu) count=%u",
+                 pass3Pages, pass2Pages, pass3HitCount);
+        icdDbg(buf);
+        pass3HitCount++;
+    }
 #else
     // Full flush: send ALL mapped regions regardless of size.
     // Slow for complex games (144MB+ batch for UltraKill) but guaranteed correct.
@@ -2203,11 +2255,16 @@ static VkResult VKAPI_CALL icd_vkAllocateMemory(VkDevice, const VkMemoryAllocate
     void* shadow = nullptr;
     bool needsShadow = (pInfo->memoryTypeIndex != 0); // type 0 = DEVICE_LOCAL
     if (needsShadow) {
-        shadow = VirtualAlloc(nullptr, (SIZE_T)allocSize,
-            MEM_COMMIT | MEM_RESERVE | MEM_WRITE_WATCH, PAGE_READWRITE);
+        // Try pool first — avoids VA fragmentation on 32-bit
+        shadow = g_icd.shadowPool.alloc(allocSize);
         if (!shadow) {
+            // Pool exhausted or unavailable — fallback to individual VirtualAlloc
             shadow = VirtualAlloc(nullptr, (SIZE_T)allocSize,
-                MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+                MEM_COMMIT | MEM_RESERVE | MEM_WRITE_WATCH, PAGE_READWRITE);
+            if (!shadow) {
+                shadow = VirtualAlloc(nullptr, (SIZE_T)allocSize,
+                    MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            }
         }
         if (!shadow) {
             icdDbg(("[ICD] AllocateMemory FAILED: VirtualAlloc " + std::to_string(allocSize) + " bytes, mem=" + std::to_string(id)).c_str());
@@ -2228,7 +2285,13 @@ static void VKAPI_CALL icd_vkFreeMemory(VkDevice, VkDeviceMemory mem, const VkAl
         std::lock_guard<std::mutex> lock(g_icd.mappedMutex);
         auto it = g_icd.memoryShadows.find(id);
         if (it != g_icd.memoryShadows.end()) {
-            if (it->second.ptr) VirtualFree(it->second.ptr, 0, MEM_RELEASE);
+            if (it->second.ptr) {
+                if (g_icd.shadowPool.contains(it->second.ptr)) {
+                    g_icd.shadowPool.free(it->second.ptr, it->second.size);
+                } else {
+                    VirtualFree(it->second.ptr, 0, MEM_RELEASE);
+                }
+            }
             g_icd.memoryShadows.erase(it);
         }
         g_icd.mappedRegions.erase(
