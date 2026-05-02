@@ -36,7 +36,27 @@ static void icdTrace(const char* name, uint32_t arg1 = 0) {
 
 // Quick debug log to file via Win32 API (static CRT fopen unreliable)
 static void icdDbg(const char* msg) {
-    HANDLE h = CreateFileA("S:\\bld\\vboxgpu\\icd_debug.log",
+    static char logPath[MAX_PATH] = {0};
+    if (logPath[0] == 0) {
+        // Prefer host shared folder. If it exists, use it.
+        const char* prefPath = "S:\\bld\\vboxgpu\\icd_debug.log";
+        DWORD attr = GetFileAttributesA("S:\\bld\\vboxgpu");
+        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+            strcpy_s(logPath, prefPath);
+        } else {
+            // Fall back to DLL's own directory
+            char dllDir[MAX_PATH];
+            HMODULE hm = NULL;
+            GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR)&icdDbg, &hm);
+            GetModuleFileNameA(hm, dllDir, MAX_PATH);
+            char* slash = strrchr(dllDir, '\\');
+            if (slash) *(slash + 1) = '\0';
+            snprintf(logPath, MAX_PATH, "%sicd_debug.log", dllDir);
+        }
+    }
+    HANDLE h = CreateFileA(logPath,
         FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
         OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h != INVALID_HANDLE_VALUE) {
@@ -206,24 +226,44 @@ void IcdState::flushBufferRange(uint64_t bufferId, VkDeviceSize offset, VkDevice
     }
     uint64_t memId = bit->second.memoryId;
     VkDeviceSize memBase = bit->second.memoryOffset;
-    std::lock_guard<std::mutex> lock(mappedMutex);
-    for (auto& m : mappedRegions) {
-        if (m.memoryId != memId) continue;
-        VkDeviceSize dataStart = memBase + offset;
-        VkDeviceSize dataEnd = (range == VK_WHOLE_SIZE) ? m.offset + m.size : dataStart + range;
-        if (dataStart >= m.offset && dataStart < m.offset + m.size) {
-            VkDeviceSize localOff = dataStart - m.offset;
-            uint32_t sz = (uint32_t)(dataEnd - dataStart);
-            if (sz > m.size - localOff) sz = (uint32_t)(m.size - localOff);
+
+    // Copy data under mappedMutex, then call encoder outside the lock.
+    // This avoids ABBA deadlock: QueueSubmit holds encoder.mutex_ then
+    // locks mappedMutex, while this path would lock mappedMutex then
+    // encoder.mutex_ (via cmdWriteMemory's ENC_GUARD).
+    uint64_t foundMemId = 0;
+    VkDeviceSize foundDataStart = 0;
+    uint32_t foundSz = 0;
+    std::vector<uint8_t> dataCopy;
+    {
+        std::lock_guard<std::mutex> lock(mappedMutex);
+        for (auto& m : mappedRegions) {
+            if (m.memoryId != memId) continue;
+            VkDeviceSize dataStart = memBase + offset;
+            VkDeviceSize dataEnd = (range == VK_WHOLE_SIZE) ? m.offset + m.size : dataStart + range;
+            if (dataStart >= m.offset && dataStart < m.offset + m.size) {
+                VkDeviceSize localOff = dataStart - m.offset;
+                uint32_t sz = (uint32_t)(dataEnd - dataStart);
+                if (sz > m.size - localOff) sz = (uint32_t)(m.size - localOff);
 #ifdef VBOXGPU_VERBOSE
-            static int flushOk = 0;
-            if (flushOk++ < 10 || sz > 100000)
-                icdDbg(("[ICD] flushBufRange OK: buf=" + std::to_string(bufferId) + " mem=" + std::to_string(memId) + " off=" + std::to_string(dataStart) + " sz=" + std::to_string(sz)).c_str());
+                static int flushOk = 0;
+                if (flushOk++ < 10 || sz > 100000)
+                    icdDbg(("[ICD] flushBufRange OK: buf=" + std::to_string(bufferId) + " mem=" + std::to_string(memId) + " off=" + std::to_string(dataStart) + " sz=" + std::to_string(sz)).c_str());
 #endif
-            encoder.cmdWriteMemory(memId, dataStart, sz,
-                                   (const uint8_t*)m.ptr + localOff);
-            return;
+                foundMemId = memId;
+                foundDataStart = dataStart;
+                foundSz = sz;
+                dataCopy.assign((const uint8_t*)m.ptr + localOff,
+                                (const uint8_t*)m.ptr + localOff + sz);
+                break;
+            }
         }
+    }
+    // Encoder call outside mappedMutex — lock order is now always
+    // encoder.mutex_ → mappedMutex (never reversed).
+    if (foundSz > 0) {
+        encoder.cmdWriteMemory(foundMemId, foundDataStart, foundSz, dataCopy.data());
+        return;
     }
 #ifdef VBOXGPU_VERBOSE
     // Fell through — buffer binding found but no matching mapped region
