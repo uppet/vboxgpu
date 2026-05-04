@@ -190,6 +190,8 @@ private:
     void handleBridgeQueuePresent(VnStreamReader& r);
     void handleGetBufferDeviceAddress(VnStreamReader& r);
     void handleBridgeRecordBDA(VnStreamReader& r);
+    void handleBridgeResetDescriptorPool(VnStreamReader& r);
+    void handleBridgeFreeDescriptorSets(VnStreamReader& r);
 
     // Handle maps: stream ID → real Vulkan object
     template<typename T>
@@ -223,6 +225,7 @@ private:
     std::unordered_map<uint64_t, VkSampler> samplers_;
     std::unordered_map<uint64_t, VkDescriptorPool> descriptorPools_;
     std::unordered_map<uint64_t, VkDescriptorSet> descriptorSets_;
+    std::unordered_map<uint64_t, uint64_t> descSetPool_; // setId → poolId for cleanup on pool destroy
     std::unordered_map<uint64_t, VkDescriptorSetLayout> descriptorSetLayouts_;
     std::unordered_map<uint64_t, VkPipelineLayout> pipelineLayouts_;
     std::unordered_map<uint64_t, VkPipeline> pipelines_;

@@ -2635,7 +2635,11 @@ static VkResult VKAPI_CALL icd_vkCreateDescriptorPool(VkDevice, const VkDescript
 static void VKAPI_CALL icd_vkDestroyDescriptorPool(VkDevice, VkDescriptorPool v, const VkAllocationCallbacks*) {
     g_icd.encoder.cmdDestroyDescriptorPool(1, (uint64_t)v);
 }
-static VkResult VKAPI_CALL icd_vkResetDescriptorPool(VkDevice, VkDescriptorPool, VkDescriptorPoolResetFlags) { return VK_SUCCESS; }
+static VkResult VKAPI_CALL icd_vkResetDescriptorPool(VkDevice, VkDescriptorPool pool, VkDescriptorPoolResetFlags flags) {
+    ENC_LOCK;
+    g_icd.encoder.cmdBridgeResetDescriptorPool((uint64_t)pool, (uint32_t)flags);
+    return VK_SUCCESS;
+}
 
 static VkResult VKAPI_CALL icd_vkAllocateDescriptorSets(VkDevice, const VkDescriptorSetAllocateInfo* pInfo, VkDescriptorSet* p) {
     std::vector<uint64_t> layoutIds(pInfo->descriptorSetCount);
@@ -2652,7 +2656,16 @@ static VkResult VKAPI_CALL icd_vkAllocateDescriptorSets(VkDevice, const VkDescri
 
     return VK_SUCCESS;
 }
-static VkResult VKAPI_CALL icd_vkFreeDescriptorSets(VkDevice, VkDescriptorPool, uint32_t, const VkDescriptorSet*) { return VK_SUCCESS; }
+static VkResult VKAPI_CALL icd_vkFreeDescriptorSets(VkDevice, VkDescriptorPool pool, uint32_t count, const VkDescriptorSet* pSets) {
+    if (count > 0 && pSets) {
+        std::vector<uint64_t> setIds(count);
+        for (uint32_t i = 0; i < count; i++)
+            setIds[i] = (uint64_t)pSets[i];
+        ENC_LOCK;
+        g_icd.encoder.cmdBridgeFreeDescriptorSets((uint64_t)pool, count, setIds.data());
+    }
+    return VK_SUCCESS;
+}
 static void VKAPI_CALL icd_vkUpdateDescriptorSets(VkDevice, uint32_t writeCount, const VkWriteDescriptorSet* pWrites, uint32_t, const VkCopyDescriptorSet*) {
     if (writeCount > 0 && pWrites) {
         // AUDIT: check for texel buffer views and other missing descriptor types

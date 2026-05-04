@@ -1115,6 +1115,24 @@ public:
         w_.endCommand(off);
     }
 
+    void cmdBridgeResetDescriptorPool(uint64_t poolId, uint32_t flags) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_BRIDGE_ResetDescriptorPool);
+        w_.writeU64(poolId);
+        w_.writeU32(flags);
+        w_.endCommand(off);
+    }
+
+    void cmdBridgeFreeDescriptorSets(uint64_t poolId, uint32_t count, const uint64_t* setIds) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_BRIDGE_FreeDescriptorSets);
+        w_.writeU64(poolId);
+        w_.writeU32(count);
+        for (uint32_t i = 0; i < count; i++)
+            w_.writeU64(setIds[i]);
+        w_.endCommand(off);
+    }
+
     // Sync query: request host-side vkGetBufferDeviceAddress result
     void cmdGetBufferDeviceAddress(uint64_t deviceId, uint64_t bufferId) {
         ENC_GUARD;

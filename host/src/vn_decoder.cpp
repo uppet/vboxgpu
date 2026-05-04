@@ -173,6 +173,35 @@ bool VnDecoder::execute(const uint8_t* data, size_t size) {
     if (!pendingDestroys_.empty()) flushPendingDestroys();
     RT_LOG(currentSeqId_, "T5", "execute done, total=%.2fms",
            (rtNowUs() - batchRecvUs_) / 1000.0);
+    // Periodic diagnostic: dump all map sizes to detect accumulation over time
+    if (thisBatch % 300 == 0) {
+        fprintf(stderr,
+            "[DIAG batch=%llu] images=%zu imgFmts=%zu imgSizes=%zu imgLayouts=%zu"
+            " bufs=%zu bufUsage=%zu bufBinds=%zu"
+            " cmdBufs=%zu cbLastFence=%zu cmdPools=%zu"
+            " descSets=%zu descSetPool=%zu descPools=%zu"
+            " memories=%zu persistentMaps=%zu"
+            " rp=%zu shader=%zu pl=%zu plLayout=%zu fb=%zu"
+            " sem=%zu fences=%zu semSignal=%zu fencePool=%zu"
+            " swapchains=%zu imgViews=%zu samplers=%zu"
+            " bdaReplay=%zu bdaLive=%zu bdaMemIds=%zu bdaIdent=%d"
+            " retiredStg=%zu"
+            "\n",
+            (unsigned long long)thisBatch,
+            images_.size(), imageFormats_.size(), imageSizes_.size(), imageLayouts_.size(),
+            buffers_.size(), bufferUsageFlags_.size(), bufferBindings_.size(),
+            commandBuffers_.size(), cbLastFence_.size(), commandPools_.size(),
+            descriptorSets_.size(), descSetPool_.size(), descriptorPools_.size(),
+            deviceMemories_.size(), persistentMaps_.size(),
+            renderPasses_.size(), shaderModules_.size(), pipelines_.size(),
+            pipelineLayouts_.size(), framebuffers_.size(),
+            semaphores_.size(), fences_.size(), semPendingSignal_.size(), fencePool_.size(),
+            swapchains_.size(), imageViews_.size(), samplers_.size(),
+            replayBdaByBufferId_.size(), liveBdaToReplayBda_.size(),
+            bdaMemoryIds_.size(), (int)bdaAllIdentical_,
+            retiredStagingBufs_.size());
+        fflush(stderr);
+    }
     return !error_;
 }
 
@@ -299,6 +328,8 @@ void VnDecoder::dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdS
     case VN_CMD_BRIDGE_QueuePresent:      handleBridgeQueuePresent(reader); break;
     case VN_CMD_BRIDGE_GetBufferDeviceAddress: handleGetBufferDeviceAddress(reader); break;
     case VN_CMD_BRIDGE_RecordBDA:           handleBridgeRecordBDA(reader); break;
+    case VN_CMD_BRIDGE_ResetDescriptorPool: handleBridgeResetDescriptorPool(reader); break;
+    case VN_CMD_BRIDGE_FreeDescriptorSets:  handleBridgeFreeDescriptorSets(reader); break;
     case VN_CMD_BRIDGE_TimingSeq: {
         currentSeqId_ = reader.readU32();
         uint64_t guestTs = reader.readU64(); (void)guestTs;
@@ -745,8 +776,10 @@ void VnDecoder::handleAllocateDescriptorSets(VnStreamReader& r) {
         fprintf(stderr, "[Decoder] AllocDescSets FAILED: result=%d\n", (int)vr);
         return;
     }
-    for (uint32_t i = 0; i < setCount; i++)
+    for (uint32_t i = 0; i < setCount; i++) {
         store(descriptorSets_, setIds[i], sets[i]);
+        descSetPool_[setIds[i]] = poolId;
+    }
 }
 
 static bool isBufferDescriptorType(VkDescriptorType type) {
@@ -1041,19 +1074,36 @@ void VnDecoder::HandlerName(VnStreamReader& r) { \
     } \
 }
 
-IMPL_DESTROY(handleDestroyBuffer,              VkBuffer,              vkDestroyBuffer,              buffers_)
+void VnDecoder::handleDestroyBuffer(VnStreamReader& r) {
+    uint64_t deviceId = r.readU64();
+    uint64_t objId = r.readU64();
+    (void)deviceId;
+    VkBuffer obj = lookup(buffers_, objId);
+    if (obj) {
+        buffers_.erase(objId);
+        bufferUsageFlags_.erase(objId);
+        bufferBindings_.erase(objId);
+        pendingDestroys_.push_back([this, obj]() { vkDestroyBuffer(device_, obj, nullptr); });
+    }
+}
 // Swapchain images (sentinel 0xFFF00000+i) must not be destroyed individually
 void VnDecoder::handleDestroyImage(VnStreamReader& r) {
     uint64_t deviceId = r.readU64();
     uint64_t objId = r.readU64();
     (void)deviceId;
     if ((objId & 0xFFF00000ull) == 0xFFF00000ull) {
-        images_.erase(objId); // remove from map but don't vkDestroyImage
+        images_.erase(objId);
+        imageFormats_.erase(objId);
+        imageSizes_.erase(objId);
+        imageLayouts_.erase(objId);
         return;
     }
     VkImage obj = lookup(images_, objId);
     if (obj) {
         images_.erase(objId);
+        imageFormats_.erase(objId);
+        imageSizes_.erase(objId);
+        imageLayouts_.erase(objId);
         pendingDestroys_.push_back([this, obj]() { vkDestroyImage(device_, obj, nullptr); });
     }
 }
@@ -1065,7 +1115,25 @@ IMPL_DESTROY(handleDestroyRenderPass,          VkRenderPass,          vkDestroyR
 IMPL_DESTROY(handleDestroyFramebuffer,         VkFramebuffer,         vkDestroyFramebuffer,         framebuffers_)
 IMPL_DESTROY(handleDestroyCommandPool,         VkCommandPool,         vkDestroyCommandPool,         commandPools_)
 IMPL_DESTROY(handleDestroySampler,             VkSampler,             vkDestroySampler,             samplers_)
-IMPL_DESTROY(handleDestroyDescriptorPool,      VkDescriptorPool,      vkDestroyDescriptorPool,      descriptorPools_)
+void VnDecoder::handleDestroyDescriptorPool(VnStreamReader& r) {
+    uint64_t deviceId = r.readU64();
+    uint64_t objId = r.readU64();
+    (void)deviceId;
+    VkDescriptorPool pool = lookup(descriptorPools_, objId);
+    if (pool) {
+        descriptorPools_.erase(objId);
+        // Erase all descriptor sets allocated from this pool
+        for (auto it = descSetPool_.begin(); it != descSetPool_.end(); ) {
+            if (it->second == objId) {
+                descriptorSets_.erase(it->first);
+                it = descSetPool_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        pendingDestroys_.push_back([this, pool]() { vkDestroyDescriptorPool(device_, pool, nullptr); });
+    }
+}
 IMPL_DESTROY(handleDestroyDescriptorSetLayout, VkDescriptorSetLayout, vkDestroyDescriptorSetLayout, descriptorSetLayouts_)
 IMPL_DESTROY(handleDestroyFence,               VkFence,               vkDestroyFence,               fences_)
 IMPL_DESTROY(handleDestroySemaphore,           VkSemaphore,           vkDestroySemaphore,           semaphores_)
@@ -1787,6 +1855,9 @@ void VnDecoder::handleBeginCommandBuffer(VnStreamReader& r) {
     // Without this, a stale cbIsSwapchain_ entry lets EndRendering call
     // vkCmdEndRendering on a reset CB, crashing NVIDIA drivers.
     cbIsSwapchain_.erase(cbId);
+    // Erase per-CB fence entry so cbLastFence_ doesn't accumulate stale entries for
+    // freed command buffers. The entry will be re-created on next QueueSubmit.
+    cbLastFence_.erase(cbId);
 
     vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo info{};
@@ -3197,6 +3268,42 @@ void VnDecoder::handleBridgeRecordBDA(VnStreamReader& r) {
     }
 }
 
+void VnDecoder::handleBridgeResetDescriptorPool(VnStreamReader& r) {
+    uint64_t poolId = r.readU64();
+    uint32_t flags = r.readU32();
+    VkDescriptorPool pool = lookup(descriptorPools_, poolId);
+    if (!pool) return;
+    vkResetDescriptorPool(device_, pool, flags);
+    // Erase all descriptor sets allocated from this pool
+    for (auto it = descSetPool_.begin(); it != descSetPool_.end(); ) {
+        if (it->second == poolId) {
+            descriptorSets_.erase(it->first);
+            it = descSetPool_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void VnDecoder::handleBridgeFreeDescriptorSets(VnStreamReader& r) {
+    uint64_t poolId = r.readU64();
+    uint32_t count = r.readU32();
+    if (count == 0) return;
+    VkDescriptorPool pool = lookup(descriptorPools_, poolId);
+    if (!pool) return;
+    std::vector<uint64_t> setIds(count);
+    std::vector<VkDescriptorSet> sets(count);
+    for (uint32_t i = 0; i < count; i++) {
+        setIds[i] = r.readU64();
+        sets[i] = lookup(descriptorSets_, setIds[i]);
+    }
+    vkFreeDescriptorSets(device_, pool, count, sets.data());
+    for (uint32_t i = 0; i < count; i++) {
+        descriptorSets_.erase(setIds[i]);
+        descSetPool_.erase(setIds[i]);
+    }
+}
+
 void VnDecoder::flushPendingPresents() {
     for (auto& pp : pendingPresents_) {
         auto it = swapchains_.find(pp.scId);
@@ -3373,6 +3480,8 @@ void VnDecoder::cleanup() {
     for (auto& [id, l] : pipelineLayouts_) vkDestroyPipelineLayout(device_, l, nullptr);
     for (auto& [id, dsl] : descriptorSetLayouts_) vkDestroyDescriptorSetLayout(device_, dsl, nullptr);
     for (auto& [id, pool] : descriptorPools_) vkDestroyDescriptorPool(device_, pool, nullptr);
+    descriptorSets_.clear();
+    descSetPool_.clear();
     for (auto& [id, s] : samplers_) vkDestroySampler(device_, s, nullptr);
     // Collect swapchain image view handles to avoid double-destroy
     std::unordered_set<VkImageView> scViews;

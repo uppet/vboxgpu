@@ -120,6 +120,8 @@ enum VnCommandType : uint32_t {
     VN_CMD_BRIDGE_CopyBufToImgInline       = 0x10006,  // CopyBufferToImage with inline pixel data (avoids staging overwrite)
     VN_CMD_BRIDGE_RecordBDA                = 0x10007,  // record live BDA for replay patching: [bufId(8)][liveAddr(8)]
     VN_CMD_BRIDGE_BeginRenderingMRT        = 0x10008,  // BeginRendering with multiple color attachments (MRT)
+    VN_CMD_BRIDGE_ResetDescriptorPool      = 0x10009,  // vkResetDescriptorPool: [poolId(8)][flags(4)]
+    VN_CMD_BRIDGE_FreeDescriptorSets       = 0x1000A,  // vkFreeDescriptorSets: [poolId(8)][count(4)][setId(8)]*
     VN_CMD_BRIDGE_EndOfStream              = 0x1FFFF,
 };
 
