@@ -80,10 +80,17 @@ struct IcdState {
     std::unordered_map<uint64_t, DescriptorTemplateInfo> descriptorTemplates;
     std::unordered_set<uint64_t> descriptorPoolIds_; // tracked for cleanup on DestroyDevice
     std::mutex descPoolMutex_;
-    double lastFlushMs_ = 0; // flushMappedMemory time from last QueueSubmit
-    std::unordered_map<uint64_t, uint32_t> descSetLastSeen_; // setId → last frame seqId
-    double lastRoundTripMs_ = 0; // last recvLoop round-trip (send→recv)
-    double lastDecompressMs_ = 0; // last LZ4 decompress time
+    // Cross-thread diagnostic timings stored as microseconds in atomic<uint64_t>
+    // so 32-bit ICD builds (PE32 for SortTheCourt/Heaven) cannot tear-read.
+    std::atomic<uint64_t> lastFlushUs_{0};      // flushMappedMemory time, last QueueSubmit
+    std::atomic<uint64_t> lastRoundTripUs_{0};  // recvLoop round-trip, last response
+    std::atomic<uint64_t> lastDecompressUs_{0}; // LZ4 decompress, last frame
+    // Per-descriptor-set last-bind tracking (diagnostic). Erased on Free/Reset/
+    // DestroyPool to avoid this map becoming a new accumulation source.
+    std::unordered_map<uint64_t, uint32_t> descSetLastSeen_;
+    std::mutex descSetSeenMutex_;
+    // Bounded async acquire: rotating index returned to DXVK. Reset on CreateSwapchain.
+    uint32_t acquireNextIdx_ = 0;
 
     // Mapped memory tracking: guest shadow memory for host-visible regions
     struct MappedRegion {

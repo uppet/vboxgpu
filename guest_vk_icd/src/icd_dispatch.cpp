@@ -429,7 +429,11 @@ bool IcdState::sendBatchLocked(bool isPresent) {
         std::lock_guard<std::mutex> lock(pendingQueueMutex_);
         pendingResponseQueue_.push({isPresent, seqId, rtNowUs()});
     }
-    // Periodic diagnostic: map sizes + timing every 300 frames
+    // Periodic diagnostic: map sizes + timing every 300 frames.
+    // Lock order convention (matches QueueSubmit / 5c3c2c0 ABBA fix):
+    //   encoder.mutex_ (held by sendBatchLocked caller) → mappedMutex
+    //   encoder.mutex_ → descSetSeenMutex_
+    // Never acquire encoder.mutex_ while holding either of the above.
     if (seqId % 300 == 0) {
         size_t shadowTotal = 0, shadowCount = 0, mappedCount = 0;
         {
@@ -444,23 +448,30 @@ bool IcdState::sendBatchLocked(bool isPresent) {
         snprintf(diag, sizeof(diag),
             "[ICD-DIAG seq=%u] maps: mr=%zu ms=%zu shMB=%zu bdaR=%zu bdaC=%zu"
             " if=%zu ims=%zu bs=%zu bb=%zu"
-            " time: flush=%.0fus enc=%.0fus tcp=%.0fus rtt=%.0fus dec=%.0fus sz=%zu",
+            " time: flush=%lluus enc=%.0fus tcp=%.0fus rtt=%lluus dec=%lluus sz=%zu",
             seqId,
             mappedCount, shadowCount, shadowTotal / (1024*1024),
             bdaRecorded_.size(), bdaCache.size(),
             imageFormats.size(), imageMemSizes.size(),
             bufferSizes.size(), bufferBindings.size(),
-            g_icd.lastFlushMs_ * 1000.0, encUs, tcpUs,
-            g_icd.lastRoundTripMs_ * 1000.0, g_icd.lastDecompressMs_ * 1000.0, sendSize);
+            (unsigned long long)g_icd.lastFlushUs_.load(std::memory_order_relaxed),
+            encUs, tcpUs,
+            (unsigned long long)g_icd.lastRoundTripUs_.load(std::memory_order_relaxed),
+            (unsigned long long)g_icd.lastDecompressUs_.load(std::memory_order_relaxed),
+            sendSize);
         icdDbg(diag);
         // Stale descriptor set census
         uint32_t staleAge = seqId > 300 ? seqId - 300 : 0;
-        size_t staleCount = 0;
-        for (auto& [id, lastSeq] : g_icd.descSetLastSeen_)
-            if (lastSeq < staleAge) staleCount++;
+        size_t staleCount = 0, totalCount = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_icd.descSetSeenMutex_);
+            totalCount = g_icd.descSetLastSeen_.size();
+            for (auto& [id, lastSeq] : g_icd.descSetLastSeen_)
+                if (lastSeq < staleAge) staleCount++;
+        }
         snprintf(diag, sizeof(diag),
             "[ICD-DIAG-stale seq=%u] descSets: total=%zu stale(>300)=%zu",
-            seqId, g_icd.descSetLastSeen_.size(), staleCount);
+            seqId, totalCount, staleCount);
         icdDbg(diag);
     }
     return true;
@@ -510,7 +521,7 @@ void IcdState::recvLoop() {
         uint64_t tRecv = rtNowUs();
         // Track round-trip time for DIAG (always on, not just VBOXGPU_TIMING)
         if (batchSendTs > 0)
-            g_icd.lastRoundTripMs_ = (double)(tRecv - batchSendTs) / 1000.0;
+            g_icd.lastRoundTripUs_.store(tRecv - batchSendTs, std::memory_order_relaxed);
 #if VBOXGPU_TIMING
         RT_LOG(batchSeqId, "T7", "recv %zu bytes, wait=%.2fms",
                n, (tRecv - batchSendTs) / 1000.0);
@@ -536,10 +547,11 @@ void IcdState::recvLoop() {
                     reinterpret_cast<char*>(pixels.data()),
                     compressedSz, rawSize);
                 if (dec == (int)rawSize) {
-                    g_icd.lastDecompressMs_ = (double)(rtNowUs() - tDecompStart) / 1000.0;
+                    g_icd.lastDecompressUs_.store(rtNowUs() - tDecompStart, std::memory_order_relaxed);
 #if VBOXGPU_TIMING
                     RT_LOG(batchSeqId, "T8", "decompress %.2fms (%u->%u)",
-                           g_icd.lastDecompressMs_, compressedSz, rawSize);
+                           g_icd.lastDecompressUs_.load(std::memory_order_relaxed) / 1000.0,
+                           compressedSz, rawSize);
 #endif
                     framePixels = std::move(pixels);
                     frameWidth = w;
@@ -1660,6 +1672,7 @@ static VkResult VKAPI_CALL icd_vkCreateSwapchainKHR(
         g_icd.imageIndexReady_ = false;
     }
     g_icd.firstPresented_ = false;
+    g_icd.acquireNextIdx_ = 0;
 
     // Tell host to create swapchain
     g_icd.encoder.cmdBridgeCreateSwapchain(1, id,
@@ -1699,10 +1712,11 @@ static VkResult VKAPI_CALL icd_vkAcquireNextImageKHR(
             return g_icd.pendingResponseQueue_.size() < MAX_IN_FLIGHT;
         });
     }
-    // Rotating local index — not tied to host's currentImageIndex
-    static uint32_t nextIdx = 0;
-    *pIndex = nextIdx;
-    nextIdx = (nextIdx + 1) % g_icd.swapchainImageCount;
+    // Rotating local index — not tied to host's currentImageIndex.
+    // Stored on IcdState (not function-local static) so multi-swapchain
+    // rebinds restart from 0 with the swapchain.
+    *pIndex = g_icd.acquireNextIdx_;
+    g_icd.acquireNextIdx_ = (g_icd.acquireNextIdx_ + 1) % g_icd.swapchainImageCount;
     // Clear per-frame buffer flush dedup set
     {
         std::lock_guard<std::mutex> lk(g_icd.flushedBuffersMutex_);
@@ -2263,7 +2277,7 @@ static VkResult VKAPI_CALL icd_vkQueueSubmit(VkQueue q, uint32_t count, const Vk
     ENC_LOCK;
     uint64_t tFlush0 = rtNowUs();
     g_icd.flushMappedMemory();
-    g_icd.lastFlushMs_ = (double)(rtNowUs() - tFlush0) / 1000.0;
+    g_icd.lastFlushUs_.store(rtNowUs() - tFlush0, std::memory_order_relaxed);
     for (uint32_t i = 0; i < count; i++) {
         uint32_t cbCount = pSubmits[i].commandBufferCount;
         uint64_t waitSem = pSubmits[i].waitSemaphoreCount > 0 ? (uint64_t)pSubmits[i].pWaitSemaphores[0] : 0;
@@ -2292,7 +2306,7 @@ static VkResult VKAPI_CALL icd_vkQueueSubmit2(VkQueue q, uint32_t count, const V
     ENC_LOCK;
     uint64_t tFlush0 = rtNowUs();
     g_icd.flushMappedMemory();
-    g_icd.lastFlushMs_ = (double)(rtNowUs() - tFlush0) / 1000.0;
+    g_icd.lastFlushUs_.store(rtNowUs() - tFlush0, std::memory_order_relaxed);
     for (uint32_t i = 0; i < count; i++) {
         uint32_t cbCount = pSubmits[i].commandBufferInfoCount;
         uint64_t waitSem = pSubmits[i].waitSemaphoreInfoCount > 0 ? (uint64_t)pSubmits[i].pWaitSemaphoreInfos[0].semaphore : 0;
@@ -2686,11 +2700,24 @@ static void VKAPI_CALL icd_vkDestroyDescriptorPool(VkDevice, VkDescriptorPool v,
         std::lock_guard<std::mutex> lock(g_icd.descPoolMutex_);
         g_icd.descriptorPoolIds_.erase(poolId);
     }
+    {
+        // Pool destruction invalidates all sets allocated from it. Clear the
+        // diagnostic map to avoid unbounded growth over a long session.
+        // Over-broad (also clears entries from other pools) but simpler than
+        // a side setId→poolId map; diag accuracy is non-critical.
+        std::lock_guard<std::mutex> lock(g_icd.descSetSeenMutex_);
+        g_icd.descSetLastSeen_.clear();
+    }
     g_icd.encoder.cmdDestroyDescriptorPool(1, poolId);
 }
 static VkResult VKAPI_CALL icd_vkResetDescriptorPool(VkDevice, VkDescriptorPool pool, VkDescriptorPoolResetFlags flags) {
     ENC_LOCK;
     g_icd.encoder.cmdBridgeResetDescriptorPool((uint64_t)pool, (uint32_t)flags);
+    {
+        // Same as DestroyDescriptorPool — sets are invalidated.
+        std::lock_guard<std::mutex> lock(g_icd.descSetSeenMutex_);
+        g_icd.descSetLastSeen_.clear();
+    }
     return VK_SUCCESS;
 }
 
@@ -2702,8 +2729,6 @@ static VkResult VKAPI_CALL icd_vkAllocateDescriptorSets(VkDevice, const VkDescri
         p[i] = (VkDescriptorSet)setIds[i];
         layoutIds[i] = (uint64_t)pInfo->pSetLayouts[i];
     }
-    fprintf(stderr, "[ICD] AllocateDescriptorSets: pool=%llu count=%u\n",
-            (unsigned long long)(uint64_t)pInfo->descriptorPool, pInfo->descriptorSetCount);
     g_icd.encoder.cmdAllocateDescriptorSets(1, (uint64_t)pInfo->descriptorPool,
         pInfo->descriptorSetCount, layoutIds.data(), setIds.data());
 
@@ -2714,6 +2739,14 @@ static VkResult VKAPI_CALL icd_vkFreeDescriptorSets(VkDevice, VkDescriptorPool p
         std::vector<uint64_t> setIds(count);
         for (uint32_t i = 0; i < count; i++)
             setIds[i] = (uint64_t)pSets[i];
+        // Erase in its own scope (released before ENC_LOCK) so we never hold
+        // descSetSeenMutex_ + encoder.mutex_ together. The DIAG path takes
+        // them in order encoder→descSeen; this path takes only one at a time.
+        {
+            std::lock_guard<std::mutex> lock(g_icd.descSetSeenMutex_);
+            for (uint32_t i = 0; i < count; i++)
+                g_icd.descSetLastSeen_.erase(setIds[i]);
+        }
         ENC_LOCK;
         g_icd.encoder.cmdBridgeFreeDescriptorSets((uint64_t)pool, count, setIds.data());
     }
@@ -2763,9 +2796,15 @@ static void VKAPI_CALL icd_vkDestroyPipelineCache(VkDevice, VkPipelineCache, con
 static void VKAPI_CALL icd_vkCmdBindDescriptorSets(VkCommandBuffer cb, VkPipelineBindPoint bindPoint, VkPipelineLayout layout,
     uint32_t firstSet, uint32_t setCount, const VkDescriptorSet* pSets, uint32_t dynOffCount, const uint32_t* pDynOff) {
     std::vector<uint64_t> setIds(setCount);
-    for (uint32_t i = 0; i < setCount; i++) {
+    for (uint32_t i = 0; i < setCount; i++)
         setIds[i] = (uint64_t)pSets[i];
-        g_icd.descSetLastSeen_[setIds[i]] = g_icd.nextSeqId_; // track last-use frame
+    {
+        // Diagnostic last-use stamp; concurrent BindDescriptorSets calls from
+        // DXVK threads serialize through descSetSeenMutex_.
+        std::lock_guard<std::mutex> lock(g_icd.descSetSeenMutex_);
+        uint32_t seq = g_icd.nextSeqId_;
+        for (uint32_t i = 0; i < setCount; i++)
+            g_icd.descSetLastSeen_[setIds[i]] = seq;
     }
     g_icd.encoder.cmdBindDescriptorSets(toId(cb), bindPoint, (uint64_t)layout,
         firstSet, setCount, setIds.data(), dynOffCount, pDynOff);
