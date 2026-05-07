@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <chrono>
+#include <ctime>
 
 
 #include "../../common/timing.h"
@@ -133,6 +134,18 @@ void ClientSession::compressLoop() {
     }
 }
 
+// Both Start/Stop are called from the dashboard window thread. They MUST NOT
+// touch dbgRecordFile_ directly — that's worker-thread-owned. They only flip
+// the atomic flag; the worker observes it on the next batch and does the
+// open/close itself.
+void ClientSession::startRecording() {
+    dbgRecordRequested_.store(true, std::memory_order_release);
+}
+
+void ClientSession::stopRecording() {
+    dbgRecordRequested_.store(false, std::memory_order_release);
+}
+
 void ClientSession::workerLoop() {
     // Create window + Vulkan on worker thread (so DestroyWindow works on exit)
     createSessionWindow();
@@ -172,6 +185,40 @@ void ClientSession::workerLoop() {
             fwrite(&sz, sizeof(sz), 1, dumpFile_);
             fwrite(recvBuf.data(), 1, bytesRead, dumpFile_);
             fflush(dumpFile_);
+        }
+        // On-demand recording: react to flag transitions from dashboard thread.
+        // Worker thread exclusively owns dbgRecordFile_ — no cross-thread races.
+        bool wantRec = dbgRecordRequested_.load(std::memory_order_acquire);
+        if (wantRec && !dbgRecordFile_) {
+            CreateDirectoryA("S:\\bld\\vboxgpu\\recordings", nullptr); // ignore EXISTS
+            char path[512];
+            snprintf(path, sizeof(path),
+                     "S:\\bld\\vboxgpu\\recordings\\rec_S%d_N%d_T%lld.bin",
+                     id_, dbgRecordIdx_ + 1, (long long)time(nullptr));
+            dbgRecordFile_ = fopen(path, "wb");
+            if (dbgRecordFile_) {
+                ++dbgRecordIdx_;
+                dbgRecordBatchCount_ = 0;
+                fprintf(stderr, "[Session %d] Record START: %s\n", id_, path);
+            } else {
+                fprintf(stderr, "[Session %d] Record START FAILED: %s (errno=%d)\n",
+                        id_, path, errno);
+                // Drop request to avoid retry storm; user can click Start again.
+                dbgRecordRequested_.store(false, std::memory_order_release);
+            }
+        } else if (!wantRec && dbgRecordFile_) {
+            fclose(dbgRecordFile_);
+            dbgRecordFile_ = nullptr;
+            fprintf(stderr, "[Session %d] Record STOP (%llu batches)\n", id_,
+                    (unsigned long long)dbgRecordBatchCount_);
+            dbgRecordBatchCount_ = 0;
+        }
+        if (dbgRecordFile_) {
+            uint32_t sz = static_cast<uint32_t>(bytesRead);
+            fwrite(&sz, sizeof(sz), 1, dbgRecordFile_);
+            fwrite(recvBuf.data(), 1, bytesRead, dbgRecordFile_);
+            fflush(dbgRecordFile_);
+            dbgRecordBatchCount_++;
         }
 
 #if VBOXGPU_TIMING
@@ -303,6 +350,7 @@ void ClientSession::workerLoop() {
     // Cleanup
     running_ = false;
     if (dumpFile_) { fclose(dumpFile_); dumpFile_ = nullptr; }
+    if (dbgRecordFile_) { fclose(dbgRecordFile_); dbgRecordFile_ = nullptr; }
     decoder_.cleanup();
     if (clientSock_ != INVALID_SOCKET) {
         closesocket(clientSock_);

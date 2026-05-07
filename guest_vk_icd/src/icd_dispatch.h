@@ -78,6 +78,12 @@ struct IcdState {
         std::vector<VkDescriptorUpdateTemplateEntry> entries;
     };
     std::unordered_map<uint64_t, DescriptorTemplateInfo> descriptorTemplates;
+    std::unordered_set<uint64_t> descriptorPoolIds_; // tracked for cleanup on DestroyDevice
+    std::mutex descPoolMutex_;
+    double lastFlushMs_ = 0; // flushMappedMemory time from last QueueSubmit
+    std::unordered_map<uint64_t, uint32_t> descSetLastSeen_; // setId → last frame seqId
+    double lastRoundTripMs_ = 0; // last recvLoop round-trip (send→recv)
+    double lastDecompressMs_ = 0; // last LZ4 decompress time
 
     // Mapped memory tracking: guest shadow memory for host-visible regions
     struct MappedRegion {

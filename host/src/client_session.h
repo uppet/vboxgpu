@@ -36,6 +36,9 @@ public:
     void join();
     int id() const { return id_; }
     HWND hwnd() const { return hwnd_; }
+    void startRecording();
+    void stopRecording();
+    bool isRecording() const { return dbgRecordRequested_.load(std::memory_order_acquire); }
 
 private:
     void workerLoop();
@@ -49,6 +52,13 @@ private:
     std::vector<ReplayBatch> replayBatches_;
     const char* saveFramesDir_ = nullptr;
     FILE* dumpFile_ = nullptr;  // record command stream (owned, session closes)
+    // Toggleable on-demand recording. The worker thread owns dbgRecordFile_
+    // exclusively; main thread only flips dbgRecordRequested_. Worker opens/
+    // closes the file on transitions, eliminating cross-thread file ops.
+    std::atomic<bool> dbgRecordRequested_{false};
+    FILE* dbgRecordFile_ = nullptr;       // worker-thread only
+    int dbgRecordIdx_ = 0;                // worker-thread only
+    uint64_t dbgRecordBatchCount_ = 0;    // worker-thread only
     VkPhysicalDevice physDevice_;
     VkInstance instance_;
     HINSTANCE hInstance_;

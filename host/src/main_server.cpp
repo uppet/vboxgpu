@@ -63,6 +63,8 @@ static int g_totalConnections = 0;
 static DWORD g_startTime = 0;
 #define WM_REFRESH_DASHBOARD (WM_USER + 1)
 #define IDC_HIDE_WINDOWS 101
+#define IDC_RECORD_START 102
+#define IDC_RECORD_STOP  103
 static bool g_cloakWindows = false;
 
 static void applyCloakToSessions(bool cloak) {
@@ -84,16 +86,52 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
             10, 260, 200, 24, hwnd, (HMENU)IDC_HIDE_WINDOWS,
             ((LPCREATESTRUCT)lParam)->hInstance, nullptr);
+        CreateWindowExA(0, "BUTTON", "Start Record",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            220, 260, 90, 24, hwnd, (HMENU)IDC_RECORD_START,
+            ((LPCREATESTRUCT)lParam)->hInstance, nullptr);
+        CreateWindowExA(0, "BUTTON", "Stop Record",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            315, 260, 90, 24, hwnd, (HMENU)IDC_RECORD_STOP,
+            ((LPCREATESTRUCT)lParam)->hInstance, nullptr);
         return 0;
     case WM_COMMAND:
         if (LOWORD(wParam) == IDC_HIDE_WINDOWS) {
             bool checked = (SendDlgItemMessageA(hwnd, IDC_HIDE_WINDOWS, BM_GETCHECK, 0, 0) == BST_CHECKED);
             applyCloakToSessions(checked);
+        } else if (LOWORD(wParam) == IDC_RECORD_START) {
+            if (g_sessions) {
+                for (auto& s : *g_sessions) {
+                    if (s && s->isRunning() && !s->isReplay())
+                        s->startRecording();
+                }
+            }
+        } else if (LOWORD(wParam) == IDC_RECORD_STOP) {
+            if (g_sessions) {
+                for (auto& s : *g_sessions) {
+                    if (s && s->isRunning() && !s->isReplay())
+                        s->stopRecording();
+                }
+            }
         }
         return 0;
-    case WM_TIMER:
+    case WM_TIMER: {
+        // Mirror current recording state into Start/Stop button enable state so
+        // the UI shows which action is meaningful right now.
+        bool anyRec = false, anyLive = false;
+        if (g_sessions) {
+            for (auto& s : *g_sessions) {
+                if (s && s->isRunning() && !s->isReplay()) {
+                    anyLive = true;
+                    if (s->isRecording()) anyRec = true;
+                }
+            }
+        }
+        EnableWindow(GetDlgItem(hwnd, IDC_RECORD_START), anyLive && !anyRec);
+        EnableWindow(GetDlgItem(hwnd, IDC_RECORD_STOP),  anyLive && anyRec);
         InvalidateRect(hwnd, nullptr, TRUE);
         return 0;
+    }
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
@@ -135,18 +173,32 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         TextOutA(hdc, 10, y, buf, (int)strlen(buf)); y += 24;
 
         // Per-session list
+        bool anyRecording = false;
         if (g_sessions) {
             for (auto& s : *g_sessions) {
                 if (!s) continue;
-                snprintf(buf, sizeof(buf), "  [%d] %s%s",
+                bool rec = s->isRunning() && s->isRecording();
+                if (rec) anyRecording = true;
+                snprintf(buf, sizeof(buf), "  [%d] %s%s%s",
                          s->id(),
                          s->isRunning() ? "ACTIVE" : "ended",
-                         s->isReplay() ? " (replay)" : "");
-                SetTextColor(hdc, s->isRunning() ? RGB(0, 128, 0) : RGB(128, 128, 128));
+                         s->isReplay() ? " (replay)" : "",
+                         rec ? "  [* REC]" : "");
+                if (rec)             SetTextColor(hdc, RGB(192, 0, 0));
+                else if (s->isRunning()) SetTextColor(hdc, RGB(0, 128, 0));
+                else                 SetTextColor(hdc, RGB(128, 128, 128));
                 TextOutA(hdc, 10, y, buf, (int)strlen(buf)); y += 18;
             }
         }
         SetTextColor(hdc, RGB(0, 0, 0));
+
+        // Global recording indicator next to the buttons (button row is y=260)
+        if (anyRecording) {
+            SetTextColor(hdc, RGB(192, 0, 0));
+            const char* recMsg = "REC -> S:\\bld\\vboxgpu\\recordings\\";
+            TextOutA(hdc, 415, 264, recMsg, (int)strlen(recMsg));
+            SetTextColor(hdc, RGB(0, 0, 0));
+        }
 
         y += 10;
         snprintf(buf, sizeof(buf), "ESC or close window to shutdown");
