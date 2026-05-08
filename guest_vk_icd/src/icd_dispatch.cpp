@@ -403,6 +403,11 @@ void IcdState::flushMappedMemory() {
 #endif
 }
 
+// Forward declarations for counted stub infrastructure (defined near lookupFunc)
+#define STUB_SLOTS 128
+extern std::atomic<uint64_t> s_stubCounts[STUB_SLOTS];
+extern const char*           s_stubNames[STUB_SLOTS];
+
 bool IcdState::sendBatchLocked(bool isPresent) {
     ICD_TRACE1("sendBatch", isPresent ? 1 : 0);
     // Caller MUST hold encoder.mutex_
@@ -473,6 +478,15 @@ bool IcdState::sendBatchLocked(bool isPresent) {
             "[ICD-DIAG-stale seq=%u] descSets: total=%zu stale(>300)=%zu",
             seqId, totalCount, staleCount);
         icdDbg(diag);
+        // Stub function census — print any stub that has been called since last dump
+        for (int i = 0; i < STUB_SLOTS; i++) {
+            uint64_t n = s_stubCounts[i].load(std::memory_order_relaxed);
+            if (n == 0) continue;
+            const char* fnName = s_stubNames[i] ? s_stubNames[i] : "?";
+            snprintf(diag, sizeof(diag),
+                "[ICD-DIAG-stub seq=%u] %s: %llu", seqId, fnName, (unsigned long long)n);
+            icdDbg(diag);
+        }
     }
     return true;
 }
@@ -3400,6 +3414,8 @@ static void VKAPI_CALL icd_vkCmdSetEvent(VkCommandBuffer, VkEvent, VkPipelineSta
 static void VKAPI_CALL icd_vkCmdResetEvent(VkCommandBuffer, VkEvent, VkPipelineStageFlags) {}
 static void VKAPI_CALL icd_vkCmdSetEvent2(VkCommandBuffer, VkEvent, const VkDependencyInfo*) {}
 static void VKAPI_CALL icd_vkCmdResetEvent2(VkCommandBuffer, VkEvent, VkPipelineStageFlags2) {}
+static void VKAPI_CALL icd_vkCmdWaitEvents(VkCommandBuffer, uint32_t, const VkEvent*, VkPipelineStageFlags, VkPipelineStageFlags, uint32_t, const VkMemoryBarrier*, uint32_t, const VkBufferMemoryBarrier*, uint32_t, const VkImageMemoryBarrier*) {}
+static void VKAPI_CALL icd_vkCmdWaitEvents2(VkCommandBuffer, uint32_t, const VkEvent*, const VkDependencyInfo*) {}
 static void VKAPI_CALL icd_vkCmdWriteTimestamp(VkCommandBuffer, VkPipelineStageFlagBits, VkQueryPool, uint32_t) {}
 static void VKAPI_CALL icd_vkCmdWriteTimestamp2(VkCommandBuffer, VkPipelineStageFlags2, VkQueryPool, uint32_t) {}
 static void VKAPI_CALL icd_vkCmdBeginQuery(VkCommandBuffer, VkQueryPool, uint32_t, VkQueryControlFlags) {}
@@ -3413,6 +3429,10 @@ static VkResult VKAPI_CALL icd_vkCreateEvent(VkDevice, const VkEventCreateInfo*,
     *p = (VkEvent)g_icd.handles.alloc(); return VK_SUCCESS;
 }
 static void VKAPI_CALL icd_vkDestroyEvent(VkDevice, VkEvent, const VkAllocationCallbacks*) {}
+static VkResult VKAPI_CALL icd_vkSetEvent(VkDevice, VkEvent) { return VK_SUCCESS; }
+static VkResult VKAPI_CALL icd_vkResetEvent(VkDevice, VkEvent) { return VK_SUCCESS; }
+static VkResult VKAPI_CALL icd_vkGetEventStatus(VkDevice, VkEvent) { return VK_EVENT_SET; }
+static VkResult VKAPI_CALL icd_vkGetEventStatusKHR(VkDevice, VkEvent) { return VK_EVENT_SET; }
 static VkResult VKAPI_CALL icd_vkCreateQueryPool(VkDevice, const VkQueryPoolCreateInfo*, const VkAllocationCallbacks*, VkQueryPool* p) {
     *p = (VkQueryPool)g_icd.handles.alloc(); return VK_SUCCESS;
 }
@@ -3827,6 +3847,10 @@ static const FuncEntry g_funcTable[] = {
     // Sync
     ENTRY(vkCreateSemaphore),
     ENTRY(vkDestroySemaphore),
+    ENTRY(vkCreateEvent),     ENTRY(vkDestroyEvent),
+    ENTRY(vkSetEvent),        ENTRY(vkResetEvent),
+    ENTRY(vkGetEventStatus),  ENTRY(vkGetEventStatusKHR),
+    ENTRY(vkCmdWaitEvents),   ENTRY(vkCmdWaitEvents2),
     ENTRY(vkCreateFence),
     ENTRY(vkDestroyFence),
     ENTRY(vkWaitForFences),
@@ -3850,9 +3874,7 @@ static const FuncEntry g_funcTable[] = {
     ENTRY(vkGetPhysicalDeviceSurfacePresentModes2EXT),
     ENTRY(vkReleaseSwapchainImagesEXT),
 
-    // Event / Query
-    ENTRY(vkCreateEvent),
-    ENTRY(vkDestroyEvent),
+    // Event / Query (core entries above at Sync section)
     ENTRY(vkCreateQueryPool),
     ENTRY(vkDestroyQueryPool),
     ENTRY(vkGetQueryPoolResults),
@@ -3883,11 +3905,63 @@ static VkResult VKAPI_CALL icd_vkGetImageViewAddressNVX(VkDevice, VkImageView vi
     return VK_SUCCESS;
 }
 
-static VkResult VKAPI_CALL icd_generic_stub() {
-    // Intentionally silent — this stub may be called thousands of times per frame
-    // by DXVK's hot paths. fprintf here causes massive stderr lock contention.
-    return VK_SUCCESS;
-}
+// --- Counted stub functions: 128 pre-generated, each with its own atomic counter ---
+// Each stub increments its counter and returns VK_SUCCESS. lookupFunc assigns
+// one index per unique unimplemented function name. Diagnostic dump prints
+// non-zero counts every 300 frames to reveal which stubs DXVK is hitting.
+std::atomic<uint64_t> s_stubCounts[STUB_SLOTS]{};
+const char*           s_stubNames[STUB_SLOTS]{};
+static std::atomic<int>      s_stubNextIdx{0};
+
+// Counted stub functions stub_0() through stub_127().
+// C preprocessor ## cannot evaluate arithmetic before token-paste, so we
+// expand each literal explicitly in groups of 8.
+#define STUB(N) static VkResult VKAPI_CALL stub_##N() { s_stubCounts[N]++; return VK_SUCCESS; }
+// clang-format off
+STUB(  0) STUB(  1) STUB(  2) STUB(  3) STUB(  4) STUB(  5) STUB(  6) STUB(  7)
+STUB(  8) STUB(  9) STUB( 10) STUB( 11) STUB( 12) STUB( 13) STUB( 14) STUB( 15)
+STUB( 16) STUB( 17) STUB( 18) STUB( 19) STUB( 20) STUB( 21) STUB( 22) STUB( 23)
+STUB( 24) STUB( 25) STUB( 26) STUB( 27) STUB( 28) STUB( 29) STUB( 30) STUB( 31)
+STUB( 32) STUB( 33) STUB( 34) STUB( 35) STUB( 36) STUB( 37) STUB( 38) STUB( 39)
+STUB( 40) STUB( 41) STUB( 42) STUB( 43) STUB( 44) STUB( 45) STUB( 46) STUB( 47)
+STUB( 48) STUB( 49) STUB( 50) STUB( 51) STUB( 52) STUB( 53) STUB( 54) STUB( 55)
+STUB( 56) STUB( 57) STUB( 58) STUB( 59) STUB( 60) STUB( 61) STUB( 62) STUB( 63)
+STUB( 64) STUB( 65) STUB( 66) STUB( 67) STUB( 68) STUB( 69) STUB( 70) STUB( 71)
+STUB( 72) STUB( 73) STUB( 74) STUB( 75) STUB( 76) STUB( 77) STUB( 78) STUB( 79)
+STUB( 80) STUB( 81) STUB( 82) STUB( 83) STUB( 84) STUB( 85) STUB( 86) STUB( 87)
+STUB( 88) STUB( 89) STUB( 90) STUB( 91) STUB( 92) STUB( 93) STUB( 94) STUB( 95)
+STUB( 96) STUB( 97) STUB( 98) STUB( 99) STUB(100) STUB(101) STUB(102) STUB(103)
+STUB(104) STUB(105) STUB(106) STUB(107) STUB(108) STUB(109) STUB(110) STUB(111)
+STUB(112) STUB(113) STUB(114) STUB(115) STUB(116) STUB(117) STUB(118) STUB(119)
+STUB(120) STUB(121) STUB(122) STUB(123) STUB(124) STUB(125) STUB(126) STUB(127)
+// clang-format on
+#undef STUB
+
+static PFN_vkVoidFunction s_stubTable[STUB_SLOTS] = {
+// clang-format off
+#define P(N) reinterpret_cast<PFN_vkVoidFunction>(stub_##N),
+P(  0) P(  1) P(  2) P(  3) P(  4) P(  5) P(  6) P(  7)
+P(  8) P(  9) P( 10) P( 11) P( 12) P( 13) P( 14) P( 15)
+P( 16) P( 17) P( 18) P( 19) P( 20) P( 21) P( 22) P( 23)
+P( 24) P( 25) P( 26) P( 27) P( 28) P( 29) P( 30) P( 31)
+P( 32) P( 33) P( 34) P( 35) P( 36) P( 37) P( 38) P( 39)
+P( 40) P( 41) P( 42) P( 43) P( 44) P( 45) P( 46) P( 47)
+P( 48) P( 49) P( 50) P( 51) P( 52) P( 53) P( 54) P( 55)
+P( 56) P( 57) P( 58) P( 59) P( 60) P( 61) P( 62) P( 63)
+P( 64) P( 65) P( 66) P( 67) P( 68) P( 69) P( 70) P( 71)
+P( 72) P( 73) P( 74) P( 75) P( 76) P( 77) P( 78) P( 79)
+P( 80) P( 81) P( 82) P( 83) P( 84) P( 85) P( 86) P( 87)
+P( 88) P( 89) P( 90) P( 91) P( 92) P( 93) P( 94) P( 95)
+P( 96) P( 97) P( 98) P( 99) P(100) P(101) P(102) P(103)
+P(104) P(105) P(106) P(107) P(108) P(109) P(110) P(111)
+P(112) P(113) P(114) P(115) P(116) P(117) P(118) P(119)
+P(120) P(121) P(122) P(123) P(124) P(125) P(126) P(127)
+// clang-format on
+#undef P
+};
+
+// Fallback stub for when STUB_SLOTS is exhausted (extremely unlikely)
+static VkResult VKAPI_CALL stub_overflow() { return VK_SUCCESS; }
 
 static PFN_vkVoidFunction lookupFunc(const char* pName) {
     for (const auto& e : g_funcTable) {
@@ -3896,7 +3970,6 @@ static PFN_vkVoidFunction lookupFunc(const char* pName) {
     }
 
     // Try stripping KHR/EXT suffix and look up core version
-    // e.g. "vkGetPhysicalDeviceFeatures2KHR" → "vkGetPhysicalDeviceFeatures2"
     std::string name(pName);
     for (const char* suffix : {"KHR", "EXT"}) {
         size_t slen = strlen(suffix);
@@ -3909,8 +3982,7 @@ static PFN_vkVoidFunction lookupFunc(const char* pName) {
         }
     }
 
-    // Instance-level query functions: return nullptr (DXVK checks null = unsupported extension)
-    // Device-level functions: return stub to prevent crashes during device init
+    // Instance-level query functions: return nullptr
     static const char* nullPrefixes[] = {
         "vkEnumeratePhysicalDevice",
         "vkGetPhysicalDeviceDisplay", "vkGetPhysicalDeviceVideo",
@@ -3921,7 +3993,6 @@ static PFN_vkVoidFunction lookupFunc(const char* pName) {
         "vkGetPhysicalDeviceSupported",
         "vkCreateDisplay", "vkCreateHeadless",
         "vkAcquireDrm", "vkAcquireWinrt",
-        // Host image copy (Vulkan 1.4) — not supported, force DXVK to use CmdCopyBufferToImage
         "vkCopyMemoryToImage", "vkCopyImageToMemory", "vkCopyImageToImage",
         "vkTransitionImageLayout",
         nullptr
@@ -3931,9 +4002,18 @@ static PFN_vkVoidFunction lookupFunc(const char* pName) {
             return nullptr;
     }
 
-    // Everything else: return stub (VK_SUCCESS / no-op)
-    icdDbg((std::string("[ICD] Stubbed: ") + pName).c_str());
-    return reinterpret_cast<PFN_vkVoidFunction>(icd_generic_stub);
+    // vkGetEventStatus: DXVK polls this in a busy loop. The g_funcTable
+    // ENTRY now resolves it to icd_vkGetEventStatus which returns VK_EVENT_SET.
+    // This check is a safety net in case the KHR suffix fallback doesn't match.
+
+    // Allocate a counted stub slot for this function name
+    int idx = s_stubNextIdx.fetch_add(1, std::memory_order_relaxed);
+    if (idx < STUB_SLOTS) {
+        s_stubNames[idx] = _strdup(pName);
+        return s_stubTable[idx];
+    }
+    icdDbg((std::string("[ICD] Stub overflow: ") + pName).c_str());
+    return reinterpret_cast<PFN_vkVoidFunction>(stub_overflow);
 }
 
 // --- ICD entry points ---
