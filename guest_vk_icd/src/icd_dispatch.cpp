@@ -1730,7 +1730,16 @@ static VkResult VKAPI_CALL icd_vkCreateSwapchainKHR(
     return VK_SUCCESS;
 }
 
-static void VKAPI_CALL icd_vkDestroySwapchainKHR(VkDevice, VkSwapchainKHR, const VkAllocationCallbacks*) {}
+static void VKAPI_CALL icd_vkDestroySwapchainKHR(VkDevice, VkSwapchainKHR sc, const VkAllocationCallbacks*) {
+    if (!sc) return;
+    // A1.5a: forward destroy to host so it can release VkSwapchainKHR + sentinel
+    // images + image views. Without this, every guest-side resolution change
+    // leaks one swapchain on host (driver still references), and reverse swap-
+    // chain images (0xFFF00000+i) get clobbered in images_ map but the old
+    // VkImage handles stay live — driver internal resource pressure grows.
+    ENC_LOCK;
+    g_icd.encoder.cmdBridgeDestroySwapchain((uint64_t)sc);
+}
 
 static VkResult VKAPI_CALL icd_vkGetSwapchainImagesKHR(
     VkDevice, VkSwapchainKHR, uint32_t* pCount, VkImage* pImages)

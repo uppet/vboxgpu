@@ -186,6 +186,7 @@ private:
     void handleFreeMemory(VnStreamReader& r);
 
     void handleBridgeCreateSwapchain(VnStreamReader& r);
+    void handleBridgeDestroySwapchain(VnStreamReader& r);
     void handleBridgeAcquireNextImage(VnStreamReader& r);
     void handleBridgeQueuePresent(VnStreamReader& r);
     void handleGetBufferDeviceAddress(VnStreamReader& r);

@@ -122,6 +122,7 @@ enum VnCommandType : uint32_t {
     VN_CMD_BRIDGE_BeginRenderingMRT        = 0x10008,  // BeginRendering with multiple color attachments (MRT)
     VN_CMD_BRIDGE_ResetDescriptorPool      = 0x10009,  // vkResetDescriptorPool: [poolId(8)][flags(4)]
     VN_CMD_BRIDGE_FreeDescriptorSets       = 0x1000A,  // vkFreeDescriptorSets: [poolId(8)][count(4)][setId(8)]*
+    VN_CMD_BRIDGE_DestroySwapchain         = 0x1000B,  // resolution change: [swapchainId(8)] — host destroys old swapchain + sentinel images + views
     VN_CMD_BRIDGE_EndOfStream              = 0x1FFFF,
 };
 

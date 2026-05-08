@@ -1059,6 +1059,13 @@ public:
         w_.endCommand(off);
     }
 
+    void cmdBridgeDestroySwapchain(uint64_t swapchainId) {
+        ENC_GUARD;
+        auto off = w_.beginCommand(VN_CMD_BRIDGE_DestroySwapchain);
+        w_.writeU64(swapchainId);
+        w_.endCommand(off);
+    }
+
     void cmdBridgeAcquireNextImage(uint64_t swapchainId, uint64_t semaphoreId) {
         ENC_GUARD;
         auto off = w_.beginCommand(VN_CMD_BRIDGE_AcquireNextImage);

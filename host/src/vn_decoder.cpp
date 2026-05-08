@@ -324,6 +324,7 @@ void VnDecoder::dispatch(uint32_t cmdType, VnStreamReader& reader, uint32_t cmdS
     case VN_CMD_vkFreeMemory:             handleFreeMemory(reader); break;
     case VN_CMD_BRIDGE_WriteMemory:       handleWriteMemory(reader); break;
     case VN_CMD_BRIDGE_CreateSwapchain:   handleBridgeCreateSwapchain(reader); break;
+    case VN_CMD_BRIDGE_DestroySwapchain:  handleBridgeDestroySwapchain(reader); break;
     case VN_CMD_BRIDGE_AcquireNextImage:  handleBridgeAcquireNextImage(reader); break;
     case VN_CMD_BRIDGE_QueuePresent:      handleBridgeQueuePresent(reader); break;
     case VN_CMD_BRIDGE_GetBufferDeviceAddress: handleGetBufferDeviceAddress(reader); break;
@@ -3203,6 +3204,47 @@ void VnDecoder::handleBridgeCreateSwapchain(VnStreamReader& r) {
     vkResetFences(device_, 1, &acquireFence_);
 
     store(swapchains_, scId, sc);
+}
+
+void VnDecoder::handleBridgeDestroySwapchain(VnStreamReader& r) {
+    uint64_t scId = r.readU64();
+    auto it = swapchains_.find(scId);
+    if (it == swapchains_.end()) {
+        fprintf(stderr, "[Decoder] DestroySwapchain: scId=%llu NOT FOUND (already gone?)\n",
+                (unsigned long long)scId);
+        return;
+    }
+    HostSwapchain& sc = it->second;
+    fprintf(stderr, "[Decoder] DestroySwapchain: scId=%llu extent=%ux%u images=%zu\n",
+            (unsigned long long)scId, sc.extent.width, sc.extent.height, sc.images.size());
+
+    // Drain GPU before tearing down — pending submits may still reference these
+    // VkImages / imageViews. We can't selectively wait per-swapchain, so wait
+    // device-wide. This is the slow path (rare event), acceptable.
+    vkDeviceWaitIdle(device_);
+
+    // Destroy image views (we created them in handleBridgeCreateSwapchain)
+    for (VkImageView v : sc.imageViews)
+        if (v) vkDestroyImageView(device_, v, nullptr);
+
+    // Remove sentinel image entries (0xFFF00000+i). The actual VkImages are
+    // owned by VkSwapchainKHR and freed by vkDestroySwapchainKHR — only erase
+    // map slots so handleCreateImageView etc. won't resolve them.
+    for (size_t i = 0; i < sc.images.size(); i++)
+        images_.erase(0xFFF00000ull + i);
+
+    // Mark active rendering target invalid in case the immediately preceding
+    // batch was still mid-frame on this swapchain.
+    if (activeRenderingIsSwapchain_) activeRendering_ = false;
+
+    // Destroy the VkSwapchainKHR itself.
+    vkDestroySwapchainKHR(device_, sc.swapchain, nullptr);
+
+    // Reset the per-swapchain readback / present-queue state so the next
+    // CreateSwapchain starts clean.
+    lastPresentedImageIndex_ = UINT32_MAX;
+
+    swapchains_.erase(it);
 }
 
 void VnDecoder::handleBridgeAcquireNextImage(VnStreamReader& r) {
