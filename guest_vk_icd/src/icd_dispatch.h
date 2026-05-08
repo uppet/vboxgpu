@@ -176,6 +176,15 @@ struct IcdState {
     std::thread recvThread_;
     std::atomic<bool> recvRunning_{false};
 
+    // Graceful host-loss handling (Track A1).
+    // Set to true on recv failure / protocol error / long timeout. Effects:
+    //   - transport.send() returns false immediately (no send on dead socket)
+    //   - Any vkXxx entry checks this and returns VK_ERROR_DEVICE_LOST early
+    //   - Long-wait condvar predicates treat it as a wake condition
+    // No reconnect attempted: DXVK / D3D11 apps usually cannot recover from
+    // device lost. ICD's job here is to avoid zombie / hang only. Dev/test value.
+    std::atomic<bool> deviceLost_{false};
+
     // Ordered queue of send types — recv thread pops to know how to dispatch response.
     // true = present batch (signal acquireCV_), false = BDA query (signal bdaCV_).
     // Lock ordering: encoder.mutex_ → pendingQueueMutex_ (never reverse)
@@ -206,6 +215,11 @@ struct IcdState {
     void recvLoop();
     bool sendBatch(bool isPresent); // send encoder buffer; isPresent=true for QueuePresent
     bool sendBatchLocked(bool isPresent); // caller must hold encoder.mutex_
+
+    // Trigger graceful device-lost: clear pending queues, close transport, wake
+    // all blocked condvars. Idempotent — safe to call from recv thread on disconnect
+    // or from any path detecting protocol error / timeout.
+    void triggerDeviceLost(const char* reason);
 
     uint64_t syncGetBufferDeviceAddress(uint64_t bufferId);
     void blitFrameToWindow();

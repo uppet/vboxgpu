@@ -409,6 +409,7 @@ extern std::atomic<uint64_t> s_stubCounts[STUB_SLOTS];
 extern const char*           s_stubNames[STUB_SLOTS];
 
 bool IcdState::sendBatchLocked(bool isPresent) {
+    if (deviceLost_.load(std::memory_order_acquire)) return false;
     ICD_TRACE1("sendBatch", isPresent ? 1 : 0);
     // Caller MUST hold encoder.mutex_
     uint32_t seqId = nextSeqId_++;
@@ -427,6 +428,7 @@ bool IcdState::sendBatchLocked(bool isPresent) {
     encoder.w_ = VnStreamWriter();
     if (!ok) {
         icdDbg(("[ICD] sendBatch FAILED: size=" + std::to_string(sendSize) + " present=" + std::to_string((int)isPresent)).c_str());
+        triggerDeviceLost("transport.send failed");
         return false;
     }
     // Record response type — atomic with TCP send under encoder.mutex_
@@ -507,6 +509,27 @@ void IcdState::stopRecvThread() {
     if (recvThread_.joinable()) recvThread_.join();
 }
 
+void IcdState::triggerDeviceLost(const char* reason) {
+    bool expected = false;
+    if (!deviceLost_.compare_exchange_strong(expected, true))
+        return; // already triggered, idempotent
+    icdDbg((std::string("[ICD] DEVICE_LOST: ") + (reason ? reason : "?")).c_str());
+    // Close transport so any in-flight send() returns immediately.
+    transport.close();
+    // Drain pending response queue — recv thread will exit, no one will pop.
+    {
+        std::lock_guard<std::mutex> ql(pendingQueueMutex_);
+        while (!pendingResponseQueue_.empty()) pendingResponseQueue_.pop();
+    }
+    // Wake every blocked waiter so they observe deviceLost_ and bail out.
+    {
+        std::lock_guard<std::mutex> al(acquireMutex_);
+        imageIndexReady_ = true; // forces predicate to release
+    }
+    acquireCV_.notify_all();
+    bdaCV_.notify_all();
+}
+
 void IcdState::recvLoop() {
     constexpr size_t RECV_BUF_SIZE = 8 * 1024 * 1024;
     std::vector<uint8_t> recvBuf(RECV_BUF_SIZE);
@@ -514,7 +537,7 @@ void IcdState::recvLoop() {
     while (recvRunning_) {
         size_t n = transport.recv(recvBuf.data(), RECV_BUF_SIZE);
         if (n == 0) {
-            icdDbg("[ICD] recvLoop: recv returned 0, disconnected");
+            triggerDeviceLost("recv returned 0 (host disconnected)");
             break;
         }
 
@@ -660,8 +683,18 @@ uint64_t IcdState::syncGetBufferDeviceAddress(uint64_t bufferId) {
     uint64_t result = 0;
     {
         std::unique_lock<std::mutex> lock(bdaMutex_);
-        bdaCV_.wait_for(lock, std::chrono::seconds(5),
-            [this, bufferId]{ return bdaCache.count(bufferId) > 0; });
+        // Wait shortened from 5s to 2s; on timeout we treat host as dead and
+        // trigger device-lost instead of returning 0 (which silently breaks BDA-using shaders).
+        bool got = bdaCV_.wait_for(lock, std::chrono::seconds(2),
+            [this, bufferId]{
+                return deviceLost_.load() || bdaCache.count(bufferId) > 0;
+            });
+        if (!got || deviceLost_.load()) {
+            // unlock before triggering to avoid lock-order with notify path
+            lock.unlock();
+            triggerDeviceLost("BDA query timeout / host unresponsive");
+            return 0;
+        }
         auto it = bdaCache.find(bufferId);
         if (it != bdaCache.end()) result = it->second;
     }
@@ -1660,6 +1693,7 @@ static VkResult VKAPI_CALL icd_vkSetPrivateData(VkDevice, VkObjectType, uint64_t
 static void VKAPI_CALL icd_vkGetPrivateData(VkDevice, VkObjectType, uint64_t, VkPrivateDataSlot, uint64_t* p) { *p = 0; }
 
 static VkResult VKAPI_CALL icd_vkDeviceWaitIdle(VkDevice) {
+    if (g_icd.deviceLost_.load(std::memory_order_acquire)) return VK_ERROR_DEVICE_LOST;
     return VK_SUCCESS;
 }
 
@@ -1714,6 +1748,7 @@ static VkResult VKAPI_CALL icd_vkAcquireNextImageKHR(
     VkDevice, VkSwapchainKHR, uint64_t timeout, VkSemaphore, VkFence, uint32_t* pIndex)
 {
     ICD_TRACE("AcqNextImg");
+    if (g_icd.deviceLost_.load(std::memory_order_acquire)) return VK_ERROR_DEVICE_LOST;
     // Async protocol with bounded in-flight: allow up to MAX_IN_FLIGHT present
     // batches before blocking. Guest rotates imageIndex locally; host uses its
     // own currentImageIndex for rendering. Old frames are naturally skipped.
@@ -1721,10 +1756,11 @@ static VkResult VKAPI_CALL icd_vkAcquireNextImageKHR(
     if (g_icd.firstPresented_) {
         std::unique_lock<std::mutex> lock(g_icd.acquireMutex_);
         g_icd.acquireCV_.wait_for(lock, std::chrono::milliseconds(100), [&] {
-            if (!g_icd.recvRunning_) return true;
+            if (!g_icd.recvRunning_ || g_icd.deviceLost_.load()) return true;
             std::lock_guard<std::mutex> ql(g_icd.pendingQueueMutex_);
             return g_icd.pendingResponseQueue_.size() < MAX_IN_FLIGHT;
         });
+        if (g_icd.deviceLost_.load(std::memory_order_acquire)) return VK_ERROR_DEVICE_LOST;
     }
     // Rotating local index — not tied to host's currentImageIndex.
     // Stored on IcdState (not function-local static) so multi-swapchain
@@ -1742,6 +1778,7 @@ static VkResult VKAPI_CALL icd_vkAcquireNextImageKHR(
 static VkResult VKAPI_CALL icd_vkQueuePresentKHR(VkQueue q, const VkPresentInfoKHR* pInfo)
 {
     ICD_TRACE("Present");
+    if (g_icd.deviceLost_.load(std::memory_order_acquire)) return VK_ERROR_DEVICE_LOST;
     g_icd.encoder.cmdBridgeQueuePresent(2, // H_QUEUE
         ndToId((uint64_t)pInfo->pSwapchains[0]),
         pInfo->waitSemaphoreCount > 0 ? ndToId((uint64_t)pInfo->pWaitSemaphores[0]) : 0);
@@ -2264,6 +2301,7 @@ static void VKAPI_CALL icd_vkDestroyFence(VkDevice, VkFence v, const VkAllocatio
     g_icd.encoder.cmdDestroyFence(1, (uint64_t)v);
 }
 static VkResult VKAPI_CALL icd_vkWaitForFences(VkDevice, uint32_t count, const VkFence* p, VkBool32 waitAll, uint64_t timeout) {
+    if (g_icd.deviceLost_.load(std::memory_order_acquire)) return VK_ERROR_DEVICE_LOST;
     // Encode WaitForFences to be included in the next QueuePresent batch.
     // Host handles actual GPU fence synchronization; guest fences are virtual.
     // Returning VK_SUCCESS immediately is safe: guest resources (encoder buffers)
@@ -2285,6 +2323,7 @@ static VkResult VKAPI_CALL icd_vkGetFenceStatus(VkDevice, VkFence) { return VK_S
 
 static VkResult VKAPI_CALL icd_vkQueueSubmit(VkQueue q, uint32_t count, const VkSubmitInfo* pSubmits, VkFence fence) {
     ICD_TRACE("QueueSubmit");
+    if (g_icd.deviceLost_.load(std::memory_order_acquire)) return VK_ERROR_DEVICE_LOST;
     // Hold encoder lock for the entire flush+submit sequence so all WriteMemory
     // commands appear before QueueSubmit in the stream, with no interleaving
     // from other DXVK threads.
@@ -2317,6 +2356,7 @@ static VkResult VKAPI_CALL icd_vkQueueSubmit(VkQueue q, uint32_t count, const Vk
 }
 
 static VkResult VKAPI_CALL icd_vkQueueSubmit2(VkQueue q, uint32_t count, const VkSubmitInfo2* pSubmits, VkFence fence) {
+    if (g_icd.deviceLost_.load(std::memory_order_acquire)) return VK_ERROR_DEVICE_LOST;
     ENC_LOCK;
     uint64_t tFlush0 = rtNowUs();
     g_icd.flushMappedMemory();
