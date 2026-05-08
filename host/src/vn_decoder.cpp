@@ -3197,11 +3197,24 @@ void VnDecoder::handleBridgeCreateSwapchain(VnStreamReader& r) {
         store(imageViews_, scId * 100 + i + 1, sc.imageViews[i]);
     }
 
-    // Acquire first image so rendering can start immediately
-    vkAcquireNextImageKHR(device_, sc.swapchain, UINT64_MAX,
+    // Acquire first image so rendering can start immediately.
+    // Bounded timeout (2s): a stuck acquire here would block decoder thread →
+    // TCP recv stops → guest's TCP send fills → game hangs. Better to fail loud.
+    VkResult acqRes = vkAcquireNextImageKHR(device_, sc.swapchain, 2'000'000'000ull,
                           VK_NULL_HANDLE, acquireFence_, &sc.currentImageIndex);
-    vkWaitForFences(device_, 1, &acquireFence_, VK_TRUE, UINT64_MAX);
-    vkResetFences(device_, 1, &acquireFence_);
+    if (acqRes != VK_SUCCESS && acqRes != VK_SUBOPTIMAL_KHR) {
+        fprintf(stderr, "[Decoder] CreateSwapchain: initial acquire FAILED %d (size=%ux%u) — "
+                "swapchain registered but currentImageIndex=0\n",
+                (int)acqRes, sc.extent.width, sc.extent.height);
+        sc.currentImageIndex = 0;
+    } else {
+        VkResult fenceRes = vkWaitForFences(device_, 1, &acquireFence_, VK_TRUE, 2'000'000'000ull);
+        if (fenceRes != VK_SUCCESS) {
+            fprintf(stderr, "[Decoder] CreateSwapchain: acquireFence wait FAILED %d — continuing\n",
+                    (int)fenceRes);
+        }
+        vkResetFences(device_, 1, &acquireFence_);
+    }
 
     store(swapchains_, scId, sc);
 }
@@ -3218,10 +3231,27 @@ void VnDecoder::handleBridgeDestroySwapchain(VnStreamReader& r) {
     fprintf(stderr, "[Decoder] DestroySwapchain: scId=%llu extent=%ux%u images=%zu\n",
             (unsigned long long)scId, sc.extent.width, sc.extent.height, sc.images.size());
 
-    // Drain GPU before tearing down — pending submits may still reference these
-    // VkImages / imageViews. We can't selectively wait per-swapchain, so wait
-    // device-wide. This is the slow path (rare event), acceptable.
-    vkDeviceWaitIdle(device_);
+    // Drain any pending readback that targets this swapchain's images BEFORE
+    // we tear them down. The deferred slot uses readbackFences_[slot]; if we
+    // skip and just call vkDeviceWaitIdle, that's broader than needed and can
+    // hang if anything in the device is stuck (e.g. an acquire we haven't
+    // serviced). Wait queue-narrow + with bounded timeout to avoid blocking
+    // the decoder thread → TCP backpressure → guest hang.
+    if (deferredReadbackSlot_ >= 0) {
+        VkFence f = readbackFences_[deferredReadbackSlot_];
+        if (f != VK_NULL_HANDLE) {
+            VkResult rr = vkWaitForFences(device_, 1, &f, VK_TRUE, 1'000'000'000ull);
+            if (rr != VK_SUCCESS)
+                fprintf(stderr, "[Decoder] DestroySwapchain: deferred readback fence wait %d (continuing)\n", (int)rr);
+        }
+        readbackSubmitted_[deferredReadbackSlot_] = false;
+        deferredReadbackSlot_ = -1;
+    }
+    // Drain queue (narrower than vkDeviceWaitIdle, safer in error states).
+    VkResult wr = vkQueueWaitIdle(graphicsQueue_);
+    if (wr != VK_SUCCESS) {
+        fprintf(stderr, "[Decoder] DestroySwapchain: vkQueueWaitIdle %d (continuing best-effort)\n", (int)wr);
+    }
 
     // Destroy image views (we created them in handleBridgeCreateSwapchain)
     for (VkImageView v : sc.imageViews)
@@ -3243,6 +3273,7 @@ void VnDecoder::handleBridgeDestroySwapchain(VnStreamReader& r) {
     // Reset the per-swapchain readback / present-queue state so the next
     // CreateSwapchain starts clean.
     lastPresentedImageIndex_ = UINT32_MAX;
+    rbReady_ = -1;
 
     swapchains_.erase(it);
 }
